@@ -1,0 +1,58 @@
+"""
+认证路由 —— 注册 / 登录
+
+【Java 对比】
+- APIRouter ≈ @RestController
+- @router.post("/register") ≈ @PostMapping("/register")
+- Depends(get_db) ≈ 自动注入的 JdbcTemplate / EntityManager
+"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+from database import get_db
+from models.user import User
+from schemas.auth import LoginRequest, RegisterRequest, TokenResponse, UserResponse
+from services.auth import create_access_token, hash_password, verify_password
+
+router = APIRouter()
+
+
+@router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+def register(body: RegisterRequest, db: Session = Depends(get_db)):
+    """
+    用户注册
+
+    - Pydantic 已经在进入函数体前完成参数校验（长度、正则）
+    - 只需处理业务异常（用户名重复）
+    """
+    existing = db.query(User).filter(User.username == body.username).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="用户名已存在")
+
+    user = User(username=body.username, password_hash=hash_password(body.password))
+    db.add(user)
+    db.commit()
+    db.refresh(user)  # 重新加载以拿到自增 id 和 server_default 的 created_at
+    return user
+
+
+@router.post("/login", response_model=TokenResponse)
+def login(body: LoginRequest, db: Session = Depends(get_db)):
+    """
+    用户登录 —— 返回 JWT access_token
+
+    安全考虑：不区分"用户不存在"和"密码错误"，统一返回 401，
+    防止攻击者通过错误消息枚举用户名
+    """
+    user = db.query(User).filter(User.username == body.username).first()
+    if user is None or not verify_password(body.password, user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="用户名或密码错误",
+        )
+
+    token = create_access_token(user.id, user.username)
+    return TokenResponse(access_token=token)

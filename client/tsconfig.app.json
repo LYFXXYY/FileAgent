@@ -5,6 +5,12 @@
     "types": ["vite/client"],
     "allowArbitraryExtensions": true,
 
+    // 路径别名，与 vite.config.ts 的 resolve.alias 一一对应
+    // TS 5.x+ 无需 baseUrl，paths 相对本 tsconfig 所在目录解析
+    "paths": {
+      "@/*": ["./src/*"]
+    },
+
     /* Linting */
     "noUnusedLocals": true,
     "noUnusedParameters": true,

@@ -405,15 +405,15 @@ Nginx 反代：前端静态文件直接 serve，`/api/` 代理到 `127.0.0.1:800
 
 ## 9. 实现顺序
 
-1. 后端骨架：FastAPI + MySQL 连接 + 建表
-2. 认证模块：注册/登录 + JWT 中间件
-3. 提供商 CRUD + 通用 LLM 调用服务
-4. 任务 CRUD
-5. Word 读写 + diff 批注服务
-6. 上传 → 处理 → 下载 核心流程
-7. 操作日志 API
-8. 前端初始化 + 登录页 + 布局
-9. 主操作页 + 任务管理 + 提供商配置 + 日志页
+1. ✅ 后端骨架：FastAPI + MySQL 连接 + 建表
+2. ✅ 认证模块：注册/登录 + JWT 中间件
+3. ✅ 提供商 CRUD + 通用 LLM 调用服务
+4. ✅ 任务 CRUD
+5. ✅ Word 读写 + diff 批注服务
+6. ✅ 上传 → 处理 → 下载 核心流程
+7. ✅ 操作日志 API
+8. ✅ 前端初始化 + 登录页 + 布局
+9. ✅ 主操作页 + 任务管理 + 提供商配置 + 日志页
 10. 联调 + Docker 部署
 
 ---
@@ -421,7 +421,7 @@ Nginx 反代：前端静态文件直接 serve，`/api/` 代理到 `127.0.0.1:800
 ## 10. 环境变量 (.env)
 
 ```
-DATABASE_URL=mysql+pymysql://root:password@localhost:3306/fileagent
+DATABASE_URL=mysql+pymysql://root:password@localhost:3306/file_agent
 JWT_SECRET_KEY=your-secret-key-change-me
 JWT_EXPIRE_HOURS=2
 UPLOAD_DIR=uploads
