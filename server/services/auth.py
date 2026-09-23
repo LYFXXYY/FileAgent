@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import bcrypt
 from jose import JWTError, jwt
@@ -72,7 +72,7 @@ def create_access_token(user_id: int, username: str) -> str:
       username → 冗余存用户名，方便前端直接展示
       exp      → 过期时间戳（Unix seconds），过期后 decode 会自动失败
     """
-    expire = datetime.now(timezone.utc) + timedelta(hours=settings.jwt_expire_hours)
+    expire = datetime.now(UTC) + timedelta(hours=settings.jwt_expire_hours)
     payload = {
         "sub": str(user_id),
         "username": username,

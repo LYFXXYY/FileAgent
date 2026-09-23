@@ -32,10 +32,10 @@ if TYPE_CHECKING:
 # Python Enum → SQLAlchemy Enum → MySQL ENUM('pending','processing','done','failed')
 # 类比 Java 的 enum + @Enumerated(EnumType.STRING)
 class LogStatus(str, enum.Enum):
-    PENDING = "pending"        # 已上传，等待处理
+    PENDING = "pending"  # 已上传，等待处理
     PROCESSING = "processing"  # 正在调 LLM
-    DONE = "done"              # 处理完成，可下载
-    FAILED = "failed"          # 处理失败，看 error_message
+    DONE = "done"  # 处理完成，可下载
+    FAILED = "failed"  # 处理失败，看 error_message
 
 
 class OperationLog(Base):
@@ -48,8 +48,9 @@ class OperationLog(Base):
         Integer, ForeignKey("users.id"), index=True, nullable=False
     )
     # 关联的任务（可为 NULL：支持任务被删除后日志仍保留）
+    # ondelete=SET NULL：任务被删除时自动置空，日志靠 task_name 快照仍可读
     task_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("tasks.id"), nullable=True
+        Integer, ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True
     )
 
     # ---------- 任务快照 ----------
@@ -88,4 +89,6 @@ class OperationLog(Base):
     task: Mapped[Task | None] = relationship(back_populates="operation_logs")
 
     def __repr__(self) -> str:
-        return f"<OperationLog id={self.id} filename={self.original_filename!r} status={self.status}>"
+        return (
+            f"<OperationLog id={self.id} filename={self.original_filename!r} status={self.status}>"
+        )

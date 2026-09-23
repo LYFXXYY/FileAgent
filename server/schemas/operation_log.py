@@ -9,6 +9,7 @@ from models.operation_log import LogStatus
 
 class LogResponse(BaseModel):
     """日志条目（不返回 original_content/processed_content 大字段，节省带宽）"""
+
     id: int
     user_id: int
     task_id: int | None
@@ -25,6 +26,7 @@ class LogResponse(BaseModel):
 
 class LogListResponse(BaseModel):
     """分页响应"""
+
     total: int
     page: int
     page_size: int

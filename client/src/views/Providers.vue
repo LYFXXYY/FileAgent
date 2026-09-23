@@ -6,7 +6,7 @@
  * - 后端返回的 api_key 已脱敏（前 4 位 + ****），编辑时不能直接用这个值回显
  * - 编辑场景：api_key 输入框留空表示"不改动"，有值才更新
  */
-import { onMounted, reactive, ref } from 'vue'
+import { onActivated, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 
 import { extractErrorMessage } from '@/api/client'
@@ -15,6 +15,7 @@ import type { Provider, ProviderCreatePayload } from '@/api/types'
 
 const providers = ref<Provider[]>([])
 const loading = ref(false)
+const submitting = ref(false) // 防止对话框「保存」按钮重复点击
 
 const dialogVisible = ref(false)
 const dialogMode = ref<'create' | 'edit'>('create')
@@ -62,6 +63,7 @@ async function load() {
 }
 
 onMounted(load)
+onActivated(load)
 
 function openCreate() {
   dialogMode.value = 'create'
@@ -95,6 +97,7 @@ async function submit() {
   const valid = await formRef.value?.validate().catch(() => false)
   if (!valid) return
 
+  submitting.value = true
   try {
     if (dialogMode.value === 'create') {
       await providerApi.create(form)
@@ -110,6 +113,8 @@ async function submit() {
     await load()
   } catch (err) {
     ElMessage.error(extractErrorMessage(err))
+  } finally {
+    submitting.value = false
   }
 }
 
@@ -145,39 +150,72 @@ async function toggleActive(row: Provider) {
 <template>
   <div class="page">
     <div class="page-header">
-      <div>
-        <h2 class="page-title">模型提供商</h2>
-        <p class="page-subtitle">配置 OpenAI 兼容的 LLM 服务，支持豆包、通义千问、GPT 等</p>
+      <div class="page-header-content">
+        <div class="page-icon">
+          <!-- 模型提供商图标：钥匙 -->
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M21 2L19 4M11.3891 13.3912C9.82881 14.9515 7.30015 14.9515 5.73985 13.3912C4.17956 11.8309 4.17956 9.30224 5.73985 7.74195C7.30015 6.18165 9.82881 6.18165 11.3891 7.74195L19 2M19 2L22 5L18 9L15 6L19 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <div>
+          <h2 class="page-title">模型提供商</h2>
+          <p class="page-subtitle">配置 OpenAI 兼容的 LLM 服务，支持豆包、通义千问、GPT 等</p>
+        </div>
       </div>
-      <el-button type="primary" @click="openCreate">新建提供商</el-button>
+      <el-button type="primary" class="add-btn" @click="openCreate">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="vertical-align: middle; margin-right: 4px;">
+          <path d="M12 5V19M5 12H19" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        新建提供商
+      </el-button>
     </div>
 
-    <el-table v-loading="loading" :data="providers" border stripe>
-      <el-table-column prop="name" label="名称" min-width="120" />
-      <el-table-column prop="base_url" label="API 地址" min-width="240" show-overflow-tooltip />
-      <el-table-column prop="model_name" label="模型" min-width="140" />
-      <el-table-column prop="api_key_masked" label="API Key" width="140" />
-      <el-table-column label="温度" width="80">
-        <template #default="{ row }">{{ row.temperature.toFixed(2) }}</template>
-      </el-table-column>
-      <el-table-column label="启用" width="80">
-        <template #default="{ row }">
-          <el-switch v-model="row.is_active" @change="toggleActive(row)" />
-        </template>
-      </el-table-column>
-      <el-table-column label="操作" width="140" fixed="right">
-        <template #default="{ row }">
-          <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
-          <el-button link type="danger" @click="remove(row)">删除</el-button>
-        </template>
-      </el-table-column>
-    </el-table>
+    <!-- 表格卡片包裹 -->
+    <div class="table-wrapper">
+      <el-table v-loading="loading" :data="providers" stripe>
+        <el-table-column prop="name" label="名称" min-width="120">
+          <template #default="{ row }">
+            <span class="provider-name">{{ row.name }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="base_url" label="API 地址" min-width="240" show-overflow-tooltip />
+        <el-table-column prop="model_name" label="模型" min-width="140">
+          <template #default="{ row }">
+            <span class="model-tag">{{ row.model_name }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="api_key_masked" label="API Key" width="140" />
+        <el-table-column label="温度" width="80">
+          <template #default="{ row }">{{ row.temperature.toFixed(2) }}</template>
+        </el-table-column>
+        <el-table-column label="启用" width="80">
+          <template #default="{ row }">
+            <el-switch v-model="row.is_active" @change="toggleActive(row)" />
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="140" fixed="right">
+          <template #default="{ row }">
+            <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
+            <el-button link type="danger" @click="remove(row)">删除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </div>
 
+    <!-- 新建/编辑对话框 -->
     <el-dialog
       v-model="dialogVisible"
       :title="dialogMode === 'create' ? '新建提供商' : '编辑提供商'"
       width="600px"
+      class="provider-dialog"
+      @closed="formRef?.clearValidate()"
     >
+      <div class="dialog-title-bar">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M21 2L19 4M11.3891 13.3912C9.82881 14.9515 7.30015 14.9515 5.73985 13.3912C4.17956 11.8309 4.17956 9.30224 5.73985 7.74195C7.30015 6.18165 9.82881 6.18165 11.3891 7.74195L19 2M19 2L22 5L18 9L15 6L19 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span>{{ dialogMode === 'create' ? '添加新的模型提供商' : '修改提供商配置' }}</span>
+      </div>
       <el-form ref="formRef" :model="form" :rules="rules" label-width="120px">
         <el-form-item label="名称" prop="name">
           <el-input v-model="form.name" placeholder="如：豆包-pro" />
@@ -205,8 +243,117 @@ async function toggleActive(row: Provider) {
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="submit">保存</el-button>
+        <el-button type="primary" :loading="submitting" @click="submit">保存</el-button>
       </template>
     </el-dialog>
   </div>
 </template>
+
+<style scoped>
+/* 页面头部：图标 + 标题，与 Tasks.vue 保持一致 */
+.page-header-content {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+}
+
+.page-icon {
+  width: 48px;
+  height: 48px;
+  background: linear-gradient(135deg, #6366f1 0%, #a78bfa 100%);
+  color: #ffffff;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.25);
+}
+
+/* 新建按钮渐变 */
+.add-btn {
+  background: linear-gradient(135deg, #6366f1 0%, #818cf8 100%);
+  border: none;
+  transition: all 0.3s ease;
+}
+
+.add-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.35);
+}
+
+/* 表格卡片包裹：圆角 + 阴影 + 入场动画 */
+.table-wrapper {
+  background: #ffffff;
+  border-radius: 12px;
+  border: 1px solid #e4e7ed;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
+  overflow: hidden;
+  animation: fadeInUp 0.4s ease-out;
+}
+
+/* 表头渐变背景 */
+:deep(.el-table th.el-table__cell) {
+  background: linear-gradient(135deg, #f5f7fa 0%, #eef2ff 100%);
+}
+
+/* 行悬停效果 */
+:deep(.el-table .el-table__row) {
+  transition: all 0.2s ease;
+}
+
+:deep(.el-table .el-table__row:hover > td) {
+  background: #f8faff !important;
+}
+
+/* 提供商名称 */
+.provider-name {
+  font-weight: 500;
+  color: #303133;
+}
+
+/* 模型标签 */
+.model-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  background: #f0f9ff;
+  color: #409eff;
+  border-radius: 4px;
+  font-size: 13px;
+  font-family: 'Consolas', 'Courier New', monospace;
+}
+
+/* 对话框标题栏 */
+.dialog-title-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: var(--space-sm) var(--space-md);
+  margin-bottom: var(--space-md);
+  background: linear-gradient(135deg, #f0f0ff 0%, #e8e0ff 100%);
+  border-radius: 8px;
+  color: #6366f1;
+  font-weight: 500;
+  font-size: 14px;
+}
+
+/* 对话框标题渐变 */
+:deep(.provider-dialog .el-dialog__header) {
+  border-bottom: 1px solid #f0f0f5;
+  padding-bottom: 12px;
+}
+
+/* 淡入动画 */
+/* fadeInUp 已提取到全局 style.css，此处保留占位注释以说明来源 */
+
+/* 响应式 */
+@media (max-width: 768px) {
+  .page-icon {
+    width: 40px;
+    height: 40px;
+  }
+
+  .add-btn {
+    font-size: 13px;
+  }
+}
+</style>

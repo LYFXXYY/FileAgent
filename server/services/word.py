@@ -10,11 +10,12 @@ Word 文档读写服务 —— python-docx
 
 from __future__ import annotations
 
+import re
 from io import BytesIO
 
 from docx import Document
-from docx.enum.text import WD_COLOR_INDEX  # 保留（暂不使用）
-from docx.shared import RGBColor
+from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+from docx.shared import Pt, RGBColor
 
 from services.diff import compute_diff
 
@@ -30,15 +31,81 @@ def extract_text_from_docx(file_bytes: bytes) -> str:
     return "\n".join(p.text for p in doc.paragraphs)
 
 
+def strip_markdown(text: str) -> str:
+    """
+    清理 Markdown 格式符号，返回纯净文本
+
+    处理的格式：
+    - **bold** → bold
+    - *italic* → italic
+    - ~~strikethrough~~ → strikethrough
+    - `code` → code
+    - # 标题 → 标题
+    - - 列表项 → 列表项（去掉 -）
+    - 1. 列表项 → 列表项（去掉序号前缀）
+    """
+    # 先清理行内格式
+    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)  # **bold** → bold
+    text = re.sub(r"\*([^*]+)\*", r"\1", text)  # *italic* → italic
+    text = re.sub(r"~~([^~]+)~~", r"\1", text)  # ~~strike~~ → strike
+    text = re.sub(r"`([^`]+)`", r"\1", text)  # `code` → code
+
+    # 清理行首格式
+    lines = []
+    for line in text.split("\n"):
+        stripped = line.lstrip()
+        # 标题标记 # ## ### 等
+        if stripped.startswith("#"):
+            stripped = re.sub(r"^#+\s*", "", stripped)
+        # 无序列表
+        elif stripped.startswith("- ") or stripped.startswith("* "):
+            stripped = stripped[2:]
+        # 有序列表 1. 2. 等
+        elif re.match(r"^\d+\.\s", stripped):
+            stripped = re.sub(r"^\d+\.\s*", "", stripped)
+        lines.append(stripped)
+
+    return "\n".join(lines)
+
+
+def add_styled_paragraph(doc: Document, text: str, is_title: bool = False) -> None:
+    """
+    添加带样式的段落到文档
+
+    - is_title=True 时使用加粗、居中对齐
+    - 普通文本保持默认样式
+    """
+    if not text.strip():
+        # 空行也要保留段落结构
+        doc.add_paragraph()
+        return
+
+    para = doc.add_paragraph()
+    if is_title:
+        para.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+        run = para.add_run(text)
+        run.bold = True
+        run.font.size = Pt(14)
+    else:
+        para.add_run(text)
+
+
 def create_plain_docx(text: str) -> BytesIO:
     """
     把纯文本按段落写入 .docx，返回可下载的字节流
 
-    每个 \n 分段一个 Paragraph，段内保留原样
+    【优化】
+    - 清理 Markdown 符号
+    - 保持段落结构
     """
     doc = Document()
-    for para in text.split("\n"):
+
+    # 清理 Markdown 格式
+    clean_text = strip_markdown(text)
+
+    for para in clean_text.split("\n"):
         doc.add_paragraph(para)
+
     buf = BytesIO()
     doc.save(buf)
     buf.seek(0)  # 指针回到起始位置，FileResponse 从头读
@@ -54,10 +121,18 @@ def create_diff_docx(original: str, revised: str) -> BytesIO:
       insert  → 红色
       delete  → 红色 + 删除线（run.font.strike）
 
-    按段落切分处理：diff 结果是按字符级，需要按换行符重组段落
+    【优化】
+    - 清理 Markdown 符号，避免文档中出现 ** 等格式标记
+    - 按段落切分处理：diff 结果是按字符级，需要按换行符重组段落
+    - 文档末尾追加纯净版完整文本（黑色，无标注）
     """
     doc = Document()
-    diff = compute_diff(original, revised)
+
+    # 先清理 Markdown 符号，避免文档中出现格式标记
+    clean_revised = strip_markdown(revised)
+
+    # 使用清理后的文本计算 diff
+    diff = compute_diff(original, clean_revised)
 
     # 把 diff 片段按换行拆分到多个段落，避免整篇文档挤在一个段落里
     # 缓冲区存当前段落待加的 (op, text) 片段
@@ -93,11 +168,24 @@ def create_diff_docx(original: str, revised: str) -> BytesIO:
                 current_para_runs.append((op, part))
     flush_paragraph()
 
+    # ---------- 追加修订后的完整纯文本 ----------
+    # 添加分页符，让纯净文本从新的一页开始
+    doc.add_page_break()
+
+    # 添加标题
+    title_para = doc.add_paragraph()
+    title_run = title_para.add_run("修订后完整文本（可直接复制）")
+    title_run.bold = True
+    title_run.font.size = Pt(12)
+
+    # 添加空行分隔
+    doc.add_paragraph()
+
+    # 添加纯文本段落（黑色，无标注）
+    for line in clean_revised.split("\n"):
+        doc.add_paragraph(line)
+
     buf = BytesIO()
     doc.save(buf)
     buf.seek(0)
     return buf
-
-
-# 保留常量导入避免 linter 报错（若后续需要 highlight 等效果可用）
-_ = WD_COLOR_INDEX

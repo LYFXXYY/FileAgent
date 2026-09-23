@@ -21,6 +21,11 @@ export const processApi = {
     return http.post<ProcessResponse>(`/process/${logId}`)
   },
 
+  /** 查询处理状态 —— 只读，不会触发或重复触发 LLM 处理 */
+  status(logId: number) {
+    return http.get<ProcessResponse>(`/process/${logId}/status`)
+  },
+
   /**
    * 下载结果 .docx
    * 用 responseType: 'blob' 告诉 axios 期望的是二进制文件，不是 JSON

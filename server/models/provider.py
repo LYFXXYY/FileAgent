@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, DateTime, Float, Integer, String, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database import Base
@@ -25,6 +25,13 @@ class ModelProvider(Base):
     __tablename__ = "model_providers"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+
+    # 外键 → users.id。每个提供商归属一个用户，CRUD 全部按 user_id 隔离
+    # （和 Task 一致），避免用户之间互相看到/改写/删除对方的 API Key
+    # ondelete=CASCADE：用户被删除时其提供商一并清理
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
 
     # 自定义名称，如 "豆包-pro" / "GPT-4o"
     name: Mapped[str] = mapped_column(String(50), nullable=False)

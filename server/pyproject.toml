@@ -21,4 +21,29 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    "ruff>=0.16.8",
 ]
+
+[tool.pytest.ini_options]
+# 让测试能 import 顶层模块（services.* / models.* 等）——server/ 本身在 sys.path 上
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "RET", "RUF", "ASYNC", "PIE"]
+ignore = [
+    # FastAPI 在路由函数默认参数里调用 Depends()/Query()/File() 是框架约定，不是 bug
+    "B008",
+    # 204 无内容接口里显式 `return None` 表意更清楚，不算多余
+    "RET501",
+    # 本项目注释/文档/字符串大量使用中文，这些"歧义 Unicode"规则会误报每一个 CJK 字符
+    "RUF001", "RUF002", "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试里允许 assert 之外的宽松写法
+"tests/*" = ["B011"]

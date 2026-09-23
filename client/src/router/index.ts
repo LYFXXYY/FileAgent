@@ -16,10 +16,11 @@ import { useAuthStore } from '@/stores/auth'
 
 import AppLayout from '@/components/AppLayout.vue'
 import Home from '@/views/Home.vue'
-import Login from '@/views/Login.vue'
-import Logs from '@/views/Logs.vue'
-import Providers from '@/views/Providers.vue'
-import Tasks from '@/views/Tasks.vue'
+
+const Login = () => import('@/views/Login.vue')
+const Tasks = () => import('@/views/Tasks.vue')
+const Providers = () => import('@/views/Providers.vue')
+const Logs = () => import('@/views/Logs.vue')
 
 const routes: RouteRecordRaw[] = [
   {

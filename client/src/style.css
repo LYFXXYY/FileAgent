@@ -116,3 +116,20 @@ body {
 .status-failed {
   color: #f56c6c;
 }
+
+/* ============== 通用淡入动画 ============== */
+/* 各页面表格/卡片入场复用，避免每个 scoped style 重复定义 */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.fade-in {
+  animation: fadeInUp 0.4s ease-out;
+}

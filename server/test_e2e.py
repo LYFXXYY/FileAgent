@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import io
-import os
 import sys
 import time
 
@@ -114,7 +113,10 @@ provider_id = r.json().get("id") if r.status_code == 201 else None
 check("api_key 已脱敏", r.json().get("api_key_masked", "").endswith("****"))
 
 r = CLIENT.get(f"{API}/providers", headers=AUTH)
-check("GET providers 200 且包含刚才新建", r.status_code == 200 and any(p["id"] == provider_id for p in r.json()))
+check(
+    "GET providers 200 且包含刚才新建",
+    r.status_code == 200 and any(p["id"] == provider_id for p in r.json()),
+)
 
 r = CLIENT.put(
     f"{API}/providers/{provider_id}",
@@ -173,7 +175,13 @@ buf.seek(0)
 r = CLIENT.post(
     f"{API}/upload?task_id={task_id}",
     headers=AUTH,
-    files={"file": ("sample.docx", buf.read(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+    files={
+        "file": (
+            "sample.docx",
+            buf.read(),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+    },
 )
 check("POST /upload 201", r.status_code == 201, f"{r.status_code} {r.text}")
 log_id = r.json().get("log_id") if r.status_code == 201 else None

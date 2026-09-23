@@ -73,6 +73,7 @@ export interface UploadResponse {
   log_id: number
   original_filename: string
   content_length: number
+  extracted_text: string
   status: 'pending' | 'processing' | 'done' | 'failed'
   uploaded_at: string
 }
@@ -82,6 +83,7 @@ export interface ProcessResponse {
   status: 'pending' | 'processing' | 'done' | 'failed'
   processed_at: string | null
   error_message: string | null
+  processed_content: string | null
 }
 
 // ========== 操作日志 ==========

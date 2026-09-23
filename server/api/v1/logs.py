@@ -4,6 +4,11 @@
 【分页设计】
 - page 从 1 开始，page_size 默认 20，最大 100
 - 类比 Java PageRequest.of(page - 1, size)
+
+【筛选设计】
+- status：按处理状态筛选（pending/processing/done/failed）
+- filename：按文件名模糊搜索（ilike，不区分大小写）
+- 两者可组合使用，也可都不传（查全部）
 """
 
 from __future__ import annotations
@@ -13,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from middleware.auth import get_current_user
-from models.operation_log import OperationLog
+from models.operation_log import LogStatus, OperationLog
 from models.user import User
 from schemas.operation_log import LogListResponse, LogResponse
 
@@ -24,11 +29,27 @@ router = APIRouter()
 def list_logs(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
+    status: str | None = Query(
+        default=None, description="按状态筛选：pending/processing/done/failed"
+    ),
+    filename: str | None = Query(default=None, description="按文件名模糊搜索"),
     db: Session = Depends(get_db),
     current: User = Depends(get_current_user),
 ):
-    """分页查询当前用户的操作日志（时间倒序）"""
+    """分页查询当前用户的操作日志（时间倒序），支持状态筛选和文件名搜索"""
     q = db.query(OperationLog).filter(OperationLog.user_id == current.id)
+
+    # 状态筛选：传入的字符串转 LogStatus 枚举
+    if status:
+        try:
+            q = q.filter(OperationLog.status == LogStatus(status))
+        except ValueError:
+            pass  # 忽略无效的状态值
+
+    # 文件名模糊搜索（ilike 不区分大小写）
+    if filename:
+        q = q.filter(OperationLog.original_filename.ilike(f"%{filename}%"))
+
     total = q.count()
     items = (
         q.order_by(OperationLog.uploaded_at.desc(), OperationLog.id.desc())
@@ -51,10 +72,13 @@ def get_log(
     current: User = Depends(get_current_user),
 ):
     """查看单条日志（详情）"""
-    log = db.query(OperationLog).filter(
-        OperationLog.id == log_id, OperationLog.user_id == current.id
-    ).first()
+    log = (
+        db.query(OperationLog)
+        .filter(OperationLog.id == log_id, OperationLog.user_id == current.id)
+        .first()
+    )
     if log is None:
         from fastapi import HTTPException
+
         raise HTTPException(404, "记录不存在")
     return log

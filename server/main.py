@@ -7,15 +7,19 @@ FileAgent 后端入口 —— FastAPI 应用 + 中间件 + 生命周期管理
 - 路由 @app.get("/path")    ≈  @GetMapping + @RequestMapping
 """
 
+import logging  # 结构化日志（替代 print，避免 Windows GBK 控制台中文乱码）
+import os  # 读取环境变量（CORS 配置）
 from contextlib import asynccontextmanager  # 管理 startup/shutdown 的上下文管理器
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # 导入 database 模块和所有模型 —— 让 Base.metadata 收集到建表信息
-import database  # noqa: F401  （导入本身有副作用：创建 engine + SessionLocal）
+import database
 import models  # noqa: F401    （导入触发 models/__init__.py 里的所有 ORM 类注册）
 from api.v1 import api_router  # 汇总好的 v1 路由
+
+logger = logging.getLogger("fileagent")
 
 
 @asynccontextmanager
@@ -35,13 +39,28 @@ async def lifespan(app: FastAPI):
     # 类比 Hibernate 的 spring.jpa.hibernate.ddl-auto=update
     # ⚠ 仅适合开发阶段！生产环境用 Alembic 做 schema 迁移
     database.Base.metadata.create_all(bind=database.engine)
-    print("[启动] MySQL 连接成功，表已创建/验证")
+    logger.info("MySQL 连接成功，表已创建/验证")
+
+    # 僵尸状态清理：上次进程崩溃/重启时，正在后台处理的日志会永远卡在 processing
+    # （BackgroundTasks 不持久化，进程一停就丢）。启动时把它们重置为 failed，
+    # 让用户能在日志页看到并重试，而不是前端无限轮询。
+    # ⚠ 仅适用单 worker；多 worker 部署应改用带超时阈值的 reaper 或任务队列
+    from models.operation_log import LogStatus, OperationLog
+
+    with database.SessionLocal() as db:
+        stale = db.query(OperationLog).filter(OperationLog.status == LogStatus.PROCESSING).all()
+        for log in stale:
+            log.status = LogStatus.FAILED
+            log.error_message = "服务重启导致处理中断，请重试"
+        if stale:
+            db.commit()
+            logger.info("已将 %d 条卡死的 processing 日志重置为 failed", len(stale))
 
     yield  # ← 应用在这里运行，上面的代码是 startup，下面的代码是 shutdown
 
     # ---------- Shutdown ----------
     # 可选：engine.dispose() 关闭连接池（uvicorn 退出时通常自动清理）
-    print("[关闭] 释放数据库连接池")
+    logger.info("释放数据库连接池")
     database.engine.dispose()
 
 
@@ -50,11 +69,17 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="FileAgent", lifespan=lifespan)
 
 # ---------- CORS 中间件 ----------
-# 让前端 (localhost:5173) 能跨域访问后端 API
+# 让前端能跨域访问后端 API
 # 类比 Spring 的 @CrossOrigin 或全局 CorsConfiguration
+# 【配置方式】通过环境变量 CORS_ORIGINS 指定，逗号分隔多个源
+#   例: CORS_ORIGINS=http://localhost:5173,https://example.com
+#   未设置时默认只允许 localhost:5173（开发环境）
+_cors_raw = os.getenv("CORS_ORIGINS", "http://localhost:5173")
+_cors_origins = [origin.strip() for origin in _cors_raw.split(",") if origin.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=_cors_origins,
     allow_credentials=True,  # 允许携带 Cookie / Authorization 头
     allow_methods=["*"],
     allow_headers=["*"],

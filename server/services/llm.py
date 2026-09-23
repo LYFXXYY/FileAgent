@@ -21,27 +21,26 @@ from models.provider import ModelProvider
 
 class LLMError(Exception):
     """LLM 调用失败时抛出的统一异常，让上层路由捕获后写入 error_message"""
-    pass
 
 
 async def call_llm(
     db: Session,
     prompt: str,
     provider: ModelProvider | None = None,
+    user_id: int | None = None,
 ) -> str:
     """
     调用 LLM 并返回文本结果
 
-    provider=None 时自动选一个 is_active=True 的提供商（按 id 升序）
+    provider=None 时自动选一个 is_active=True 的提供商（限定在 user_id 名下，按 id 升序）
+    user_id 用于隔离：只在该用户的提供商里挑默认的，不会用到别人的 Key
     """
-    # 未指定 provider → 选一个默认的
+    # 未指定 provider → 选一个默认的（限定当前用户）
     if provider is None:
-        provider = (
-            db.query(ModelProvider)
-            .filter(ModelProvider.is_active == True)  # noqa: E712
-            .order_by(ModelProvider.id)
-            .first()
-        )
+        q = db.query(ModelProvider).filter(ModelProvider.is_active == True)  # noqa: E712
+        if user_id is not None:
+            q = q.filter(ModelProvider.user_id == user_id)
+        provider = q.order_by(ModelProvider.id).first()
         if provider is None:
             raise LLMError("系统中没有任何可用的模型提供商，请先添加")
 

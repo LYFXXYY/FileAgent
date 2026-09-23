@@ -8,6 +8,7 @@
 """
 
 import os
+
 from pydantic_settings import BaseSettings
 
 # __file__ 是当前 config.py 的绝对路径
@@ -44,7 +45,7 @@ class Settings(BaseSettings):
     output_dir: str = "outputs"
 
     class Config:
-        env_file = ENV_FILE       # 指定 .env 文件路径
+        env_file = ENV_FILE  # 指定 .env 文件路径
         env_file_encoding = "utf-8"
 
 

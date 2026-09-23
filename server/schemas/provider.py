@@ -7,8 +7,11 @@ from pydantic import BaseModel, Field
 
 class ProviderCreate(BaseModel):
     """新增提供商"""
+
     name: str = Field(min_length=1, max_length=50)
-    base_url: str = Field(max_length=255, description="API 基础地址，如 https://ark.cn-beijing.volces.com/api/v3")
+    base_url: str = Field(
+        max_length=255, description="API 基础地址，如 https://ark.cn-beijing.volces.com/api/v3"
+    )
     api_key: str = Field(max_length=255)
     model_name: str = Field(max_length=100)
     max_tokens: int = Field(default=4096, ge=1, le=200000)
@@ -17,6 +20,7 @@ class ProviderCreate(BaseModel):
 
 class ProviderUpdate(BaseModel):
     """更新提供商 —— 所有字段可选，只改传了的字段"""
+
     # 用 Optional 让前端可以只填要改的字段（PATCH 语义）
     name: str | None = Field(default=None, max_length=50)
     base_url: str | None = Field(default=None, max_length=255)
@@ -29,6 +33,7 @@ class ProviderUpdate(BaseModel):
 
 class ProviderResponse(BaseModel):
     """对外响应（屏蔽 api_key 敏感字段——只返回掩码后的）"""
+
     id: int
     name: str
     base_url: str
