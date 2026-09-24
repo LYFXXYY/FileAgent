@@ -206,7 +206,7 @@ async def health():
 ```bash
 # 启动后端
 cd server
-uvicorn main:app --reload --port 8000
+uv run uvicorn main:app --reload --port 8000
 # 访问 http://localhost:8000/docs 看到 Swagger 即成功
 ```
 
@@ -410,7 +410,7 @@ CREATE TABLE operation_logs (
 
 ```bash
 # 后端
-cd server && uvicorn main:app --reload --port 8000
+cd server && uv run uvicorn main:app --reload --port 8000
 # 前端（Vite 代理到 8000）
 cd client && npm run dev
 ```
