@@ -89,8 +89,7 @@ def decode_access_token(token: str) -> dict | None:
     不抛异常而是返回 None：让调用方决定如何处理（401 或走其他逻辑）
     """
     try:
-        payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[JWT_ALGORITHM])
-        return payload
+        return jwt.decode(token, settings.jwt_secret_key, algorithms=[JWT_ALGORITHM])
     except JWTError:
         # 包括：签名不匹配、token 过期、格式错误等
         return None

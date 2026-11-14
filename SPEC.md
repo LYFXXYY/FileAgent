@@ -46,20 +46,33 @@ Agent = **LLM + 工具调用 + 决策循环**。LLM 不再一次输出结果，�
 
 ### 本项目方案
 
-不引入 LangChain 等重框架，自己写一个 30 行的 ReAct 控制循环——理解原理后再学框架才能知道它帮你省了什么。
+**早期方案（单轮处理阶段）**：不引入 LangChain 等重框架，自己写一个 30 行的 ReAct 控制循环——理解原理后再学框架才能知道它帮你省了什么。
+
+**当前方案（2026-11-14 修订）**：项目要往长文档分块、RAG、PDF→PPT 这类**多阶段可恢复流水线**走，上面那条结论的前提变了，因此选定 **LangGraph** 做编排层。
+
+变的是需求形态，不是当初的判断：
+
+| 当初的前提 | 现在的现实 | 为什么自实现循环不够用 |
+|---|---|---|
+| 一次 LLM 调用出结果 | 分块 → map → reduce，N 个并发子任务 | 要 fan-out / fan-in 和局部失败重试 |
+| 失败就整条重来 | 进程重启后能从中间某步接着跑 | 要 checkpoint 持久化，`BackgroundTasks` 不落地 |
+| 流程写死在代码里 | 大纲要人确认后才继续生成 | 要 interrupt / resume 的人在环中 |
+| 无反馈回路 | 生成 → 自检 → 修订循环 | 要状态图和条件边 |
 
 ### 框架选型参考
 
 | 框架 | 适用场景 | 本项目 |
 |---|---|---|
-| LangChain | 全功能 Agent | 暂不采用（抽象层多，学习曲线陡） |
-| LlamaIndex | RAG / 数据索引 | 不需要 |
-| OpenAI Func Call | 模型原生支持工具调用 | 后续可替换自实现 |
-| 自实现 ReAct | 理解原理 + 轻量 | 当前方案 |
+| LangGraph | 有状态多步 Agent 图，带 checkpoint / interrupt | **阶段 3 引入**，首练用在长文档分块批改 |
+| LangChain | 全功能 Agent、海量集成 | 不用。只要 LangGraph + 直连 OpenAI 兼容端点，少一层抽象 |
+| LlamaIndex | RAG / 数据索引 | 不用。阶段 4 用 pgvector 自己写检索，链路更可控 |
+| pgvector | Postgres 内做向量检索 | **阶段 4 采用**，省掉独立向量库 |
+| 结构化输出 / JSON 模式 | 让模型产出可校验的 JSON | 阶段 0 已铺好 `chat_json` 三级降级 |
+| 自实现 ReAct | 理解原理 + 轻量 | 已完成使命，不再往单轮场景上加东西 |
+
+> 阶段 0（LLM 传输层）刻意**不依赖任何 agent 框架**：超时、重试、并发闸、计量、能力路由都是纯基础设施，用 httpx 手写更清楚，也能保证单测不引入新依赖。LangGraph 到阶段 3 才进来。
 
 ---
-
-## 3. 项目搭建（分步骤）
 
 ## 3. 开发工具推荐
 
@@ -276,6 +289,13 @@ SQLAlchemy 连接池配置：`pool_size=10, max_overflow=20, pool_pre_ping=True`
 - 任务指定 provider 时校验其归属当前用户；处理时若 provider 已被删除则**显式报错**，不静默 fallback 到别的模型
 - LLM 默认 provider 选择（任务未指定时）也限定在当前用户名下
 
+**能力路由（阶段 0 新增）**：`model_providers.capabilities` 存逗号分隔串（`text` / `vision` / `embedding`），由 `resolve_provider()` 按用途筛。
+
+- 任务显式指定的提供商能力不匹配 → **直接报错**，不静默换成别的模型
+- 未指定时在当前用户 active 提供商里挑第一个支持该能力且 id 最小的
+- 每个用户的提供商就是个位数，所以在 Python 侧过滤，不写字符串/JSON 的 SQL 匹配
+- 入口用 `field_validator` 拒未知能力值并把顺序归一化，同一集合永远存成同一个串
+
 > ⚠ 本节早期设计为"所有用户共享 provider"，因存在凭据越权风险已改为按用户隔离。
 
 
@@ -294,6 +314,8 @@ SQLAlchemy 连接池配置：`pool_size=10, max_overflow=20, pool_pre_ping=True`
 **轮询机制**：因为处理是异步的，前端点击"开始处理"后**总是**走轮询——通过 `GET /process/{id}/status` 每 5 秒查询一次（最多 120 次 / 10 分钟），`done` 自动推进到下载步骤，`failed` 显示错误。组件失活（onDeactivated）时暂停轮询，重新激活（onActivated）时恢复。
 
 **步骤导航**：上传步骤可返回选任务（保留选中状态）；下载步骤可"处理新文件"回到上传步骤。每个步骤之间都有上一步按钮。
+
+**传输层细节见 5.7**：这一段只讲业务流程，超时 / 重试 / 并发 / 计量 / 能力路由的实现口径在 5.7，改 `services/llm.py` 前必读。
 
 ### 5.5 批改红色标注（diff 核心）
 
@@ -317,6 +339,33 @@ SQLAlchemy 连接池配置：`pool_size=10, max_overflow=20, pool_pre_ping=True`
 
 **空状态**：无数据时显示 `el-empty` 组件提示。如果当前有筛选条件，提示"清除筛选"按钮；如果无任何记录，引导用户前往工作台。
 
+### 5.7 LLM 传输层（阶段 0）
+
+`services/llm.py` 只做传输与计量，不做业务编排。四块职责边界清楚：
+
+| 函数 | 职责 | 碰 DB |
+|---|---|---|
+| `chat(messages, provider, ...)` | 发一轮请求，返回 `LLMResult`（内容 + token + 耗时 + attempts） | 否 |
+| `chat_json(...)` | 要 JSON 输出，按 `json_schema → json_object → 不带` 三级降级 | 否 |
+| `resolve_provider(db, user_id, provider_id, capability)` | 按能力和归属选提供商 | 是（只读） |
+| `record_llm_call(...)` | 写一行 `llm_calls` 计量 | 是（自建独立 session） |
+
+**为什么 `chat()` 不接 DB**：原来的 `call_llm(db, prompt, ...)` 在 async 函数里做同步 Session 查询，本身就在阻塞事件循环，再加计量写入会更糟。拆开之后 `chat()` 能用假 client 直接单测，不需要真端点。
+
+**超时分两层**：`llm_timeout_connect` 只管 TCP + TLS 建连，`llm_timeout_read` 等响应收完；单次调用可用 `read_timeout` 覆盖读取层。长文档和短文本走同一个 `chat()`，靠这个参数分别放宽。
+
+**重试白名单**：只重试网络错误、超时、429、5xx（见 `_RETRYABLE_STATUS`）。其他 4xx 一次就失败——密钥无效重试也不会变对，纯烧 token。429 优先听 `Retry-After`（超过 60 秒不认），否则指数退避加随机抖动，避免并发请求同拍重试。
+
+**降级不等于重试**：`chat_json` 只在"端点明确拒绝 `response_format`"时降一档；**输出解析失败直接报错，不再打第二次**。降级方向是越来越松，同一份提示再打一次大概率还是烂 JSON，白烧一倍 token。这条是写单测时才发现的，第一版实现会为一句话的解析失败连打三次。
+
+**并发闸**：进程内 `asyncio.Semaphore(llm_max_concurrency)`。⚠ 和启动 reaper 一样是单 worker 假设，多 worker 时每进程各有一个，不是全局上限。
+
+**共享 httpx client**：模块级单例，`lifespan` 启动时预热、关闭时 `aclose()`。省掉每次调用的 DNS + TLS 握手，同时把"代理环境变量非法导致客户端构造失败"这类错误提前到启动日志里暴露，而不是等用户点处理才炸。`LLM_TRUST_ENV_PROXY=false` 是绕开 `NO_PROXY` 含非法条目（如裸 `[::1]` 会报 `InvalidURL: Invalid port`）的开关。
+
+**计量是旁路**：`llm_calls` 记 token / 耗时 / attempts / 状态，但写失败只 `logger.warning`，绝不把已经成功的处理判成 failed。`attempts` 在失败路径要从 `LLMError.attempts` 取——不取的话库里永远是 1，看不出"重试到耗尽"和"一次就挂"的区别（这条也是实测踩出来的）。
+
+**provider 名存快照**：处理时直接记实际选中的 `provider.name`，不再事后回查默认提供商——回查可能查到另一个模型。
+
 ---
 
 ## 6. 数据库设计
@@ -336,6 +385,7 @@ CREATE TABLE model_providers (
   base_url VARCHAR(255) NOT NULL,
   api_key VARCHAR(255) NOT NULL,
   model_name VARCHAR(100) NOT NULL,
+  capabilities VARCHAR(100) NOT NULL DEFAULT 'text',
   max_tokens INT DEFAULT 4096,
   temperature FLOAT DEFAULT 0.7,
   is_active TINYINT DEFAULT 1,
@@ -374,11 +424,45 @@ CREATE TABLE operation_logs (
   FOREIGN KEY (user_id) REFERENCES users(id),
   FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE SET NULL
 );
+
+CREATE TABLE llm_calls (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  user_id INT NOT NULL,
+  provider_id INT,
+  log_id INT,
+  purpose VARCHAR(30) NOT NULL DEFAULT 'chat',
+  provider_name VARCHAR(50),
+  model_name VARCHAR(100),
+  prompt_tokens INT NOT NULL DEFAULT 0,
+  completion_tokens INT NOT NULL DEFAULT 0,
+  total_tokens INT NOT NULL DEFAULT 0,
+  latency_ms INT NOT NULL DEFAULT 0,
+  attempts INT NOT NULL DEFAULT 1,
+  status VARCHAR(20) NOT NULL DEFAULT 'success',
+  error_message TEXT,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (provider_id) REFERENCES model_providers(id) ON DELETE SET NULL,
+  FOREIGN KEY (log_id) REFERENCES operation_logs(id) ON DELETE SET NULL
+);
 ```
 
-> **外键 ON DELETE 说明**：`tasks.provider_id` 和 `operation_logs.task_id` 用 `SET NULL`——删除 provider/task 时自动置空引用而非报错（否则 MySQL 外键约束会让 DELETE 返回 500）。日志靠 `task_name`/`provider_name` 快照仍可读。应用层删除时也**主动**先把引用置 NULL，兼容尚未带 ON DELETE 的旧库。
+> **外键 ON DELETE 说明**：`tasks.provider_id` 和 `operation_logs.task_id` **意图**是 `SET NULL`——删除 provider/task 时自动置空引用而非报错。`llm_calls` 三个外键同理：删用户连带清计量行，删 provider/log 只置空引用、计量行本身留下。日志和计量靠 `task_name` / `provider_name` 快照在关联被删后仍可读。应用层删除时同样**主动**先置空引用。
 >
-> **已有库迁移**：`model_providers.user_id` 是后加的列，`create_all()` 不会 ALTER 已存在的表。运行 `python server/migrate_add_provider_user_id.py`（幂等）补列并把现有 provider 回填给指定用户。
+> ⚠ **上面这段 DDL 与本机真实库并不完全一致**（2026-11-14 用 `SHOW COLUMNS` + `information_schema.REFERENTIAL_CONSTRAINTS` 实测）：
+>
+> | 项 | 文档 / ORM 声明 | 本机真实库 | 影响 |
+> |---|---|---|---|
+> | `tasks.provider_id` 删除规则 | `ON DELETE SET NULL` | **NO ACTION** | 靠应用层先置空才没 500；新加删除路径若忘了就炸 |
+> | `operation_logs.task_id` 删除规则 | `ON DELETE SET NULL` | **NO ACTION** | 同上 |
+> | `operation_logs.status` | ORM 写 `nullable=False` | **NULL YES** default `pending` | 实际不会写进 NULL，暂无影响 |
+> | `original_content` / `processed_content` | ORM 声明 `Text`（65KB） | **LONGTEXT** | 库里本来就没有 65KB 限制，AGENTS.md 旧说法已更正 |
+>
+> 根因：`create_all()` **只建新表、绝不 ALTER 已有表**。这几张表早期是按本节 DDL 手工建的，后来 s2 修复只在 ORM 侧加了 `ondelete`，数据库没跟上。新库从零启动会拿到 ORM 的正确规则，老库不会。
+>
+> **对齐老库需要单独写迁移**（重建外键约束），属删改表结构操作，未执行——要做前先确认。
+>
+> **已有库迁移**：`model_providers.user_id` 和 `model_providers.capabilities` 都是后加的列，跑幂等脚本补：`python server/migrate_add_provider_user_id.py`、`python server/migrate_add_provider_capabilities.py`。`llm_calls` 是新表，启动时 `create_all()` 自动建，不需要脚本。
 
 ---
 
@@ -401,6 +485,11 @@ CREATE TABLE operation_logs (
 | GET | /api/v1/process/:id/status | 是 | 查询处理状态（只读，返回 processed_content） |
 | GET | /api/v1/download/:id | 是 | 下载 Word 结果 |
 | GET | /api/v1/logs | 是 | 操作日志（分页 + 状态筛选 + 文件名搜索） |
+
+> 阶段 0 **没有新增接口**。变化只有两处：
+>
+> - `providers` 的请求/响应体多了 `capabilities`（逗号分隔串）。创建时不传由服务端补 `text`，所以旧前端和 `test_e2e.py` 原样调用仍然可用。
+> - `POST /process/{id}` 多一个 400 分支：任务指定的提供商能力不匹配时，在返回 processing **之前**就报错，不再等后台跑一半才 failed。
 
 ---
 
@@ -435,11 +524,13 @@ Nginx 反代：前端静态文件直接 serve，`/api/` 代理到 `127.0.0.1:800
 
 ---
 
-## 9. 实现顺序
+## 9. 实现路线与当前状态
+
+### 9.1 已完成基线
 
 1. ✅ 后端骨架：FastAPI + MySQL 连接 + 建表
 2. ✅ 认证模块：注册/登录 + JWT 中间件
-3. ✅ 提供商 CRUD + 通用 LLM 调用服务
+3. ✅ 提供商 CRUD + LLM 调用服务
 4. ✅ 任务 CRUD
 5. ✅ Word 读写 + diff 批注服务
 6. ✅ 上传 → 处理 → 下载 核心流程
@@ -449,7 +540,68 @@ Nginx 反代：前端静态文件直接 serve，`/api/` 代理到 `127.0.0.1:800
 10. ✅ 前端状态持久化（keep-alive + sessionStorage）
 11. ✅ 工作台 UX 增强：提供商可用性预检查、处理轮询、步骤导航、文本预览
 12. ✅ 日志页 UX 增强：搜索筛选、失败重试、空状态提示
-13. 联调 + Docker 部署
+13. ✅ **阶段 0：LLM 传输层地基**（见 9.3）
+14. ⬜ 联调 + Docker 部署（推迟到阶段 2.5 与 Postgres 一起做）
+
+### 9.2 Agent 化演进路线（阶段 0–5）
+
+学习目标是 LangGraph、RAG、Agent 调优。路线按**学习性价比**排，不按成就感排：PDF→PPT 是最重的一站，放最后当组装活。
+
+| 阶段 | 内容 | 前置 | 状态 |
+|---|---|---|---|
+| **0** | LLM 传输层地基：多轮 messages、结构化输出三级降级、token/耗时/attempts 计量、分层超时 + 重试白名单、并发闸、provider 能力路由、logging handler | 无 | ✅ **已完成** 2026-11-14 |
+| **1** | 批改输出结构化：自由文本 → 问题清单 JSON（位置/类型/原文/建议/置信度），前端可点击定位标注 | 0 | ⬜ |
+| **2** | 评测台：golden set + rubric + LLM-as-judge + prompt 版本管理 + 回归对比 | 1 | ⬜ 这才是"Agent 调优"的本体 |
+| **2.5** | Postgres 迁移：独立 `pgvector/pgvector:pg16` 容器，业务 + LangGraph 检查点 + 向量统一一库 | 2 | ⬜ 到需要时再定，阶段 0–2 用不到 |
+| **3** | LangGraph 首练**长文档分块批改**：fan-out/fan-in + PostgresSaver 检查点 + 条件重试 + interrupt 人工确认。顺带突破单次上下文上限 | 2.5 | ⬜ |
+| **4** | RAG 规范库：多文档上传、分块、pgvector 检索，把格式规范条款注入批改 prompt 并带引用溯源 | 3 | ⬜ |
+| **5** | PDF→PPT：把确定性 PDF 几何处理移植成 service，LLM 只接管大纲规划与视觉批评修订循环 | 4 + VLM | ⬜ |
+
+**为什么是这个顺序**：没有结构化输出（阶段 1）就没法自动打分，没有打分（阶段 2）改 prompt 就是瞎调，没有度量就无从判断 LangGraph 到底帮了什么忙。地基先行的代价是前两个阶段"看不出大变化"。
+
+**本地视觉模型（独立支线，不阻塞主线）**：实测 RTX 4060 Laptop 空闲显存只有 5976 MiB（桌面已占 1981），所以选 **Qwen3-VL-4B**（Q4 约 3.3GB，留余量给视觉塔激活和 KV cache）；8B 约 6.2GB **放不下**。运行时 Ollama 对 `qwen3-vl` 支持最稳。部署上线后服务器没有 GPU，视觉批评必须能切云端——这就是 `capabilities` 字段存在的理由。
+
+### 9.3 阶段 0 交付情况（2026-11-14）
+
+改动 15 个文件，1 张新表，1 个新列，**没有新增任何依赖**。
+
+| 文件 | 改了什么 |
+|---|---|
+| `services/llm.py` | 重写为传输层：`chat` / `chat_json` / `resolve_provider` / `record_llm_call` / `extract_json` / 共享 client / 并发闸 |
+| `models/llm_call.py` | **新增** `llm_calls` 计量表 |
+| `models/provider.py` | 加 `capabilities` 列 |
+| `models/__init__.py` | 注册 `LlmCall`，否则 `create_all()` 发现不了 |
+| `schemas/provider.py` | `KNOWN_CAPABILITIES` + 能力值校验与顺序归一化；三个 schema 加字段 |
+| `api/v1/process.py` | 适配新签名；`_meter()` 走线程池写计量；删掉 `_default_provider_name()` |
+| `api/v1/providers.py` | **未改动**——`**body.model_dump()` 让新字段自动流过 |
+| `config.py` / `.env.example` | 加 6 个配置项 |
+| `main.py` | 补 logging handler；lifespan 预热与关闭共享 client |
+| `migrate_add_provider_capabilities.py` | **新增**幂等迁移脚本 |
+| `tests/test_llm.py` | **新增** 50 个用例 |
+| `client/src/api/types.ts`、`views/Providers.vue` | 能力多选框 + 表格列 + 类型 |
+
+**实测发现并当场修掉的两个真问题**（都是写测试/跑 e2e 时才暴露的，看代码看不出来）：
+
+1. `chat_json` 第一版把"输出解析失败"也当成降级信号，会为一句话连打三次完整请求 → 改成只在端点明确拒绝 `response_format` 时降档，解析失败直接报错。
+2. 失败路径的 `attempts` 永远是 1，计量表看不出"重试到耗尽"和"一次就挂"的区别 → 给 `LLMError` 挂上 `attempts`，失败也带次数上报。e2e 复跑确认库里从 `1` 变成 `3`。
+
+**验证结果**（全部实测，非推断）：
+
+| 门禁 | 结果 |
+|---|---|
+| `uv run pytest -q` | **62 passed**（阶段 0 前 12） |
+| `uv run ruff check .` | All checks passed |
+| `uv run ruff format --check .` | 35 files already formatted |
+| `uv lock --check` | Resolved 46 packages（无新增依赖） |
+| `npm run build` | 通过（vue-tsc + vite） |
+| 迁移脚本 | 首次 `[done]`，重复运行 `[skip]`，幂等成立 |
+| `uv run python test_e2e.py` | **33/33 通过 ×2 轮**，连真实 MySQL 8 |
+| 后端日志 | 0 条 traceback / exception / warning |
+| 计量落库 | 失败行 `status=failed`、`attempts=3`、`provider_id` 被 SET NULL 而 `provider_name` 快照保留 |
+| `llm_calls` 建表 | 由 `create_all()` 自动建，15 列 |
+| 测试数据 | 已还原：users 1 / providers 2 / tasks 5 / logs 13 / uploads 7 全部 MATCH，`llm_calls` 清空 |
+
+**遗留**：`config.py` 用旧式 `class Config`，Pydantic 报了 `PydanticDeprecatedSince20` 警告（阶段 0 前就有，与本次无关，未顺手改）。
 
 ---
 
@@ -503,8 +655,25 @@ Nginx 反代：前端静态文件直接 serve，`/api/` 代理到 `127.0.0.1:800
 | s7 | 低 | download 的 Content-Disposition 头重复赋值 | 合并为一次赋值 |
 | s8 | 低 | 启动用 print 输出中文，Windows GBK 控制台乱码 | 改用 logging |
 | s9 | 低 | 缺单元测试 | 新增 `server/tests/`（diff + word 纯函数 12 个用例）；pyproject 配 pytest pythonpath |
+| s10 | 中 | `CORS_ORIGINS` 是死配置：`main.py` 用 `os.getenv` 读，但 pydantic-settings 只把 `.env` 喂给 Settings 对象、不写入 `os.environ`，所以 `.env` 里的值永远读不到 | `Settings` 增加 `cors_origins` 字段，`main.py` 改用 `get_settings().cors_origins`。实测：`.env` 里加的源能通过预检，未列出的源仍被拒 400 |
 
 **回归验证**：pytest 12 passed；后端端到端冒烟 14/14 PASS（隔离/越权 404/删除不 500/后台处理流转）；前端 `vue-tsc --noEmit` 0 错误。
+
+### 第三轮：阶段 0 LLM 传输层地基（2026-11-14）
+
+| ID | 优先级 | 问题 | 修复方案 |
+|---|---|---|---|
+| d1 | 高 | 项目从未配置 logging handler，root 停在 WARNING，`logger.info` 全部静默丢弃——重试、并发、计量一概看不见，"调优"没有观测面 | `main.py` 加 `_setup_logging()`：`basicConfig(force=True)` + stdout handler，级别由 `LOG_LEVEL` 控制。`force=True` 是必须的，否则 `--reload` 反复重导入会让每行打印两遍。实测启动日志已正常输出 |
+| d2 | 中 | `call_llm` 只能单轮纯文本：`messages` 硬编码一条 user，无 system、无多轮、无结构化输出、无 token 计量、无重试 | 拆成 `chat()`（纯传输，可用假 client 单测）+ `resolve_provider()` + `record_llm_call()`，另加 `chat_json()` 和 `extract_json()` |
+| d3 | 中 | 每次调用都新建 `httpx.AsyncClient`，DNS 与 TLS 握手不复用；`timeout=120` 写死在代码里 | 模块级共享 client，lifespan 预热与关闭；超时拆成 connect / read 两层，单次调用可覆盖读取层 |
+| d4 | 低 | 并发无上限，本地小模型或云端限流会被打爆 | `asyncio.Semaphore(llm_max_concurrency)`。⚠ 单 worker 假设，多 worker 时每进程各一个 |
+| d5 | 低 | provider 只有一个 `model_name`，无法区分文本 / 视觉 / 向量用途，后面接 VLM 和 embedding 要改两次表 | 加 `capabilities` 列 + 入口校验 + `resolve_provider` 能力路由；用途不匹配显式报错，不静默换模型 |
+
+**过程中实测发现并修掉的两处**（详见 9.3）：`chat_json` 误把输出解析失败当成降级信号，会为一句话连打三次完整请求；失败路径的 `attempts` 永远记成 1，看不出"重试到耗尽"和"一次就挂"。
+
+**顺带查明的库结构漂移**（详见 §6 实测对照表）：`tasks.provider_id` 与 `operation_logs.task_id` 在本机真实库里是 `NO ACTION`，并非 ORM 声明的 `SET NULL`——`create_all()` 永不 ALTER 已有表所致。现在靠应用层删除前先置空引用兜着，**新加删除路径必须照抄这一步**（AGENTS.md §3.2）。
+
+**回归验证**：pytest 62 passed；端到端 33/33 两轮（连真实 MySQL）；`npm run build` 通过；ruff check / format 全绿；`uv lock --check` 一致且无新增依赖；迁移脚本幂等；测试数据已按快照精确还原。
 
 
 ---
@@ -517,7 +686,24 @@ JWT_SECRET_KEY=your-secret-key-change-me
 JWT_EXPIRE_HOURS=2
 UPLOAD_DIR=uploads
 OUTPUT_DIR=outputs
+CORS_ORIGINS=http://localhost:5173
+
+# LLM 传输层（阶段 0）
+LLM_TIMEOUT_CONNECT=10
+LLM_TIMEOUT_READ=120
+LLM_MAX_RETRIES=2
+LLM_MAX_CONCURRENCY=4
+LLM_TRUST_ENV_PROXY=true
+
+LOG_LEVEL=INFO
 ```
+
+> `CORS_ORIGINS` 必须在 `config.py` 的 `Settings` 里声明成字段才能生效：pydantic-settings 只把 `.env` 的值注入 Settings 对象，**不会写入 `os.environ`**，因此 `os.getenv("CORS_ORIGINS")` 永远读不到 `.env` 里的配置（这是 s10 的成因）。多个源用逗号分隔。**新增任何配置项都要先在 `Settings` 里加字段，再同步进 `.env.example`**，两条都是硬约定。
+>
+> **LLM 相关取值口径**：`LLM_TIMEOUT_CONNECT` 只管建连，`LLM_TIMEOUT_READ` 等响应收完（长文档调大这一个）；`LLM_MAX_RETRIES` 只对网络错误 / 超时 / 429 / 5xx 生效；`LLM_MAX_CONCURRENCY` 是进程内上限；`LLM_TRUST_ENV_PROXY=false` 用来绕开 `NO_PROXY` 含非法条目（如裸 `[::1]`）时 httpx 构造即报 `InvalidURL: Invalid port` 的问题——需要走系统代理访问境外端点时**不要关它**。
+>
+> `JWT_EXPIRE_HOURS` 文档口径是 2（也是 `config.py` 的默认值），本机 `.env` 可能为了开发方便设成 24。`.env` 不入库，以本机为准。
+
 
 ---
 

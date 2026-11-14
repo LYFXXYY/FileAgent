@@ -58,7 +58,7 @@ def strip_markdown(text: str) -> str:
         if stripped.startswith("#"):
             stripped = re.sub(r"^#+\s*", "", stripped)
         # 无序列表
-        elif stripped.startswith("- ") or stripped.startswith("* "):
+        elif stripped.startswith(("- ", "* ")):
             stripped = stripped[2:]
         # 有序列表 1. 2. 等
         elif re.match(r"^\d+\.\s", stripped):

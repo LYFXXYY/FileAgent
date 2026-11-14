@@ -21,12 +21,21 @@ export interface TokenResponse {
 }
 
 // ========== 提供商 ==========
+
+/**
+ * 模型能力标记。后端存的是逗号分隔串（如 "text,vision"），
+ * 处理时按用途筛提供商，避免拿纯文本模型去干视觉活。
+ */
+export type Capability = 'text' | 'vision' | 'embedding'
+
 export interface Provider {
   id: number
   name: string
   base_url: string
   api_key_masked: string
   model_name: string
+  /** 逗号分隔的能力串，用 toCapabilityList() 转成数组再喂给多选框 */
+  capabilities: string
   max_tokens: number
   temperature: number
   is_active: boolean
@@ -39,6 +48,7 @@ export interface ProviderCreatePayload {
   base_url: string
   api_key: string
   model_name: string
+  capabilities?: string
   max_tokens?: number
   temperature?: number
 }

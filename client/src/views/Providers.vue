@@ -11,7 +11,7 @@ import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'elem
 
 import { extractErrorMessage } from '@/api/client'
 import { providerApi } from '@/api/providers'
-import type { Provider, ProviderCreatePayload } from '@/api/types'
+import type { Capability, Provider, ProviderCreatePayload } from '@/api/types'
 
 const providers = ref<Provider[]>([])
 const loading = ref(false)
@@ -22,11 +22,26 @@ const dialogMode = ref<'create' | 'edit'>('create')
 const editingId = ref<number | null>(null)
 const formRef = ref<FormInstance>()
 
-const form = reactive<ProviderCreatePayload & { api_key: string }>({
+// 能力候选值。后端加新能力时要同步改 schemas/provider.py 的 KNOWN_CAPABILITIES
+const capabilityOptions: Capability[] = ['text', 'vision', 'embedding']
+
+/**
+ * 后端的逗号串 → 多选框要的数组
+ *
+ * 用候选值去反查而不是直接 split，顺带做了两件事：顺序归一化、丢掉库里的未知值，
+ * 脏数据不至于把表单卡死。全不命中时兜底成 text。
+ */
+function toCapabilityList(raw: string): Capability[] {
+  const picked = capabilityOptions.filter((item) => raw.split(',').includes(item))
+  return picked.length ? picked : ['text']
+}
+
+const form = reactive<ProviderCreatePayload & { api_key: string; capabilityList: Capability[] }>({
   name: '',
   base_url: '',
   api_key: '',
   model_name: '',
+  capabilityList: ['text'],
   max_tokens: 4096,
   temperature: 0.7,
 })
@@ -35,6 +50,7 @@ const rules: FormRules = {
   name: [{ required: true, message: '请输入名称', trigger: 'blur' }],
   base_url: [{ required: true, message: '请输入 API 基础地址', trigger: 'blur' }],
   model_name: [{ required: true, message: '请输入模型标识', trigger: 'blur' }],
+  capabilityList: [{ required: true, message: '至少选择一种能力', trigger: 'change' }],
   // 编辑时 api_key 可留空（表示不改）
   api_key: [
     {
@@ -48,6 +64,19 @@ const rules: FormRules = {
       trigger: 'blur',
     },
   ],
+}
+
+/** 表单 → 请求体：能力数组拍平成后端的逗号串，不带只给多选框用的临时字段 */
+function buildPayload(): ProviderCreatePayload {
+  return {
+    name: form.name,
+    base_url: form.base_url,
+    api_key: form.api_key,
+    model_name: form.model_name,
+    capabilities: form.capabilityList.join(','),
+    max_tokens: form.max_tokens,
+    temperature: form.temperature,
+  }
 }
 
 async function load() {
@@ -73,6 +102,7 @@ function openCreate() {
     base_url: '',
     api_key: '',
     model_name: '',
+    capabilityList: ['text'],
     max_tokens: 4096,
     temperature: 0.7,
   })
@@ -87,6 +117,7 @@ function openEdit(row: Provider) {
     base_url: row.base_url,
     api_key: '', // 留空表示不改
     model_name: row.model_name,
+    capabilityList: toCapabilityList(row.capabilities),
     max_tokens: row.max_tokens,
     temperature: row.temperature,
   })
@@ -100,11 +131,11 @@ async function submit() {
   submitting.value = true
   try {
     if (dialogMode.value === 'create') {
-      await providerApi.create(form)
+      await providerApi.create(buildPayload())
       ElMessage.success('提供商已创建')
     } else if (editingId.value !== null) {
       // 只传前端实际填了的字段，api_key 空则不传
-      const payload: Record<string, unknown> = { ...form }
+      const payload: Record<string, unknown> = { ...buildPayload() }
       if (!payload.api_key) delete payload.api_key
       await providerApi.update(editingId.value, payload)
       ElMessage.success('提供商已更新')
@@ -184,6 +215,18 @@ async function toggleActive(row: Provider) {
             <span class="model-tag">{{ row.model_name }}</span>
           </template>
         </el-table-column>
+        <el-table-column prop="capabilities" label="能力" width="150">
+          <template #default="{ row }">
+            <el-tag
+              v-for="item in toCapabilityList(row.capabilities)"
+              :key="item"
+              size="small"
+              class="cap-tag"
+            >
+              {{ item }}
+            </el-tag>
+          </template>
+        </el-table-column>
         <el-table-column prop="api_key_masked" label="API Key" width="140" />
         <el-table-column label="温度" width="80">
           <template #default="{ row }">{{ row.temperature.toFixed(2) }}</template>
@@ -225,6 +268,15 @@ async function toggleActive(row: Provider) {
         </el-form-item>
         <el-form-item label="模型标识" prop="model_name">
           <el-input v-model="form.model_name" placeholder="如：doubao-pro-128k" />
+        </el-form-item>
+        <el-form-item label="模型能力" prop="capabilityList">
+          <el-select v-model="form.capabilityList" multiple class="cap-select">
+            <el-option v-for="item in capabilityOptions" :key="item" :label="item" :value="item" />
+          </el-select>
+          <div class="form-hint">
+            text 处理文档 / vision 看截图做批评 / embedding 做向量检索。
+            用途不匹配时后端会直接报错，不会偷偷换别的模型
+          </div>
         </el-form-item>
         <el-form-item :label="dialogMode === 'edit' ? 'API Key（可选）' : 'API Key'" prop="api_key">
           <el-input
@@ -320,6 +372,24 @@ async function toggleActive(row: Provider) {
   border-radius: 4px;
   font-size: 13px;
   font-family: 'Consolas', 'Courier New', monospace;
+}
+
+/* 能力标签：表格里并排显示，留间距防粘一起 */
+.cap-tag {
+  margin-right: 4px;
+}
+
+/* 能力多选框占满表单列宽 */
+.cap-select {
+  width: 100%;
+}
+
+/* 表单项下方的浅色说明 */
+.form-hint {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #909399;
 }
 
 /* 对话框标题栏 */

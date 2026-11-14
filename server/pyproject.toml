@@ -1,8 +1,7 @@
 [project]
-name = "server"
+name = "fileagent-server"
 version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
+description = "FileAgent 后端：Word 文档 AI 处理平台（FastAPI + SQLAlchemy + python-docx）"
 requires-python = ">=3.12"
 dependencies = [
     "bcrypt>=4.1.0",

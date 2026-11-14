@@ -196,11 +196,19 @@ r = CLIENT.post(
 check("非 .docx 拒绝 400", r.status_code == 400, f"got {r.status_code}")
 
 # ---------- 7. 处理（预期失败，因为 provider 是假的） ----------
-section("7. LLM 处理（预期失败但优雅）")
+section("7. LLM 处理（后台执行，预期失败但优雅）")
 r = CLIENT.post(f"{API}/process/{log_id}", headers=AUTH)
 check("POST /process 200", r.status_code == 200, f"{r.status_code} {r.text}")
-data = r.json()
-check("失败状态 failed", data.get("status") == "failed")
+# 处理已后台化：POST 立即返回 processing，真实结果要轮询 status 接口拿
+check("立即返回 processing", r.json().get("status") == "processing", r.text)
+
+data = {}
+for _ in range(30):
+    time.sleep(1)
+    data = CLIENT.get(f"{API}/process/{log_id}/status", headers=AUTH).json()
+    if data.get("status") in ("done", "failed"):
+        break
+check("轮询到失败状态 failed", data.get("status") == "failed", str(data))
 check("有 error_message", bool(data.get("error_message")), str(data))
 
 # ---------- 8. 操作日志 ----------

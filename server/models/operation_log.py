@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 # ---------- 状态枚举 ----------
 # Python Enum → SQLAlchemy Enum → MySQL ENUM('pending','processing','done','failed')
 # 类比 Java 的 enum + @Enumerated(EnumType.STRING)
-class LogStatus(str, enum.Enum):
+class LogStatus(enum.StrEnum):
     PENDING = "pending"  # 已上传，等待处理
     PROCESSING = "processing"  # 正在调 LLM
     DONE = "done"  # 处理完成，可下载

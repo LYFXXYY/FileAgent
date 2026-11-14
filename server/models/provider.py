@@ -45,6 +45,10 @@ class ModelProvider(Base):
     # 模型标识符，如 doubao-pro-128k / gpt-4o
     model_name: Mapped[str] = mapped_column(String(100), nullable=False)
 
+    # 能力标记，逗号分隔：text / vision / embedding
+    # 一个模型通常只主打一种能力；按用途筛提供商，避免拿纯文本模型去处理图片
+    capabilities: Mapped[str] = mapped_column(String(100), default="text", nullable=False)
+
     # 单次请求最大输出 token 数，默认 4096
     max_tokens: Mapped[int] = mapped_column(Integer, default=4096, nullable=False)
 

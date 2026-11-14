@@ -2,7 +2,30 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+# 能力标记的合法取值。加新能力（如 audio）时改这里和前端下拉框即可
+KNOWN_CAPABILITIES = ("text", "vision", "embedding")
+
+
+def _normalize_capabilities(value: str) -> str:
+    """
+    校验并规范化能力标记：小写、去重、按 KNOWN_CAPABILITIES 的固定顺序输出
+
+    固定顺序是为了同一个集合永远序列化成同一个串，比对和展示都不会飘。
+    非法值直接在入口拒掉，不让 "textv" 这种拼错的东西进库变成隐形能力缺失。
+    """
+    items = {c.strip().lower() for c in value.split(",") if c.strip()}
+    if not items:
+        raise ValueError(f"至少需要一个能力标记，可选 {', '.join(KNOWN_CAPABILITIES)}")
+
+    unknown = items - set(KNOWN_CAPABILITIES)
+    if unknown:
+        raise ValueError(
+            f"未知能力标记 {', '.join(sorted(unknown))}，可选 {', '.join(KNOWN_CAPABILITIES)}"
+        )
+
+    return ",".join(c for c in KNOWN_CAPABILITIES if c in items)
 
 
 class ProviderCreate(BaseModel):
@@ -14,8 +37,18 @@ class ProviderCreate(BaseModel):
     )
     api_key: str = Field(max_length=255)
     model_name: str = Field(max_length=100)
+    capabilities: str = Field(
+        default="text",
+        max_length=100,
+        description="能力标记，逗号分隔，取值 text / vision / embedding",
+    )
     max_tokens: int = Field(default=4096, ge=1, le=200000)
     temperature: float = Field(default=0.7, ge=0, le=2)
+
+    @field_validator("capabilities")
+    @classmethod
+    def _validate_capabilities(cls, value: str) -> str:
+        return _normalize_capabilities(value)
 
 
 class ProviderUpdate(BaseModel):
@@ -26,9 +59,15 @@ class ProviderUpdate(BaseModel):
     base_url: str | None = Field(default=None, max_length=255)
     api_key: str | None = Field(default=None, max_length=255)
     model_name: str | None = Field(default=None, max_length=100)
+    capabilities: str | None = Field(default=None, max_length=100)
     max_tokens: int | None = Field(default=None, ge=1, le=200000)
     temperature: float | None = Field(default=None, ge=0, le=2)
     is_active: bool | None = None
+
+    @field_validator("capabilities")
+    @classmethod
+    def _validate_capabilities(cls, value: str | None) -> str | None:
+        return value if value is None else _normalize_capabilities(value)
 
 
 class ProviderResponse(BaseModel):
@@ -40,6 +79,7 @@ class ProviderResponse(BaseModel):
     # 不返回真实 api_key，返回前 4 位 + ****
     api_key_masked: str
     model_name: str
+    capabilities: str
     max_tokens: int
     temperature: float
     is_active: bool
@@ -57,6 +97,7 @@ class ProviderResponse(BaseModel):
             base_url=obj.base_url,
             api_key_masked=(obj.api_key[:4] + "****") if len(obj.api_key) > 4 else "****",
             model_name=obj.model_name,
+            capabilities=obj.capabilities,
             max_tokens=obj.max_tokens,
             temperature=obj.temperature,
             is_active=obj.is_active,

@@ -47,7 +47,7 @@ class User(Base):
     # ---------- 关系（类似 JPA @OneToMany） ----------
     # User.tasks → 该用户创建的所有 Task
     # back_populates="user" → 双向绑定，Task.user 能反向引用
-    # cascade="all, delete-orphan" → 删用户时级联删其任务（类似 JPA CascadeType.ALL + orphanRemoval）
+    # cascade="all, delete-orphan" → 删用户时级联删其任务（JPA 的 CascadeType.ALL + orphanRemoval）
     # ⚠ Task 和 OperationLog 定义在其他文件中，from __future__ import annotations 处理了前向引用
     tasks: Mapped[list[Task]] = relationship(
         back_populates="user",

@@ -8,7 +8,7 @@ FileAgent 后端入口 —— FastAPI 应用 + 中间件 + 生命周期管理
 """
 
 import logging  # 结构化日志（替代 print，避免 Windows GBK 控制台中文乱码）
-import os  # 读取环境变量（CORS 配置）
+import sys  # 日志输出到 stdout
 from contextlib import asynccontextmanager  # 管理 startup/shutdown 的上下文管理器
 
 from fastapi import FastAPI
@@ -18,8 +18,32 @@ from fastapi.middleware.cors import CORSMiddleware
 import database
 import models  # noqa: F401    （导入触发 models/__init__.py 里的所有 ORM 类注册）
 from api.v1 import api_router  # 汇总好的 v1 路由
+from config import get_settings
+from services.llm import LLMError, close_client, get_client
 
 logger = logging.getLogger("fileagent")
+
+LOG_FORMAT = "%(asctime)s %(levelname)-5s [%(name)s] %(message)s"
+
+
+def _setup_logging() -> None:
+    """
+    配置 root logger —— 项目此前一个 handler 都没装，root 停在 WARNING，
+    结果 logger.info(...) 全部静默丢弃，只有 WARNING 及以上经 lastResort 打到 stderr。
+    重试、并发、计量这类运行信息看不见，调优就无从谈起，所以这里补上。
+
+    force=True：--reload 会反复重新导入本模块，不清掉旧 handler 每行会打印两遍。
+    """
+    stream = logging.StreamHandler(sys.stdout)
+    stream.setFormatter(logging.Formatter(LOG_FORMAT, datefmt="%H:%M:%S"))
+    logging.basicConfig(
+        level=get_settings().log_level.upper(),
+        handlers=[stream],
+        force=True,
+    )
+
+
+_setup_logging()
 
 
 @asynccontextmanager
@@ -56,11 +80,26 @@ async def lifespan(app: FastAPI):
             db.commit()
             logger.info("已将 %d 条卡死的 processing 日志重置为 failed", len(stale))
 
+    # 预热共享 LLM 客户端：构造期就会读的代理配置若有问题，让它在这里炸进启动日志，
+    # 而不是等用户点"处理"时才第一次失败
+    try:
+        get_client()
+        logger.info(
+            "LLM 客户端就绪：并发上限 %s，读取超时 %ss，重试 %s 次",
+            get_settings().llm_max_concurrency,
+            get_settings().llm_timeout_read,
+            get_settings().llm_max_retries,
+        )
+    except LLMError:
+        # 不阻断启动：其余接口照常可用，LLM 调用各自报错并写进 error_message
+        logger.exception("LLM 客户端初始化失败，检查 LLM_TRUST_ENV_PROXY 与系统代理环境变量")
+
     yield  # ← 应用在这里运行，上面的代码是 startup，下面的代码是 shutdown
 
     # ---------- Shutdown ----------
-    # 可选：engine.dispose() 关闭连接池（uvicorn 退出时通常自动清理）
-    logger.info("释放数据库连接池")
+    logger.info("释放 LLM 与数据库连接池")
+    await close_client()
+    # engine.dispose() 关闭连接池（uvicorn 退出时通常自动清理）
     database.engine.dispose()
 
 
@@ -71,11 +110,12 @@ app = FastAPI(title="FileAgent", lifespan=lifespan)
 # ---------- CORS 中间件 ----------
 # 让前端能跨域访问后端 API
 # 类比 Spring 的 @CrossOrigin 或全局 CorsConfiguration
-# 【配置方式】通过环境变量 CORS_ORIGINS 指定，逗号分隔多个源
+# 【配置方式】通过 .env 的 CORS_ORIGINS 指定，逗号分隔多个源
 #   例: CORS_ORIGINS=http://localhost:5173,https://example.com
 #   未设置时默认只允许 localhost:5173（开发环境）
-_cors_raw = os.getenv("CORS_ORIGINS", "http://localhost:5173")
-_cors_origins = [origin.strip() for origin in _cors_raw.split(",") if origin.strip()]
+# 注意走 Settings 而非 os.getenv：pydantic-settings 不会把 .env 写进 os.environ，
+# 用 os.getenv 读不到 .env 里的配置
+_cors_origins = [o.strip() for o in get_settings().cors_origins.split(",") if o.strip()]
 
 app.add_middleware(
     CORSMiddleware,

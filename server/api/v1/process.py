@@ -20,6 +20,7 @@ import uuid
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -27,11 +28,10 @@ from config import get_settings
 from database import SessionLocal, get_db
 from middleware.auth import get_current_user
 from models.operation_log import LogStatus, OperationLog
-from models.provider import ModelProvider
 from models.task import Task
 from models.user import User
 from schemas.process import ProcessResponse, UploadResponse
-from services.llm import LLMError, call_llm
+from services.llm import LLMError, LLMResult, chat, record_llm_call, resolve_provider
 from services.word import create_diff_docx, create_plain_docx, extract_text_from_docx
 
 logger = logging.getLogger("fileagent.process")
@@ -147,11 +147,13 @@ async def process(
     if task is None:
         raise HTTPException(400, "关联的任务已被删除")
 
-    # 任务指定了 provider 时，校验它仍存在且属于当前用户（防越权 + 防静默用错模型）
+    # 任务指定了 provider 时提前校验（防越权 + 防静默用错模型）：
+    # 让问题在返回 processing 之前就以 400 暴露，而不是后台跑一半才失败
     if task.provider_id is not None:
-        provider = db.get(ModelProvider, task.provider_id)
-        if provider is None or provider.user_id != current.id:
-            raise HTTPException(400, "任务指定的模型提供商已被删除或不可用，请重新选择")
+        try:
+            resolve_provider(db, current.id, task.provider_id, "text")
+        except LLMError as e:
+            raise HTTPException(400, str(e)) from e
 
     # 状态 → processing，清掉上次的错误信息
     log.status = LogStatus.PROCESSING
@@ -189,24 +191,29 @@ async def _run_processing(log_id: int) -> None:
             _mark_failed(db, log, "关联的任务已被删除")
             return
 
-        # 选 provider：任务指定 > 当前用户的默认 active
-        provider: ModelProvider | None = None
-        if task.provider_id is not None:
-            provider = db.get(ModelProvider, task.provider_id)
-            if provider is None or provider.user_id != log.user_id:
-                _mark_failed(db, log, "任务指定的模型提供商已被删除或不可用，请重新选择")
-                return
-
-        prompt = task.prompt_template.replace("{{content}}", log.original_content or "")
-
+        # 选 provider：任务指定 > 当前用户的默认 active（按 text 能力筛）
         try:
-            result = await call_llm(db, prompt, provider, user_id=log.user_id)
+            provider = resolve_provider(db, log.user_id, task.provider_id, "text")
         except LLMError as e:
             _mark_failed(db, log, str(e)[:2000])
             return
 
-        log.processed_content = result
-        log.provider_name = provider.name if provider else _default_provider_name(db, log.user_id)
+        # 快照成普通值：计量写入要丢给线程池，不能跨线程用这个 session 的 ORM 对象
+        provider_ref = (provider.id, provider.name)
+        prompt = task.prompt_template.replace("{{content}}", log.original_content or "")
+
+        try:
+            result = await chat([{"role": "user", "content": prompt}], provider)
+        except LLMError as e:
+            await _meter(log, provider_ref, error=str(e), attempts=e.attempts)
+            _mark_failed(db, log, str(e)[:2000])
+            return
+
+        await _meter(log, provider_ref, result=result)
+
+        log.processed_content = result.content
+        # 记实际选中的 provider 名，不再事后回查默认提供商（回查会记错）
+        log.provider_name = provider_ref[1]
         log.status = LogStatus.DONE
         log.processed_at = datetime.now(UTC)
         db.commit()
@@ -229,6 +236,33 @@ def _mark_failed(db: Session, log: OperationLog, message: str) -> None:
     log.error_message = message[:2000]
     log.processed_at = datetime.now(UTC)
     db.commit()
+
+
+async def _meter(
+    log: OperationLog,
+    provider_ref: tuple[int | None, str | None],
+    *,
+    result: LLMResult | None = None,
+    error: str | None = None,
+    attempts: int = 1,
+) -> None:
+    """
+    把一次 LLM 外呼记进 llm_calls
+
+    record_llm_call 是同步的（SQLAlchemy Session 是同步的），直接 await 调用会把
+    事件循环卡住，所以丢线程池。计量写失败由 record_llm_call 内部吞掉，不影响这里。
+    """
+    await run_in_threadpool(
+        record_llm_call,
+        user_id=log.user_id,
+        provider_id=provider_ref[0],
+        provider_name=provider_ref[1],
+        log_id=log.id,
+        purpose="chat",
+        result=result,
+        error=error,
+        attempts=attempts,
+    )
 
 
 @router.get("/process/{log_id}/status", response_model=ProcessResponse)
@@ -295,14 +329,3 @@ async def download(
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         headers=headers,
     )
-
-
-def _default_provider_name(db: Session, user_id: int) -> str | None:
-    """拿到实际使用的默认 provider 名字（当 task 未指定时，限当前用户名下）"""
-    p = (
-        db.query(ModelProvider)
-        .filter(ModelProvider.is_active == True, ModelProvider.user_id == user_id)  # noqa: E712
-        .order_by(ModelProvider.id)
-        .first()
-    )
-    return p.name if p else None
