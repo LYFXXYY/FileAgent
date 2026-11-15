@@ -21,8 +21,20 @@ from middleware.auth import get_current_user
 from models.operation_log import LogStatus, OperationLog
 from models.user import User
 from schemas.operation_log import LogListResponse, LogResponse
+from services.grading import deserialize_issues
 
 router = APIRouter()
+
+
+def _to_response(log: OperationLog) -> LogResponse:
+    """
+    ORM 字段之外补一个 issue_count
+
+    列表页不该为了显示条数就把整份 structured_output 拖过去，所以只在这里解析出个数。
+    历史数据和非批改任务都是 NULL，解析结果自然为 0。
+    """
+    count = len(deserialize_issues(log.structured_output))
+    return LogResponse.model_validate(log).model_copy(update={"issue_count": count})
 
 
 @router.get("", response_model=LogListResponse)
@@ -61,7 +73,7 @@ def list_logs(
         total=total,
         page=page,
         page_size=page_size,
-        items=[LogResponse.model_validate(i) for i in items],
+        items=[_to_response(i) for i in items],
     )
 
 
@@ -81,4 +93,4 @@ def get_log(
         from fastapi import HTTPException
 
         raise HTTPException(404, "记录不存在")
-    return log
+    return _to_response(log)

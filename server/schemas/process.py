@@ -5,6 +5,7 @@ from datetime import datetime
 from pydantic import BaseModel
 
 from models.operation_log import LogStatus
+from schemas.grading import GradingIssue
 
 
 class UploadResponse(BaseModel):
@@ -34,5 +35,10 @@ class ProcessResponse(BaseModel):
     processed_at: datetime | None
     error_message: str | None
     processed_content: str | None = None
+    # 结构化批改的批注清单。None = 非批改任务或历史数据；空列表 = 批改了但没报问题
+    issues: list[GradingIssue] | None = None
+    # true = 是批改任务但模型没按格式出 JSON，已退回自由文本。
+    # 丢了它，前端只能显示"0 处问题"，等于把失败伪装成没问题
+    grading_degraded: bool = False
 
     model_config = {"from_attributes": True}

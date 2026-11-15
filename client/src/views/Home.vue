@@ -19,7 +19,7 @@ import { extractErrorMessage } from '@/api/client'
 import { processApi } from '@/api/process'
 import { providerApi } from '@/api/providers'
 import { taskApi } from '@/api/tasks'
-import type { Provider, Task } from '@/api/types'
+import type { GradingIssue, Provider, Task } from '@/api/types'
 import { useHomeStore } from '@/stores/home'
 
 const homeStore = useHomeStore()
@@ -38,10 +38,115 @@ const processing = ref(homeStore.processing)
 const downloading = ref(homeStore.downloading)
 const processingError = ref(homeStore.processingError)
 const processedContent = ref(homeStore.processedContent)
+const gradingIssues = ref(homeStore.gradingIssues)
+const gradingDegraded = ref(homeStore.gradingDegraded)
+
+// ---------- 结构化批改渲染 ----------
+// 按问题类型上色，前端只认 8 个 canonical 值（与 schemas/grading.py 的 ISSUE_TYPES 对齐）
+const TYPE_COLOR: Record<string, string> = {
+  typo: '#dc2626', // 红
+  grammar: '#ea580c', // 橙
+  wording: '#d97706', // 黄
+  punctuation: '#65a30d', // 黄绿
+  structure: '#0891b2', // 蓝绿
+  logic: '#4f46e5', // 靛
+  content: '#7c3aed', // 紫
+  other: '#64748b', // 灰
+}
+
+// 问题类型的显示文案（与 schemas/grading.py 的 ISSUE_TYPES 一一对应）
+const TYPE_LABEL: Record<string, string> = {
+  typo: '错别字',
+  grammar: '语法',
+  wording: '用词',
+  punctuation: '标点',
+  structure: '结构',
+  logic: '逻辑',
+  content: '内容',
+  other: '其它',
+}
+
+// 点卡片 → 高亮原文中的对应片段，点片段 → 卡片上高亮
+const activeIssueIndex = ref<number | null>(null)
+
+interface Span {
+  text: string;
+  issue?: GradingIssue;
+  index: number | null;
+}
+interface Para { segs: Span[] }
+
+// 把原文按段落切开，按 start/end 匹配把问题片段套上 span
+// 找不到位置的（后端匹配失败）保持未定位，绝不猜
+function buildParagraphs(
+  text: string,
+  issues: GradingIssue[] | null,
+): Para[] {
+  if (!text) return []
+  if (!issues)
+    return text
+      .split('\n')
+      .map((line) => ({ segs: [{ text: line, index: null }] }))
+
+  const lines = text.split('\n')
+  const offsets: number[] = []
+  lines.reduce((acc, l) => {
+    offsets.push(acc)
+    return acc + l.length + 1
+  }, 0)
+
+  const out: Para[] = []
+  for (const [i, line] of lines.entries()) {
+    const start = offsets[i]
+    const end = start + line.length
+    const marks = issues
+      .map((issue, idx) => ({ issue, idx }))
+      .filter(
+        ({ issue }) =>
+          issue.start !== null &&
+          issue.end !== null &&
+          issue.start! < end &&
+          issue.end! > start,
+      )
+      .sort((a, b) => a.issue.start! - b.issue.start!)
+      .map(({ issue, idx }) => ({
+        s: Math.max(0, issue.start! - start),
+        e: Math.min(line.length, issue.end! - start),
+        issue,
+        idx,
+      }))
+
+    const segs: Span[] = []
+    let last = 0
+    for (const m of marks) {
+      if (m.s > last) segs.push({ text: line.slice(last, m.s), index: null })
+      segs.push({ text: line.slice(m.s, m.e), issue: m.issue, index: m.idx })
+      last = m.e
+    }
+    if (last < line.length) segs.push({ text: line.slice(last), index: null })
+    out.push({ segs })
+  }
+  return out
+}
+
+const displayTextParas = computed(() =>
+  buildParagraphs(
+    uploadResult.value?.extracted_text || '',
+    gradingIssues.value,
+  ),
+)
+
+// 点击卡片，滚动到原文里的对应位置
+function onIssueClick(idx: number) {
+  activeIssueIndex.value = idx
+  document
+    .getElementById(`issue-anchor-${idx}`)
+    ?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+}
 
 // 可用模型提供商数量（为 0 时在选任务步骤提示用户先配置）
 const activeProviderCount = computed(() =>
-  providers.value.filter(p => p.is_active).length
+  providers.value.filter((p) => p.is_active).length
 )
 
 // ---------- 轮询机制 ----------
@@ -84,7 +189,7 @@ async function pollOnce() {
       stopPolling()
       currentStep.value = 3
       processing.value = false
-      processedContent.value = resp.data.processed_content
+      applyResult(resp.data)
       ElMessage.success('处理完成')
       syncToStore()
     } else if (resp.data.status === 'failed') {
@@ -109,6 +214,15 @@ function syncToStore() {
   homeStore.downloading = downloading.value
   homeStore.processingError = processingError.value
   homeStore.processedContent = processedContent.value
+  homeStore.gradingIssues = gradingIssues.value
+  homeStore.gradingDegraded = gradingDegraded.value
+}
+
+// 把一次处理成功的响应内容铺到 UI：正文 + 问题清单 + 降级标记
+function applyResult(resp: { processed_content: string | null; issues: GradingIssue[] | null; grading_degraded: boolean }) {
+  processedContent.value = resp.processed_content
+  gradingIssues.value = resp.issues
+  gradingDegraded.value = resp.grading_degraded
 }
 
 // ---------- 生命周期 ----------
@@ -124,6 +238,8 @@ onMounted(async () => {
   downloading.value = homeStore.downloading
   processingError.value = homeStore.processingError
   processedContent.value = homeStore.processedContent
+  gradingIssues.value = homeStore.gradingIssues
+  gradingDegraded.value = homeStore.gradingDegraded
   pickedFile.value = null // File 对象不可序列化，恢复时重置
 
   // 如果恢复时仍处于处理中，查询一次后端真实状态，避免前端显示 stale 状态
@@ -174,7 +290,7 @@ async function refreshProcessingStatus() {
         stopPolling()
         currentStep.value = 3
         processing.value = false
-        processedContent.value = resp.data.processed_content
+        applyResult(resp.data)
         syncToStore()
       } else if (resp.data.status === 'failed') {
         stopPolling()
@@ -244,7 +360,7 @@ async function doProcess() {
       stopPolling()
       currentStep.value = 3
       processing.value = false
-      processedContent.value = resp.data.processed_content
+      applyResult(resp.data)
       ElMessage.success('处理完成')
       syncToStore()
     } else if (resp.data.status === 'failed') {
@@ -307,6 +423,8 @@ function processNewFile() {
   processing.value = false
   processingError.value = null
   processedContent.value = null
+  gradingIssues.value = null
+  gradingDegraded.value = false
   homeStore.logId = null
   syncToStore()
 }
@@ -323,6 +441,8 @@ function reset() {
   downloading.value = false
   processingError.value = null
   processedContent.value = null
+  gradingIssues.value = null
+  gradingDegraded.value = false
   homeStore.clear() // 清空 store 中的持久化状态
 }
 </script>
@@ -512,6 +632,72 @@ function reset() {
           </div>
           <h3>处理完成</h3>
           <p class="card-desc">点击下方按钮下载结果 Word 文件</p>
+
+          <!-- 批改任务问题清单卡片：点击卡片定位原文高亮，点击高亮定位卡片 -->
+          <template v-if="gradingIssues">
+            <div v-if="gradingDegraded" class="grading-degraded-tip">
+              <el-alert
+                title="模型未按约定格式返回，已退回自由文本结果"
+                type="warning"
+                :closable="false"
+              />
+            </div>
+            <div v-else-if="!gradingIssues.length" class="grading-empty-tip">
+              批改完成，未发现问题
+            </div>
+
+            <el-collapse v-else name="issues">
+              <el-collapse-item :title="'批注清单（共 ' + gradingIssues.length + ' 处）'" name="issues">
+                <div class="issue-list">
+                  <div
+                    v-for="(issue, idx) in gradingIssues"
+                    :key="idx"
+                    :id="'issue-anchor-' + idx"
+                    :ref="'issueCard' + idx"
+                    class="issue-card"
+                    :class="{ 'issue-card-active': activeIssueIndex === idx }"
+                    @click="onIssueClick(idx)"
+                  >
+                    <div class="issue-card-header">
+                      <el-tag size="small" :color="TYPE_COLOR[issue.type]" effect="dark">
+                        {{ TYPE_LABEL[issue.type] }}
+                      </el-tag>
+                      <span class="issue-confidence">把握 {{ Math.round(issue.confidence * 100) }}%</span>
+                      <span v-if="issue.start === null" class="issue-unlocated">未定位</span>
+                    </div>
+                    <div class="issue-original">{{ issue.original }}</div>
+                    <div v-if="issue.suggestion" class="issue-suggestion">→ {{ issue.suggestion }}</div>
+                    <div v-if="issue.reason" class="issue-reason">{{ issue.reason }}</div>
+                  </div>
+                </div>
+              </el-collapse-item>
+            </el-collapse>
+
+            <!-- 原文高亮视图 -->
+            <el-collapse name="annotated">
+              <el-collapse-item title="查看原文批注" name="annotated">
+                <div class="text-preview annotated-text">
+                    <template v-for="(para, pi) in displayTextParas" :key="pi">
+                    <p>
+                      <template v-for="(seg, si) in para.segs" :key="si">
+                        <span
+                          v-if="seg.issue"
+                          class="highlight-segment"
+                          :class="{ 'highlight-active': activeIssueIndex === seg.index }"
+                          :style="{ backgroundColor: TYPE_COLOR[seg.issue.type] + '33' }"
+                          @click="activeIssueIndex = seg.index"
+                        >
+                          {{ seg.text }}
+                        </span>
+                        <span v-else>{{ seg.text }}</span>
+                      </template>
+                    </p>
+                  </template>
+                </div>
+              </el-collapse-item>
+            </el-collapse>
+          </template>
+
           <!-- 结果文本预览 -->
           <el-collapse v-if="processedContent" style="margin-bottom: 16px; text-align: left;">
             <el-collapse-item title="预览处理结果" name="result">

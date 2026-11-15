@@ -326,16 +326,17 @@ async def chat_json(
     *,
     json_schema: dict[str, Any] | None = None,
     read_timeout: float | None = None,
-) -> tuple[LLMResult, Any]:
+) -> tuple[LLMResult, Any | None]:
     """
     要求模型输出 JSON，按 json_schema → json_object → 不带 response_format 三级降级
 
     国产 OpenAI 兼容端点对 response_format 的支持参差，硬绑一种会在换模型时整片失败。
-    返回 (原始结果, 解析后的对象)。用 json_object 档时提示词里必须含 "json" 字样，
+    返回 (原始结果, 解析后的对象)；对象为 **None 表示调用成功但输出不是合法 JSON**，
+    由调用方决定降级还是报错。用 json_object 档时提示词里必须含 "json" 字样，
     这是 OpenAI 的硬性要求，兼容端点通常也照抄。
 
-    ⚠ 只在"端点明确拒绝 response_format"时降级。**输出解析失败不降级也不重试**——
-    降级方向是越来越松，再打一次大概率还是烂 JSON，白烧一倍 token。
+    ⚠ 只在"端点明确拒绝 response_format"时降档。**输出解析失败就地返回、不再往下打**——
+    降级方向是越来越松，同一份提示再打一次大概率还是烂 JSON，白烧一倍 token。
     """
     last_error = "模型未返回可解析的 JSON"
     for response_format in _format_ladder(json_schema):
@@ -350,7 +351,13 @@ async def chat_json(
             logger.debug("端点拒绝 response_format=%s，降级重试", response_format)
             continue
 
-        return result, extract_json(result.content)
+        try:
+            return result, extract_json(result.content)
+        except LLMError as e:
+            # 模型不按格式出货是预期结果而不是异常。更松的一档只会更不像 JSON，
+            # 所以把原始内容交回调用方自己兜，而不是再花钱打一次
+            logger.debug("端点输出不可解析为 JSON，交调用方降级：%s", str(e)[:200])
+            return result, None
 
     raise LLMError(last_error)
 

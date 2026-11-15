@@ -534,14 +534,15 @@ def test_chat_json_propagates_auth_error_without_degrading(reset_globals, sleeps
     assert len(client.bodies) == 1
 
 
-def test_chat_json_does_not_retry_on_unparseable_output(reset_globals, sleeps):
-    """烂 JSON 就一次报错收场：降级只会越降越松，再打一次多半还是烂，纯烧钱"""
+def test_chat_json_returns_none_inst_of_raising_on_unparseable_output(reset_globals, sleeps):
+    """烂 JSON 是预期结果不是异常：把原始内容交回调用方，且绝不再打第二次"""
     client = _ScriptClient([_ok("抱歉，我无法输出 JSON")])
     reset_globals.setattr(llm, "get_client", lambda: client)
 
-    with pytest.raises(llm.LLMError, match="不是合法 JSON"):
-        asyncio.run(llm.chat_json([{"role": "user", "content": "json"}], _provider()))
+    result, parsed = asyncio.run(llm.chat_json([{"role": "user", "content": "json"}], _provider()))
 
+    assert parsed is None
+    assert result.content == "抱歉，我无法输出 JSON"
     assert len(client.bodies) == 1
 
 

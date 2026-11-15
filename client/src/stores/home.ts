@@ -19,7 +19,7 @@
 
 import { defineStore } from 'pinia'
 import { ref, watch } from 'vue'
-import type { UploadResponse } from '@/api/types'
+import type { GradingIssue, UploadResponse } from '@/api/types'
 
 interface HomeState {
   currentStep: number
@@ -30,6 +30,8 @@ interface HomeState {
   downloading: boolean
   processingError: string | null
   processedContent: string | null
+  gradingIssues: GradingIssue[] | null
+  gradingDegraded: boolean
 }
 
 const STORAGE_KEY = 'fileagent_home_state'
@@ -44,6 +46,8 @@ export const useHomeStore = defineStore('home', () => {
   const downloading = ref(false)
   const processingError = ref<string | null>(null)
   const processedContent = ref<string | null>(null)
+  const gradingIssues = ref<GradingIssue[] | null>(null)
+  const gradingDegraded = ref(false)
 
   // ---------- 持久化方法 ----------
   function save() {
@@ -57,6 +61,8 @@ export const useHomeStore = defineStore('home', () => {
         downloading: downloading.value,
         processingError: processingError.value,
         processedContent: processedContent.value,
+        gradingIssues: gradingIssues.value,
+        gradingDegraded: gradingDegraded.value,
       }
       sessionStorage.setItem(STORAGE_KEY, JSON.stringify(state))
     } catch (err) {
@@ -67,7 +73,18 @@ export const useHomeStore = defineStore('home', () => {
 
   // 任一状态变化自动持久化（uploadResult 含嵌套对象，需要 deep）
   watch(
-    [currentStep, selectedTaskId, logId, uploadResult, processing, downloading, processingError, processedContent],
+    [
+      currentStep,
+      selectedTaskId,
+      logId,
+      uploadResult,
+      processing,
+      downloading,
+      processingError,
+      processedContent,
+      gradingIssues,
+      gradingDegraded,
+    ],
     save,
     { deep: true }
   )
@@ -86,6 +103,8 @@ export const useHomeStore = defineStore('home', () => {
         downloading.value = parsed.downloading ?? false
         processingError.value = parsed.processingError ?? null
         processedContent.value = parsed.processedContent ?? null
+        gradingIssues.value = parsed.gradingIssues ?? null
+        gradingDegraded.value = parsed.gradingDegraded ?? false
       }
     } catch (err) {
       console.warn('sessionStorage restore failed:', err)
@@ -104,6 +123,8 @@ export const useHomeStore = defineStore('home', () => {
     downloading.value = false
     processingError.value = null
     processedContent.value = null
+    gradingIssues.value = null
+    gradingDegraded.value = false
   }
 
   return {
@@ -115,6 +136,8 @@ export const useHomeStore = defineStore('home', () => {
     downloading,
     processingError,
     processedContent,
+    gradingIssues,
+    gradingDegraded,
     save,
     restore,
     clear,

@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import os
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
@@ -28,10 +29,26 @@ from config import get_settings
 from database import SessionLocal, get_db
 from middleware.auth import get_current_user
 from models.operation_log import LogStatus, OperationLog
+from models.provider import ModelProvider
 from models.task import Task
 from models.user import User
+from schemas.grading import GRADING_JSON_SCHEMA
 from schemas.process import ProcessResponse, UploadResponse
-from services.llm import LLMError, LLMResult, chat, record_llm_call, resolve_provider
+from services.grading import (
+    build_messages,
+    deserialize_issues,
+    is_degraded,
+    parse_grading_output,
+    serialize_result,
+)
+from services.llm import (
+    LLMError,
+    LLMResult,
+    chat,
+    chat_json,
+    record_llm_call,
+    resolve_provider,
+)
 from services.word import create_diff_docx, create_plain_docx, extract_text_from_docx
 
 logger = logging.getLogger("fileagent.process")
@@ -198,20 +215,27 @@ async def _run_processing(log_id: int) -> None:
             _mark_failed(db, log, str(e)[:2000])
             return
 
-        # 快照成普通值：计量写入要丢给线程池，不能跨线程用这个 session 的 ORM 对象
+        # 快照成普通值：计量写入要丢线程池，不能跨线程用这个 session 的 ORM 对象
         provider_ref = (provider.id, provider.name)
         prompt = task.prompt_template.replace("{{content}}", log.original_content or "")
 
         try:
-            result = await chat([{"role": "user", "content": prompt}], provider)
+            output = await _run_model(task, provider, prompt, log.original_content or "")
         except LLMError as e:
-            await _meter(log, provider_ref, error=str(e), attempts=e.attempts)
+            await _meter(
+                log,
+                provider_ref,
+                purpose="grading" if task.is_grading else "chat",
+                error=str(e),
+                attempts=e.attempts,
+            )
             _mark_failed(db, log, str(e)[:2000])
             return
 
-        await _meter(log, provider_ref, result=result)
+        await _meter(log, provider_ref, purpose=output.purpose, result=output.result)
 
-        log.processed_content = result.content
+        log.processed_content = output.revised_text
+        log.structured_output = output.structured
         # 记实际选中的 provider 名，不再事后回查默认提供商（回查会记错）
         log.provider_name = provider_ref[1]
         log.status = LogStatus.DONE
@@ -242,6 +266,7 @@ async def _meter(
     log: OperationLog,
     provider_ref: tuple[int | None, str | None],
     *,
+    purpose: str,
     result: LLMResult | None = None,
     error: str | None = None,
     attempts: int = 1,
@@ -258,10 +283,51 @@ async def _meter(
         provider_id=provider_ref[0],
         provider_name=provider_ref[1],
         log_id=log.id,
-        purpose="chat",
+        purpose=purpose,
         result=result,
         error=error,
         attempts=attempts,
+    )
+
+
+@dataclass(frozen=True)
+class _ModelOutput:
+    """一次模型调用的产出：计量结果、修订正文、结构化清单 JSON、计量用途"""
+
+    result: LLMResult
+    revised_text: str
+    structured: str | None
+    purpose: str
+
+
+async def _run_model(
+    task: Task,
+    provider: ModelProvider,
+    prompt: str,
+    original_text: str,
+) -> _ModelOutput:
+    """
+    批改任务要结构化清单，普通任务只要一段修订文本
+
+    结构化失败不改变任务结局：`parse_grading_output` 会退回自由文本，diff 下载照旧，
+    只是没有问题清单可点。把用户的文档判失败从来不是一个好选项。
+    """
+    if not task.is_grading:
+        result = await chat([{"role": "user", "content": prompt}], provider)
+        return _ModelOutput(result, result.content, None, "chat")
+
+    result, payload = await chat_json(
+        build_messages(prompt),
+        provider,
+        json_schema=GRADING_JSON_SCHEMA,
+    )
+    grading = parse_grading_output(result.content, payload, original_text)
+    return _ModelOutput(
+        result,
+        grading.revised_text,
+        serialize_result(grading),
+        # 用途里带上是否真拿到了清单，评测台才能把这两类分开统计
+        "grading" if not grading.degraded else "grading_degraded",
     )
 
 
@@ -280,12 +346,15 @@ async def process_status(
     if log is None:
         raise HTTPException(404, "记录不存在")
 
+    done = log.status == LogStatus.DONE
     return ProcessResponse(
         log_id=log.id,
         status=log.status,
         processed_at=log.processed_at,
         error_message=log.error_message,
-        processed_content=log.processed_content if log.status == LogStatus.DONE else None,
+        processed_content=log.processed_content if done else None,
+        issues=deserialize_issues(log.structured_output) if done else None,
+        grading_degraded=is_degraded(log.structured_output) if done else False,
     )
 
 

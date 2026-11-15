@@ -24,13 +24,18 @@ Word 文档 AI 处理平台：上传 `.docx` → 按用户自定义 Prompt 调 L
 ```bash
 uv sync                                        # 装依赖（含 dev 组）
 uv run uvicorn main:app --reload --port 8000    # 起后端，Swagger 在 /docs
-uv run pytest -q                               # 62 passed；纯函数 + 假 client + 内存 SQLite，不连 MySQL 不出网
+uv run pytest -q                               # 90 passed；纯函数 + 假 client + 内存 SQLite，不连 MySQL 不出网
 uv run ruff check .                            # 全绿
 uv run ruff format --check .                   # 全部已格式化
 uv lock --check                                # 依赖锁一致性
-uv run python migrate_add_provider_capabilities.py   # 幂等：补 provider.capabilities 列，新库部署后要跑
-uv run python test_e2e.py                      # 端到端 33 项断言：需后端已在 8000 运行，会造数据，见 §7
+uv run python migrate_add_provider_capabilities.py         # 幂等：补 provider.capabilities
+uv run python migrate_add_log_structured_output.py         # 幂等：补 log.structured_output
+uv run python test_e2e.py                      # 端到端 33 项：需后端在 8000，会造数据，见 §7
+uv run uvicorn test_llm_server:app --port 19000            # 假 OpenAI 端点（另开终端）
+uv run python test_e2e_structural.py           # 结构化批改端到端 34 项，零真实 token
 ```
+
+⚠ **8000 端口在本机可能"看不见地被占用"**：WSL 侧若有服务监听 8000，因 mirrored 网络，Windows `netstat` 查不到该监听，现象是 uvicorn 报 `[Errno 10048]` 而 `curl localhost:8000` 却能收到对方的 404。查证要跑 `wsl -e bash -lc "ss -ltnp | grep ':8000'"`。换端口时 `test_e2e_structural.py` 走 `FA_API` / `FA_MOCK_LLM` 环境变量，`test_e2e.py` 仍是硬编码 8000。
 
 前端 `cd client`：
 
@@ -106,10 +111,22 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - `chat()` 里 `except LLMError` 会重新包装以带上 attempts——新增 `LLMError` 抛出点时要确认 attempts 没被抹成默认 1。
 - `capabilities` 是逗号分隔串，合法取值在 `schemas/provider.py` 的 `KNOWN_CAPABILITIES`。加新能力要同时改那里、前端 `Providers.vue` 的 `capabilityOptions`、以及新增的调用点。
 
+### 3.7 结构化批改（阶段 1）
+
+- **绝不要求模型输出坐标。** LLM 不数字符，让它给 `paragraph_index` / `char_offset` 会大面积错位且错位无信号，批注指到错位置比不指更糟。模型只逐字摘 `original` 片段，`start/end` 由 `services/grading.py:_find_unused_span` 在 `original_content` 上精确匹配；匹配不到留 `None`，前端显示"未定位"。改这条前先想清楚怎么验证错位——无法验证的东西不要交给模型。
+- **同名片段依次认领不同出现位置**：`claimed` 区间列表保证多条相同 `original` 不会全指到第一处，且区间互不重叠。
+- **解析失败必须降级而不是 fail**：端点吐自由文本、缺 `revised_text`、被围栏包裹都是常态。`parse_grading_output` 退回"整段输出当修订文 + `degraded=True`"，diff 下载行为与阶段 0 完全一致。用户的文档必须拿到一个结果。
+- **`revised_text` 是结构化清单的前提**：缺它就降级，不去猜一份修订文。批改任务仍把修订文写进 `processed_content`，所以 `create_diff_docx` 一行都不用改。
+- 问题类型是**开放输入 + 后端归一化**：`normalize_type()` 中英别名收进 8 个 canonical 值，认不出归 `other`。加枚举要同时改 `schemas/grading.py` 的 `_TYPE_ALIASES` 和前端 `TYPE_COLOR` / `TYPE_LABEL`。硬枚举会让换模型时整片报错。
+- 单条意见不合契约只丢那一条，不连累整份清单。
+- `structured_output` 为 NULL 表示非批改任务或历史数据；有值但 `degraded=true` 表示模型没守格式。**两者语义不同，`grading_degraded` 必须单独透给前端**，否则"没发现问题"和"没结构化"都显示 0 条，等于撒谎。
+- 日志列表只带 `issue_count`，不带整份清单（`api/v1/logs.py:_to_response` 解析 JSON 取条数）。
+- 计量 `purpose` 现在分 `chat` / `grading` / `grading_degraded`，评测台按它分组。新增调用点要传对的 purpose。
+- 结构化只在 `task.is_grading == True` 生效，普通任务走 `chat` 不走 `chat_json`。
+
 ## 4. 前端不可违反的约定
 
-- **token 双写**：登录成功同时写 Pinia store 和 `localStorage`；axios 拦截器只读 `localStorage`（在 API 层拿不到 store）。key 常量集中在 `client/src/api/client.ts`（`fileagent_token` / `fileagent_username`），别处不要硬编码。
-- 401 处理要排除 `/auth/login`（那是密码错误），用 `window.location.replace` 带 `redirect` 参数（拦截器层拿不到 router 实例）。
+- **token 双写**：登录成功同时写 Pinia store 和 `localStorage`；axios 拦截器只读 `localStorage`（在 API 层拿不到 store）。key 常量集中在 `client/src/api/client.ts`（`fileagent_token` / `fileagent_username`），别处不要硬编码。- 401 处理要排除 `/auth/login`（那是密码错误），用 `window.location.replace` 带 `redirect` 参数（拦截器层拿不到 router 实例）。
 - 自动重试**只针对无响应的 GET**，1 次 / 800ms；写操作绝不重试。
 - 处理结果**一律靠轮询 `status` 拿**，不要依赖 `POST /process` 的响应体（它只返回 processing）。`POLL_INTERVAL=5000`、`MAX_POLL_COUNT=120`（10 分钟上限）。
 - `AppLayout.vue:119` 用 `<keep-alive>` 包住 router-view，工作台切页不销毁 → 必须成对处理 `onActivated`（恢复状态 + 重启轮询）/ `onDeactivated`（停轮询）。
@@ -118,6 +135,8 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - 路径别名 `@` → `src`，`vite.config.ts` 与 `tsconfig.app.json` 两处都要配。
 - Element Plus 是**全量引入 + 全量 CSS**（`client/src/main.ts:10`），所以尽管路由做了懒加载，产物仍是单个 ~890kB chunk，build 的体积告警是已知现象。
 - provider 的 `capabilities` 后端存逗号分隔**字符串**、表单要的是**数组**，转换只认 `KNOWN_CAPABILITIES` 里的已知值（`client/src/views/Providers.vue` 的 `toCapabilityList()` / `buildPayload()`）——顺带做了顺序归一化和脏值丢弃，未知标记不会把表单卡死也不会吃 422。提交**必须走 `buildPayload()`**，别把带 `capabilityList` 临时字段的 form 整个发出去。
+- 结构化批改的原文高亮在 `Home.vue:buildParagraphs()`：按 `\n` 分段，用全局偏移 `start/end` 落到段内区间再套 span。**非高亮片段也必须给 `index: null`**（`Span.index` 是 `number | null` 必填），漏了会让相邻片段的 `seg.index` 是 `undefined`，点击时把 `activeIssueIndex` 写成 `undefined` 从而永不匹配。匹配不到位置的 issue 显示"未定位"，不要猜位置。
+- `gradingIssues` / `gradingDegraded` 和 `processedContent` 一样要走 `syncToStore()` + `home.ts` 持久化，并在 `reset()` / `goBackToUpload()` 里成对清空；`applyResult()` 是唯一铺结果到 UI 的入口（3 处轮询/上传回调都调它），别在调用点各自赋值。
 
 ## 5. 数据库变更
 
@@ -148,15 +167,16 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 
 ## 7. 当前基线与已知缺口
 
-当前路线（阶段 0–5，含为什么这么排）在 SPEC §9.2；阶段 0 的交付与验证明细在 SPEC §9.3，改 bug 前先看那两张表。
+当前路线（阶段 0–5，含为什么这么排）在 SPEC §9.2；阶段 0 交付与验证明细在 SPEC §9.3，阶段 1 在 SPEC §9.4，改 bug 前先看这几张表。
 
-门禁基线（均已实测通过）：`uv run pytest -q` → **62 passed**；`uv run ruff check .` → 全绿；`ruff format --check .` → 全部已格式化；`uv lock --check` → 一致（46 包，阶段 0 未新增依赖）；`npm run build` → 通过；`uv run python test_e2e.py` → 33/33。
+门禁基线（均已实测通过）：`uv run pytest -q` → **90 passed**；`uv run ruff check .` → 全绿；`ruff format --check .` → 41 files already formatted；`uv lock --check` → 一致（46 包，阶段 0/1 均未新增依赖）；`npm run build` → 通过；`uv run python test_e2e.py` → 33/33；`uv run python test_e2e_structural.py` → 34/34。
 
 - **`server/test_e2e.py` 是仓库自带的端到端冒烟脚本，不是遗留物，别删**：需后端已在 8000 运行、连真实 MySQL。它会注册 `tester_*` / `other_*` 两个临时账号，造 1 条日志和 1 个上传文件；脚本自身只删 task/provider，**账号、日志、落盘文件、以及新增的 `llm_calls` 行要跑完手动清**。第 7 节现在真走重试路径（连不上假 provider → 重试 3 次 → failed），第 10 节直接改库把日志置为 done 来验证下载，都属预期行为。
+- **`server/test_e2e_structural.py` + `test_llm_server.py` 是阶段 1 新增的结构化端到端**，同样别删：需后端 + 假 LLM 两个进程都在跑，全程零真实 token。mock 端点**刻意不支持 `response_format`**（回 400）来如实模拟国产兼容端点并逼出 `chat_json` 的降级路径，所以 LLM 日志里出现 2 条 `400 Bad Request` 是预期行为不是故障。它注册 `e2e_s_*` 账号，跑完清理方式和上面一样。
 - 单测**不连 MySQL 也不出网**：HTTP 走假 client（替 `services.llm.get_client`），provider 路由走内存 SQLite。所以 `pytest` 绿不代表能连上数据库，端到端才是那一层的验证。加测试请保持这个边界，也别引入 `pytest-asyncio`——现有测试直接 `asyncio.run()` 就够。
 - `uploads/`、`outputs/`、`.env`、各类缓存已 ignore；`.env.example` 靠 `.gitignore` 里的 `!.env.example` 例外入库。
 - SPEC §11 示例写 `JWT_EXPIRE_HOURS=2`，本机 `.env` 实际是 24；`.env` 不入库，以本机为准。
-- 未做：限流、api_key 字段级加密、Alembic、Docker / 多 worker、表格提取、老库外键规则对齐、成本价格表（计量只存 token 不算钱，留给评测台阶段）。
+- 未做：限流、api_key 字段级加密、Alembic、Docker / 多 worker、表格提取、老库外键规则对齐、成本价格表（计量只存 token 不算钱，留给评测台阶段）、问题清单写进交付 docx、`json_schema` 严格档对真实端点的验证。
 
 ## 8. 两份副本，手动同步
 
@@ -165,7 +185,7 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - 它有 `README.md` / `DEPLOY.md` / `deploy.ps1` / `.env.example` / `requirements.txt`，**没有 SPEC.md**。
 - 它的注释已按"去 AI 味"重写，**剥掉了 Java 对比块**；主仓库保留。
 - 两边业务逻辑应保持一致，但**没有任何自动同步**：主仓库改了逻辑要手动同步过去（反之亦然），注释风格各自保留。
-- ⚠ **阶段 0 的改动目前只在主仓库，demo 副本落后一整轮**（缺 `llm_calls` 表、`capabilities` 列、新版 `services/llm.py` 及其接线、前端能力多选）。同步时注意 demo 那边：`pyproject.toml` 已经是 `fileagent-server` 且有 `requirements.txt`，`.env.example` 要一并补 6 个新配置项，`migrate_add_provider_capabilities.py` 得带上，注释仍按 demo 的去 AI 味风格重写（不带 Java 对比块）。要不要现在就同步，属于交付决定，先问用户。
+- ⚠ **demo 副本目前落后主仓库两个阶段（阶段 0 + 阶段 1）**，实测确认它仍是老版：`services/llm.py` 只有 `call_llm`，没有 `models/llm_call.py`、没有 `capabilities`、没有 `structured_output`。同步时要一并带过去：新版 `services/llm.py`、`services/grading.py`、`schemas/grading.py`、`models/llm_call.py`、两个 migrate 脚本、`test_llm_server.py` 与 `test_e2e_structural.py`、`.env.example` 的 6 个新配置项，以及前端 provider 能力多选和 Home.vue 的问题清单卡片。demo 侧 `pyproject.toml` 已是 `fileagent-server` 且有 `requirements.txt`（需补依赖说明），注释仍按 demo 的去 AI 味风格重写（不带 Java 对比块）。要不要同步、同步到哪一轮，属于交付决定，先问用户。
 
 ## 9. 提交
 

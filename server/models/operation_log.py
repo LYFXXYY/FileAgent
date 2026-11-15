@@ -62,10 +62,13 @@ class OperationLog(Base):
     original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
 
     # ---------- 正文内容 ----------
-    # Text 在 MySQL 中映射为 TEXT（65KB）。Word 文档纯文本很少超此限制
-    # 如果有大文件需求，可改为 sqlalchemy.dialects.mysql.LONGTEXT（4GB）
+    # 本机真实列是 LONGTEXT 而非 TEXT（见 SPEC §6 结构漂移表）——这两张表早期手工按
+    # SPEC 建过，create_all() 从不 ALTER，所以 ORM 声明和线上列对不上，以线上为准
     original_content: Mapped[str | None] = mapped_column(Text, nullable=True)
     processed_content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 结构化批改的问题清单 JSON，仅批改任务写入。
+    # NULL = 非批改任务或历史数据；有值但 degraded=true = 模型没按格式出货，已退回自由文本
+    structured_output: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # ---------- 时间戳 ----------
     uploaded_at: Mapped[datetime] = mapped_column(

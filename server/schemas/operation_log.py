@@ -20,6 +20,8 @@ class LogResponse(BaseModel):
     processed_at: datetime | None
     status: LogStatus
     error_message: str | None
+    # 结构化批改的批注条数。0 有两种含义：非批改任务，或批改了但没发现问题
+    issue_count: int = 0
 
     model_config = {"from_attributes": True}
 

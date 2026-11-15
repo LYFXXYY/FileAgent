@@ -88,12 +88,32 @@ export interface UploadResponse {
   uploaded_at: string
 }
 
+/**
+ * 一条结构化批改意见
+ *
+ * start / end 是后端在原文里精确匹配出来的偏移，null 表示没匹配上——前端此时显示
+ * "未定位"而不是硬找位置，避免把批注指到错的地方。
+ */
+export interface GradingIssue {
+  type: 'typo' | 'grammar' | 'wording' | 'punctuation' | 'structure' | 'logic' | 'content' | 'other'
+  original: string
+  suggestion: string
+  reason: string
+  confidence: number
+  start: number | null
+  end: number | null
+}
+
 export interface ProcessResponse {
   log_id: number
   status: 'pending' | 'processing' | 'done' | 'failed'
   processed_at: string | null
   error_message: string | null
   processed_content: string | null
+  /** null = 非批改任务或历史数据；空数组 = 批改了但没发现问题 */
+  issues: GradingIssue[] | null
+  /** true = 模型未按 JSON 格式出货，已退回自由文本（和 issues=[] 不是一回事） */
+  grading_degraded: boolean
 }
 
 // ========== 操作日志 ==========
@@ -108,6 +128,7 @@ export interface LogEntry {
   processed_at: string | null
   status: 'pending' | 'processing' | 'done' | 'failed'
   error_message: string | null
+  issue_count: number
 }
 
 export interface LogListResponse {

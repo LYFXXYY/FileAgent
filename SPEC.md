@@ -346,7 +346,7 @@ SQLAlchemy 连接池配置：`pool_size=10, max_overflow=20, pool_pre_ping=True`
 | 函数 | 职责 | 碰 DB |
 |---|---|---|
 | `chat(messages, provider, ...)` | 发一轮请求，返回 `LLMResult`（内容 + token + 耗时 + attempts） | 否 |
-| `chat_json(...)` | 要 JSON 输出，按 `json_schema → json_object → 不带` 三级降级 | 否 |
+| `chat_json(...)` | 要 JSON 输出，按 `json_schema → json_object → 不带` 三级降级；返回 `(LLMResult, 解析结果或 None)` | 否 |
 | `resolve_provider(db, user_id, provider_id, capability)` | 按能力和归属选提供商 | 是（只读） |
 | `record_llm_call(...)` | 写一行 `llm_calls` 计量 | 是（自建独立 session） |
 
@@ -356,7 +356,9 @@ SQLAlchemy 连接池配置：`pool_size=10, max_overflow=20, pool_pre_ping=True`
 
 **重试白名单**：只重试网络错误、超时、429、5xx（见 `_RETRYABLE_STATUS`）。其他 4xx 一次就失败——密钥无效重试也不会变对，纯烧 token。429 优先听 `Retry-After`（超过 60 秒不认），否则指数退避加随机抖动，避免并发请求同拍重试。
 
-**降级不等于重试**：`chat_json` 只在"端点明确拒绝 `response_format`"时降一档；**输出解析失败直接报错，不再打第二次**。降级方向是越来越松，同一份提示再打一次大概率还是烂 JSON，白烧一倍 token。这条是写单测时才发现的，第一版实现会为一句话的解析失败连打三次。
+**降级不等于重试**：`chat_json` 只在"端点明确拒绝 `response_format`"时降一档。**输出解析失败不降档也不重打**——降级方向是越来越松，同一份提示再打一次大概率还是烂 JSON，白烧一倍 token。这条是写单测时才发现的，第一版实现会为一句话的解析失败连打三次。
+
+阶段 1 又把「解析失败」的语义从**抛错**改成**返回 `(result, None)`**：模型不按格式出货是预期结果而不是异常，调用方（`services/grading.py`）拿到 `None` 就退回自由文本，用户照样能拿到批改结果。返回类型是 `tuple[LLMResult, Any | None]`。
 
 **并发闸**：进程内 `asyncio.Semaphore(llm_max_concurrency)`。⚠ 和启动 reaper 一样是单 worker 假设，多 worker 时每进程各有一个，不是全局上限。
 
@@ -365,6 +367,48 @@ SQLAlchemy 连接池配置：`pool_size=10, max_overflow=20, pool_pre_ping=True`
 **计量是旁路**：`llm_calls` 记 token / 耗时 / attempts / 状态，但写失败只 `logger.warning`，绝不把已经成功的处理判成 failed。`attempts` 在失败路径要从 `LLMError.attempts` 取——不取的话库里永远是 1，看不出"重试到耗尽"和"一次就挂"的区别（这条也是实测踩出来的）。
 
 **provider 名存快照**：处理时直接记实际选中的 `provider.name`，不再事后回查默认提供商——回查可能查到另一个模型。
+
+### 5.8 结构化批改（阶段 1）
+
+批改任务（`task.is_grading == True`）不再只要一篇修订文，而是同时产出**可定位、可打分的问题清单**。
+
+| 模块 | 职责 |
+|---|---|
+| `schemas/grading.py` | `GradingIssue` / `GradingResult` 契约、给端点看的 `GRADING_JSON_SCHEMA`、`normalize_type()` 类型归一化 |
+| `services/grading.py` | 输出契约（system 消息）、解析、原文定位、序列化落库/出库 |
+| `api/v1/process.py:_run_model` | 按 `is_grading` 分流：批改走 `chat_json`，普通任务走 `chat` |
+
+**关键设计：坐标不由模型给。** LLM 不数字符，让它输出 `paragraph_index` 或 `char_offset` 会大面积错位，而且错了没有任何信号，批注指到错位置比不指更糟。所以模型只逐字摘原文片段，`start/end` 由后端在 `original_content` 上精确匹配：
+
+- 同一 `original` 出现多次且提了多条 → 依次认领不同出现位置（`_find_unused_span` 扫描时跳过已占用区间）
+- 匹配不到 → `start=None`，前端显示"未定位"，绝不猜
+- 区间互不重叠，`claimed` 列表保证不重复认领
+
+**类型归一化是开放集。** 批改提示词由用户自写，模型爱用中文类型名（"错别字""前后不一致"）。硬枚举会在换模型时整片报错，所以 `_TYPE_ALIASES` 中英别名都收到 8 个 canonical 值，认不出来归 `other`，绝不因类型名丢掉一条意见。
+
+**失败降级而不是失败。** 端点没吐合法 JSON、或缺 `revised_text` → `degraded=True`，`processed_content` 存模型原始输出，行为完全等价于阶段 0 之前，diff 下载不受影响。用户的文档必须拿到一个结果，不能因为模型不守格式就判 failed。
+
+**为什么不破坏现有下载：** 结构化输出里**保留完整 `revised_text`** 写进 `processed_content`，`create_diff_docx` 一行没改。问题清单单独存在 `operation_logs.structured_output`（JSON 串），NULL 表示非批改任务或历史数据。
+
+**`grading_degraded` 必须单独暴露给前端。** 少了这个标记，"批了但没发现问题"和"没能结构化所以没清单"都显示 0 条 —— 那是撒谎。
+
+**日志页只带条数。** `LogResponse.issue_count` 由 `_to_response()` 解析 JSON 得出，不把整份清单拖进列表响应。
+
+### 5.9 本地假 LLM 端点（验证用）
+
+`server/test_llm_server.py` + `server/test_e2e_structural.py` 构成结构化批改的端到端验证：
+
+- mock 端点**刻意不支持 `response_format`**（收到 `json_schema`/`json_object` 返回 400），如实模拟国产兼容端点的常见行为，逼 `chat_json` 走降级路径
+- 返回固定 JSON（含错别字意见 + 修订文）和固定 usage，便于断言解析、定位、计量
+- 全程零真实 API Key、零 token 费用
+
+跑法（后端默认端口被占时可用 `FA_API` 覆盖，见 §9.4）：
+
+```bash
+uv run uvicorn test_llm_server:app --port 19000   # 另开一个终端
+uv run uvicorn main:app --port 8000               # 或另选端口
+uv run python test_e2e_structural.py              # 34 项断言
+```
 
 ---
 
@@ -417,6 +461,7 @@ CREATE TABLE operation_logs (
   original_filename VARCHAR(255) NOT NULL,
   original_content LONGTEXT,
   processed_content LONGTEXT,
+  structured_output TEXT,
   uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   processed_at DATETIME,
   status ENUM('pending','processing','done','failed') DEFAULT 'pending',
@@ -462,7 +507,15 @@ CREATE TABLE llm_calls (
 >
 > **对齐老库需要单独写迁移**（重建外键约束），属删改表结构操作，未执行——要做前先确认。
 >
-> **已有库迁移**：`model_providers.user_id` 和 `model_providers.capabilities` 都是后加的列，跑幂等脚本补：`python server/migrate_add_provider_user_id.py`、`python server/migrate_add_provider_capabilities.py`。`llm_calls` 是新表，启动时 `create_all()` 自动建，不需要脚本。
+> **已有库迁移**：后加的列都要跑幂等脚本补，`create_all()` 不会 ALTER：
+>
+> ```bash
+> python server/migrate_add_provider_user_id.py          # model_providers.user_id
+> python server/migrate_add_provider_capabilities.py     # model_providers.capabilities
+> python server/migrate_add_log_structured_output.py     # operation_logs.structured_output（阶段 1）
+> ```
+>
+> `llm_calls` 是新表，启动时 `create_all()` 自动建，不需要脚本。新列一律允许 NULL 且无需回填：NULL 就表示"这条没有结构化清单"，前端据此不显示问题卡片。
 
 ---
 
@@ -490,6 +543,12 @@ CREATE TABLE llm_calls (
 >
 > - `providers` 的请求/响应体多了 `capabilities`（逗号分隔串）。创建时不传由服务端补 `text`，所以旧前端和 `test_e2e.py` 原样调用仍然可用。
 > - `POST /process/{id}` 多一个 400 分支：任务指定的提供商能力不匹配时，在返回 processing **之前**就报错，不再等后台跑一半才 failed。
+>
+> 阶段 1 **同样没有新增接口**，只加了返回字段：
+>
+> - `GET /process/{id}/status` 多 `issues`（`GradingIssue[]`，`done` 时才给）和 `grading_degraded`。非批改任务 / 历史数据 → `issues` 为 `null`。
+> - `GET /logs`、`GET /logs/{id}` 每条多 `issue_count`（列表只带条数，不带整份清单）。
+> - 两个字段都是新增可选字段，旧前端不读它们也照常工作，`test_e2e.py` 未改断言仍然 33/33。
 
 ---
 
@@ -541,7 +600,8 @@ Nginx 反代：前端静态文件直接 serve，`/api/` 代理到 `127.0.0.1:800
 11. ✅ 工作台 UX 增强：提供商可用性预检查、处理轮询、步骤导航、文本预览
 12. ✅ 日志页 UX 增强：搜索筛选、失败重试、空状态提示
 13. ✅ **阶段 0：LLM 传输层地基**（见 9.3）
-14. ⬜ 联调 + Docker 部署（推迟到阶段 2.5 与 Postgres 一起做）
+14. ✅ **阶段 1：结构化批改输出**（见 9.4）
+15. ⬜ 联调 + Docker 部署（推迟到阶段 2.5 与 Postgres 一起做）
 
 ### 9.2 Agent 化演进路线（阶段 0–5）
 
@@ -550,7 +610,7 @@ Nginx 反代：前端静态文件直接 serve，`/api/` 代理到 `127.0.0.1:800
 | 阶段 | 内容 | 前置 | 状态 |
 |---|---|---|---|
 | **0** | LLM 传输层地基：多轮 messages、结构化输出三级降级、token/耗时/attempts 计量、分层超时 + 重试白名单、并发闸、provider 能力路由、logging handler | 无 | ✅ **已完成** 2026-11-14 |
-| **1** | 批改输出结构化：自由文本 → 问题清单 JSON（位置/类型/原文/建议/置信度），前端可点击定位标注 | 0 | ⬜ |
+| **1** | 批改输出结构化：自由文本 → 问题清单 JSON（位置/类型/原文/建议/置信度），前端可点击定位标注 | 0 | ✅ **已完成** 2026-11-15 |
 | **2** | 评测台：golden set + rubric + LLM-as-judge + prompt 版本管理 + 回归对比 | 1 | ⬜ 这才是"Agent 调优"的本体 |
 | **2.5** | Postgres 迁移：独立 `pgvector/pgvector:pg16` 容器，业务 + LangGraph 检查点 + 向量统一一库 | 2 | ⬜ 到需要时再定，阶段 0–2 用不到 |
 | **3** | LangGraph 首练**长文档分块批改**：fan-out/fan-in + PostgresSaver 检查点 + 条件重试 + interrupt 人工确认。顺带突破单次上下文上限 | 2.5 | ⬜ |
@@ -582,7 +642,7 @@ Nginx 反代：前端静态文件直接 serve，`/api/` 代理到 `127.0.0.1:800
 
 **实测发现并当场修掉的两个真问题**（都是写测试/跑 e2e 时才暴露的，看代码看不出来）：
 
-1. `chat_json` 第一版把"输出解析失败"也当成降级信号，会为一句话连打三次完整请求 → 改成只在端点明确拒绝 `response_format` 时降档，解析失败直接报错。
+1. `chat_json` 第一版把"输出解析失败"也当成降级信号，会为一句话连打三次完整请求 → 改成只在端点明确拒绝 `response_format` 时降档，解析失败就地返回。（阶段 1 进一步把"抛错"改为返回 `(result, None)`，理由见 §5.7）
 2. 失败路径的 `attempts` 永远是 1，计量表看不出"重试到耗尽"和"一次就挂"的区别 → 给 `LLMError` 挂上 `attempts`，失败也带次数上报。e2e 复跑确认库里从 `1` 变成 `3`。
 
 **验证结果**（全部实测，非推断）：
@@ -602,6 +662,54 @@ Nginx 反代：前端静态文件直接 serve，`/api/` 代理到 `127.0.0.1:800
 | 测试数据 | 已还原：users 1 / providers 2 / tasks 5 / logs 13 / uploads 7 全部 MATCH，`llm_calls` 清空 |
 
 **遗留**：`config.py` 用旧式 `class Config`，Pydantic 报了 `PydanticDeprecatedSince20` 警告（阶段 0 前就有，与本次无关，未顺手改）。
+
+### 9.4 阶段 1 交付情况（2026-11-15）
+
+改动 16 个文件，1 个新列，**仍然没有新增任何依赖，也没有新增任何配置项**。
+
+| 文件 | 改了什么 |
+|---|---|
+| `schemas/grading.py` | **新增**：`GradingIssue` / `GradingResult` 契约、`GRADING_JSON_SCHEMA`（strict）、`normalize_type()` + 中英别名表 |
+| `services/grading.py` | **新增**：system 输出契约、解析降级、原文定位、序列化/反序列化 |
+| `services/llm.py` | `chat_json` 解析失败改为返回 `(result, None)` 而不是抛错 |
+| `api/v1/process.py` | `_run_model()` 按 `is_grading` 分流；`_meter()` 加 `purpose` 参数（`chat` / `grading` / `grading_degraded`） |
+| `models/operation_log.py` | 加 `structured_output` 列 |
+| `migrate_add_log_structured_output.py` | **新增**幂等迁移脚本 |
+| `schemas/process.py` / `schemas/operation_log.py` | `ProcessResponse` 加 `issues` + `grading_degraded`；`LogResponse` 加 `issue_count` |
+| `api/v1/logs.py` | `_to_response()` 解析出条数（列表不带整份清单） |
+| `tests/test_grading.py` | **新增** 34 个用例 |
+| `tests/test_llm.py` | 同步 `chat_json` 新语义 |
+| `test_llm_server.py` | **新增**假 OpenAI 端点（刻意不支持 `response_format`） |
+| `test_e2e_structural.py` | **新增**结构化端到端脚本，34 项断言 |
+| `client/src/api/types.ts` | `Capability`、`GradingIssue`、`ProcessResponse.issues`、`LogEntry.issue_count` |
+| `client/src/stores/home.ts` | `gradingIssues` / `gradingDegraded` 持久化 |
+| `client/src/views/Home.vue` | 问题清单卡片 + 原文段落高亮 + 双向定位（点卡片滚到高亮，点高亮亮卡片）；`displayTextParas` 纯函数负责分段与套 span |
+
+**关键取舍**：坐标由后端算，不由模型给（见 §5.8）。解析失败一律降级为自由文本，不让用户的文档判 failed。
+
+**验证结果**（全部实测）：
+
+| 门禁 | 结果 |
+|---|---|
+| `uv run pytest -q` | **90 passed**（阶段 0 后 62，+28） |
+| `uv run ruff check .` | All checks passed |
+| `uv run ruff format --check .` | 41 files already formatted |
+| `uv lock --check` | Resolved 46 packages（无新增依赖） |
+| `npm run build` | 通过（vue-tsc + vite，exit 0） |
+| `migrate_add_log_structured_output.py` | 首次 `[done]`、重复 `[skip]`，幂等成立 |
+| `test_e2e_structural.py` | **34/34 通过**，零真实 token |
+| `test_e2e.py`（回归） | **33/33 通过**，阶段 0/1 未破坏原有链路 |
+| LLM 拒绝路径 | mock 端点返回 2 次 400（`json_schema` / `json_object`），`chat_json` 成功降级到不带格式的一档拿到结果 |
+| 后端/mock 日志 | 0 条 traceback / exception / warning / error |
+| 测试数据还原 | users 1 / providers 2 / tasks 5 / logs 13 / llm_calls 0 / uploads 7 六项全部 MATCH，`RESTORED: True` |
+
+**一个实测发现的环境事实**：本机 **8000 端口被 WSL 侧另一个项目的 `backend.app:app` 占着**，而且因为 WSL 是 mirrored 网络，Windows 的 `netstat` 看不到这个监听，只表现为 `uvicorn --port 8000` 报 `[Errno 10048]` 而 `curl localhost:8000` 能收到对方 FastAPI 的 404。排查这类"端口没人监听但连得上"的情况，要去 `wsl -e bash -lc "ss -ltnp | grep ':端口'"` 查，别在 Windows 侧白费劲。`test_e2e_structural.py` 因此支持 `FA_API` / `FA_MOCK_LLM` 换端口。
+
+**遗留**：
+- `chat_json` 的 `json_schema` 严格档至今只在 mock 端点上验证过降级路径，**还没拿真实国产端点跑通过一次严格模式**。真实端点是否支持 `strict: True`、字段是否有丢，需要在下一步用你配的豆包/qwen 实测。
+- 结构化清单目前只在批改任务生效（`is_grading`），普通润色/改写任务不产出清单。
+- docx 下载仍是纯红字 diff，**没有**把问题清单汇总进交付文档——那是独立的排版工作，未混进本阶段。
+- demo 副本仍落后阶段 0 + 1 两轮。
 
 ---
 
@@ -674,6 +782,23 @@ Nginx 反代：前端静态文件直接 serve，`/api/` 代理到 `127.0.0.1:800
 **顺带查明的库结构漂移**（详见 §6 实测对照表）：`tasks.provider_id` 与 `operation_logs.task_id` 在本机真实库里是 `NO ACTION`，并非 ORM 声明的 `SET NULL`——`create_all()` 永不 ALTER 已有表所致。现在靠应用层删除前先置空引用兜着，**新加删除路径必须照抄这一步**（AGENTS.md §3.2）。
 
 **回归验证**：pytest 62 passed；端到端 33/33 两轮（连真实 MySQL）；`npm run build` 通过；ruff check / format 全绿；`uv lock --check` 一致且无新增依赖；迁移脚本幂等；测试数据已按快照精确还原。
+
+### 第四轮：阶段 1 结构化批改输出（2026-11-15）
+
+| ID | 优先级 | 问题 | 修复方案 |
+|---|---|---|---|
+| g1 | 高 | 批改只产出一整篇修订文本，问题埋在哪、改了什么无从定位，前端只能显示红字 diff，也没法自动打分（阶段 2 评测台的前置缺口） | 批改任务改为要 `revised_text` + `issues` 清单（类型/原文/建议/原因/置信度），存进 `operation_logs.structured_output`；前端出问题卡片并与原文高亮双向定位 |
+| g2 | 高 | 若让模型输出 `paragraph_index` / `char_offset`，LLM 不数字符会大面积错位，且错位无任何信号，批注指到错位置比不指更糟 | 模型只逐字摘原文片段，`start/end` 由后端 `_find_unused_span` 精确匹配；匹配不到留 `None` 显示"未定位"，绝不猜 |
+| g3 | 中 | 模型不守 JSON 格式（自由文本、缺 `revised_text`、围栏包裹）时若判 failed，用户的文档就拿不到任何结果 | `parse_grading_output` 一律降级为自由文本 + `degraded` 标记，diff 下载行为与阶段 0 完全一致 |
+| g4 | 中 | `chat_json` 解析失败抛 `LLMError`，调用方拿不到原始内容就无法降级 | 语义改为返回 `(LLMResult, Any \| None)`：解析失败是预期结果而不是异常，交调用方兜 |
+| g5 | 低 | "批改没发现问题"和"没能结构化所以没清单"都显示 0 条，等于撒谎 | `ProcessResponse.grading_degraded` 单独暴露，前端据此出 `el-alert` 警告 |
+| g6 | 低 | 类型名由模型自由发挥（中文/"拼写"/"前后不一致"），硬枚举会整片报错 | `normalize_type()` 中英别名归一到 8 个 canonical 值，认不出归 `other`，单条不合契约只丢那一条 |
+
+**环境侧实测发现**：本机 8000 端口被 WSL 内另一项目的 `backend.app:app` 占用。因 WSL 走 mirrored 网络，Windows `netstat` 查不到该监听，现象是 `uvicorn --port 8000` 报 `[Errno 10048]` 但 `curl localhost:8000` 能收到对方 FastAPI 的 404。查法：`wsl -e bash -lc "ss -ltnp | grep ':8000'"`。据此给 `test_e2e_structural.py` 加了 `FA_API` / `FA_MOCK_LLM` 端口覆盖。
+
+**回归验证**：pytest 90 passed；`test_e2e_structural.py` 34/34（假端点，零 token）；`test_e2e.py` 33/33 无回归；`npm run build` 通过；ruff check / format 全绿；`uv lock --check` 一致且无新增依赖；迁移脚本幂等；测试数据六项计数全部还原 MATCH。
+
+**仍未验证**：`json_schema` 严格档只在 mock 端点验证过降级路径，没拿真实国产端点跑过一次严格模式。
 
 
 ---
