@@ -85,7 +85,7 @@ function switchTab(name: string | number) {
           </svg>
         </div>
         <h1 class="login-title">FileAgent</h1>
-        <p class="login-subtitle">Word 文档智能处理平台</p>
+        <p class="login-subtitle">上传文档，用你自己的 Prompt 让 AI 处理</p>
       </div>
 
       <el-tabs v-model="tab" stretch @tab-change="switchTab">

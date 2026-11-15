@@ -21,7 +21,7 @@ import type { Provider, Task, TaskCreatePayload } from '@/api/types'
  * - 用户在「快速模板」下拉里一键选用，选中后自动填充表单的
  *   name / description / prompt_template / is_grading，仍可继续手动修改
  * - description 是开发者预设的只读「任务说明」，让用户一眼看懂该任务能做什么
- * - prompt_template 中的 {{content}} 是占位符，后端处理时会替换为 Word 文档正文
+ * - prompt_template 中的 {{content}} 是占位符，后端处理时会替换为文档正文
  */
 interface PresetTask {
   name: string

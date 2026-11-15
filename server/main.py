@@ -105,7 +105,13 @@ async def lifespan(app: FastAPI):
 
 # ---------- FastAPI 实例 ----------
 # lifespan 参数指定启动/关闭函数
-app = FastAPI(title="FileAgent", lifespan=lifespan)
+# description 会显示在 Swagger 首页，顺手把项目定位讲清：已不止 Word
+app = FastAPI(
+    title="FileAgent",
+    description="文档 AI 处理平台：上传文档 → 按自定义 Prompt 调 LLM → 下载结果；"
+    "批改类任务额外产出可定位的问题清单",
+    lifespan=lifespan,
+)
 
 # ---------- CORS 中间件 ----------
 # 让前端能跨域访问后端 API
