@@ -4,9 +4,9 @@
 这一组用例本身就是"评测台可信不可信"的门禁：指标算错，后面所有 A/B 结论都作废。
 """
 
-from eval.cases import CASES, case_by_id
+from eval.cases import CASES, GoldenCase, case_by_id
 from eval.score import aggregate, diff_runs, score_case
-from schemas.grading import GradingIssue, GradingResult
+from schemas.grading import ISSUE_TYPES, GradingIssue, GradingResult
 
 
 def _issue(original: str, *, issue_type: str = "typo", start: int | None = 0, suggestion: str = ""):
@@ -73,13 +73,27 @@ def test_clean_case_counts_over_limit_issues_as_false_positives():
     assert scored["false_positives"] == 1  # 上限 2 条，挑出 3 条就是 1 条误报
 
 
-def test_type_coverage_requires_each_type_present():
-    clean = case_by_id("structure")
-    one_only = GradingResult(
-        revised_text="",
-        issues=[_issue("读书很重要", issue_type="structure")],
+def test_type_coverage_accepts_any_type_within_a_group():
+    """组内任一命中即算覆盖：的地得被判成"用词不当"不算漏检"""
+    graded = GradingResult(
+        revised_text="", issues=[_issue("他高兴的跳了起来", issue_type="wording")]
     )
-    assert score_case(clean, one_only)["type_coverage"] == 0.5
+    assert score_case(CASE, graded)["type_coverage"] == 1.0
+
+
+def test_type_coverage_still_requires_each_group_covered():
+    """组与组之间仍是 AND：只覆盖一组就是 0.5，别让"任一命中"把整组期望抹平"""
+    strict = GoldenCase(
+        id="two-groups",
+        name="双组期望",
+        doc="迫不急待",
+        expect_type_groups=(("typo",), ("punctuation",)),
+    )
+    graded = GradingResult(
+        revised_text="",
+        issues=[_issue("迫不急待", issue_type="typo"), _issue("另一处", issue_type="logic")],
+    )
+    assert score_case(strict, graded)["type_coverage"] == 0.5
 
 
 def test_score_case_flags_format_degradation():
@@ -142,3 +156,7 @@ def test_every_case_is_self_consistent():
             assert bad != good, f"{case.id}: {bad!r} 的错处和正确写法相同"
         if case.max_issues is not None:
             assert case.max_issues >= case.min_issues, f"{case.id}: 上下限写反了"
+        for group in case.expect_type_groups:
+            assert group, f"{case.id}: 有空的类型组，永远不会被覆盖"
+            for t in group:
+                assert t in ISSUE_TYPES, f"{case.id}: {t!r} 不是后端认识的 canonical 类型"

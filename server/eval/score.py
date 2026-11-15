@@ -53,12 +53,18 @@ def _fix_applied(case: GoldenCase, grading: GradingResult) -> float | None:
 
 
 def _type_coverage(case: GoldenCase, grading: GradingResult) -> float | None:
-    """要求的每类问题是否至少各挑出一条"""
-    if not case.expect_types:
+    """
+    每组可接受类型只要出现一个就算覆盖，组与组之间才要求都有人管
+
+    写死单值等于替模型裁决"的地得算错别字还是用词不当"——那是语言学争议而不是批改
+    质量，指标会变成每换一家厂商红一次、还得重新解释为什么红。真正判对错的是
+    recall 和 fix_rate，类型只是给用户看的标签。
+    """
+    if not case.expect_type_groups:
         return None
     found = {i.type for i in grading.issues}
-    hits = sum(1 for t in case.expect_types if t in found)
-    return round(hits / len(case.expect_types), 4)
+    hits = sum(1 for group in case.expect_type_groups if found & set(group))
+    return round(hits / len(case.expect_type_groups), 4)
 
 
 def score_case(case: GoldenCase, grading: GradingResult) -> dict[str, Any]:

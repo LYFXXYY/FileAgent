@@ -31,8 +31,10 @@ class GoldenCase:
     instruction: str = _GRADING_INSTRUCTION
     # (错处原文, 应该改成) —— 修订落地率按这两串直接判
     expect_fixes: tuple[tuple[str, str], ...] = ()
-    # 每类至少要各出现一条意见；类型名用后端归一化后的 canonical 值
-    expect_types: tuple[str, ...] = ()
+    # 类型期望按**组**写：组内任一类型命中即算覆盖，组与组之间才要求都有人管。
+    # 不用单值是因为"的地得算错别字还是语法"本身没有唯一答案，
+    # 让评测台裁决一个语言学争议，结果就是每换一家厂商都要重新解释为什么红了。
+    expect_type_groups: tuple[tuple[str, ...], ...] = ()
     min_issues: int = 1
     # 上限只给"干净文档"那种夹具用，用来量误报
     max_issues: int | None = None
@@ -55,7 +57,8 @@ CASES: tuple[GoldenCase, ...] = (
             ("做的很顺利", "做得很顺利"),
             ("变的更有信心", "变得更有信心"),
         ),
-        expect_types=("typo",),
+        # 虚词误用三类都算数：模型判成"用词不当"不是漏检
+        expect_type_groups=(("typo", "grammar", "wording"),),
         min_issues=4,
     ),
     GoldenCase(
@@ -72,7 +75,7 @@ CASES: tuple[GoldenCase, ...] = (
             ("一愁莫展", "一筹莫展"),
             ("即往不咎", "既往不咎"),
         ),
-        expect_types=("typo",),
+        expect_type_groups=(("typo",),),
         min_issues=3,
     ),
     GoldenCase(
@@ -87,7 +90,7 @@ CASES: tuple[GoldenCase, ...] = (
             ("野餐 妈妈", "野餐，妈妈"),
             ("怎么做 我", "怎么做。我"),
         ),
-        expect_types=("punctuation",),
+        expect_type_groups=(("punctuation",),),
         min_issues=2,
     ),
     GoldenCase(
@@ -100,7 +103,7 @@ CASES: tuple[GoldenCase, ...] = (
         ),
         # 结构类问题没有唯一正确写法，只要求"提出来的意见要能定位"
         expect_fixes=(),
-        expect_types=("structure", "logic"),
+        expect_type_groups=(("structure", "logic"),),
         min_issues=1,
     ),
     GoldenCase(
@@ -112,7 +115,7 @@ CASES: tuple[GoldenCase, ...] = (
             "分给每个人一个。那天下午，我们把周末的计划重新排了一遍。"
         ),
         expect_fixes=(),
-        expect_types=(),
+        expect_type_groups=(),
         min_issues=0,
         # 一篇通顺的短文被挑出 3 条以上意见，说明模型在硬找问题
         max_issues=2,
