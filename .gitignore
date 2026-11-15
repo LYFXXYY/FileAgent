@@ -30,6 +30,9 @@ dist/
 server/uploads/
 server/outputs/
 
+# 评测台每轮的 run JSON（本机跑出来的数字，入库会让对比基线到处漂；数字抄进 SPEC §9.6）
+server/eval/runs/
+
 # uv lock 文件可以提交（类似 pom.xml.lock，保证依赖一致）
 # uv.lock 不加 .gitignore
 

@@ -34,6 +34,7 @@ uv run python migrate_add_log_structured_output.py         # 幂等：补 log.st
 uv run python test_e2e.py                      # 端到端 33 项：需后端在 8000，会造数据，见 §7
 uv run uvicorn test_llm_server:app --port 19000            # 假 OpenAI 端点（另开终端）
 uv run python test_e2e_structural.py           # 结构化批改 + PDF 输入端到端 40 项，零真实 token
+uv run python -m eval.runner --provider 5 --case clean   # 评测台冒烟：**会真花钱**，先单条再全量
 ```
 
 ⚠ **8000 端口在本机可能"看不见地被占用"**：WSL 侧若有服务监听 8000，因 mirrored 网络，Windows `netstat` 查不到该监听，现象是 uvicorn 报 `[Errno 10048]` 而 `curl localhost:8000` 却能收到对方的 404。查证要跑 `wsl -e bash -lc "ss -ltnp | grep ':8000'"`。换端口时 `test_e2e_structural.py` 走 `FA_API` / `FA_MOCK_LLM` 环境变量，`test_e2e.py` 仍是硬编码 8000。
@@ -135,6 +136,17 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - 失败一律 `PdfError` → 路由转 400（打不开 / 有打开密码 / 没有文字层）。**扫描件绝不回空文本**——那会让用户以为文档本来就是空的。
 - 依赖：`pymupdf`（锁 46 → 56 包，venv 303M，`pymupdf-layout` 拖进 onnxruntime + numpy）。留着的理由是阶段 5 PDF→PPT 本来就要它的 block/图片几何能力；换 pypdf 省 170M 但到阶段 5 还得再引一次，变成两套 PDF 库并存。`import pymupdf`，**不要用 `fitz`**（2.x 里已弃用，会打 FutureWarning）。
 
+### 3.9 评测台（阶段 2 最小版）
+
+- **`None` 不是 0**。夹具没有某项期望（结构类夹具没有唯一正确写法）时指标返回 `None`，聚合时不进分母。写成 0 会把平均分整体拉低，看起来"变差了"其实是自己造的假信号。
+- **`fix_rate` 必须同时查"正确写法出现"和"错误写法消失"**。只查前者会被原文里本来就有的同形词蒙过去；只查后者会被"整段删了"蒙过去。这个指标专门用来抓"意见全对但修订稿原样退回"，是阶段 1.5 真机跑出来的缺陷。
+- **裁判是旁路**：`--judge` 失败只在 run JSON 里记 `error`，不能把已经跑完的客观指标带走。同源自判系统性放水（实测：客观 `fix_rate=0.6667` 的一轮，裁判给 5/5 并说"全部已修正"）——所以确定性指标永远排在主观分前面。
+- **单轮数字会漂**：同一份提示、同一份夹具，`recall` 两轮跑出 1.0 和 0.8333。5 条夹具只够看方向；要下"A/B 变好了"的结论，得加重复或加夹具，别拿一轮差值当结论。
+- **加夹具必过 `test_every_case_is_self_consistent`**：期望的错处串必须真的在文档里、且与正确写法不同。写夹具时最容易把错处顺手改顺，于是 `recall` 永远是 0，评测台静悄悄变成测不出东西的机器。
+- `eval/runs/` 已 ignore：那是本机数字，入库会让对比基线到处漂；要长期留的就抄进 SPEC §9.6。
+- **`eval/runner.py` 是运维脚本，按 provider 主键直取、不做 `user_id` 隔离**。别把 §3.1 那条"每个查询都带 user_id"当成这里漏掉的 bug —— 那条约束管的是对外路由。
+- 档位归因现在只在 `LLMResult.format_tier` + run JSON + INFO 日志里，**没有落库**（要加列就是改表，先问用户）。跨端点长期对比需要它进 `llm_calls`。
+
 ## 4. 前端不可违反的约定
 
 - **token 双写**：登录成功同时写 Pinia store 和 `localStorage`；axios 拦截器只读 `localStorage`（在 API 层拿不到 store）。key 常量集中在 `client/src/api/client.ts`（`fileagent_token` / `fileagent_username`），别处不要硬编码。- 401 处理要排除 `/auth/login`（那是密码错误），用 `window.location.replace` 带 `redirect` 参数（拦截器层拿不到 router 实例）。
@@ -179,16 +191,16 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 
 ## 7. 当前基线与已知缺口
 
-当前路线（阶段 0–5，含为什么这么排）在 SPEC §9.2；阶段 0 交付与验证明细在 SPEC §9.3，阶段 1 在 §9.4，阶段 1.5（PDF 输入 + 去 Word 化）在 §9.5，改 bug 前先看这几张表。
+当前路线（阶段 0–5，含为什么这么排）在 SPEC §9.2；阶段 0 交付与验证明细在 SPEC §9.3，阶段 1 在 §9.4，阶段 1.5（PDF 输入 + 去 Word 化）在 §9.5，阶段 2 最小版（评测台 + 首轮基线数字）在 §9.6，改 bug 前先看这几张表。
 
-门禁基线（均已实测通过）：`uv run pytest -q` → **110 passed**；`uv run ruff check .` → 全绿；`ruff format --check .` → 44 files already formatted；`uv lock --check` → 一致（**56 包**，阶段 1.5 首次引入运行时依赖 pymupdf）；`npm run build` → 通过；`uv run python test_e2e.py` → 33/33；`uv run python test_e2e_structural.py` → **40/40**。
+门禁基线（均已实测通过）：`uv run pytest -q` → **120 passed**；`uv run ruff check .` → 全绿；`ruff format --check .` → 49 files already formatted；`uv lock --check` → 一致（**56 包**，阶段 1.5 首次引入运行时依赖 pymupdf，阶段 2 未再新增）；`npm run build` → 通过；`uv run python test_e2e.py` → 33/33；`uv run python test_e2e_structural.py` → **40/40**。
 
 - **`server/test_e2e.py` 是仓库自带的端到端冒烟脚本，不是遗留物，别删**：需后端已在 8000 运行、连真实 MySQL。它会注册 `tester_*` / `other_*` 两个临时账号，造 1 条日志和 1 个上传文件；脚本自身只删 task/provider，**账号、日志、落盘文件、以及新增的 `llm_calls` 行要跑完手动清**。第 7 节现在真走重试路径（连不上假 provider → 重试 3 次 → failed），第 10 节直接改库把日志置为 done 来验证下载，都属预期行为。
 - **`server/test_e2e_structural.py` + `test_llm_server.py` 是阶段 1 新增的结构化端到端**，同样别删：需后端 + 假 LLM 两个进程都在跑，全程零真实 token。mock 端点**刻意不支持 `response_format`**（回 400）来如实模拟国产兼容端点并逼出 `chat_json` 的降级路径，所以 LLM 日志里出现的 `400 Bad Request`（每次 `chat_json` 两条：`json_schema` 和 `json_object` 各一档）是预期行为不是故障。第 8 节是阶段 1.5 加的 **PDF 输入链路**：用 pymupdf 现场合成"每视觉行一个 block"的中文 PDF，断言提取结果与 docx **逐字相等**、定位成功、下载名换成 `.docx`——改提取器必跑它。它注册 `e2e_s_*` 账号，跑完清理方式和上面一样。
 - 单测**不连 MySQL 也不出网**：HTTP 走假 client（替 `services.llm.get_client`），provider 路由走内存 SQLite。所以 `pytest` 绿不代表能连上数据库，端到端才是那一层的验证。加测试请保持这个边界，也别引入 `pytest-asyncio`——现有测试直接 `asyncio.run()` 就够。
 - `uploads/`、`outputs/`、`.env`、各类缓存已 ignore；`.env.example` 靠 `.gitignore` 里的 `!.env.example` 例外入库。
 - SPEC §11 示例写 `JWT_EXPIRE_HOURS=2`，本机 `.env` 实际是 24；`.env` 不入库，以本机为准。
-- 未做：限流、api_key 字段级加密、Alembic、Docker / 多 worker、表格提取（docx 表格和 PDF 表格都不进正文）、扫描件 OCR、加密 PDF 解密、老库外键规则对齐、成本价格表（计量只存 token 不算钱，留给评测台阶段）、问题清单写进交付 docx、`chat_json` 实际用了阶梯的哪一档**没有落库**（降级是静默的，跨端点比较必须有这个归因，阶段 2 给 `llm_calls` 加一列）。
+- 未做：限流、api_key 字段级加密、Alembic、Docker / 多 worker、表格提取（docx 表格和 PDF 表格都不进正文）、扫描件 OCR、加密 PDF 解密、老库外键规则对齐、成本价格表（计量只存 token 不算钱）、问题清单写进交付 docx。评测台的下一步：真实文档夹具、第二厂商当裁判、同夹具跑重复轮次（单轮会漂）、把 `format_tier` 落进 `llm_calls`（改表结构，做前先问）。
 - 真机跑过的一手结论（2026-11-15，qwen3.7-flash + 合成中文 PDF）：结构化链路 OK（`degraded=False`、4 条 的/地/得 全部精确定位）。但该端点回来的 `revised_text` 与原文一字不差——意见对、修订没落地。这是 prompt 产出质量，不是提取或解析缺陷，正属阶段 2 评测台要量化的范围，别在提取层"顺手改 prompt"掩盖它。
 
 ## 8. 两份副本，手动同步

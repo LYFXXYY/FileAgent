@@ -441,6 +441,43 @@ uv run python test_e2e_structural.py              # 40 项断言
 
 ---
 
+### 5.11 评测台最小版（阶段 2 的第一块砖）
+
+用户口径是"不用测那么全面，简单测试就可以下一步"，所以这一轮只做**能当 CI 门禁的确定性指标**，不做排行榜、不做成本价格表、不做人工标注平台。
+
+| 文件 | 职责 |
+|---|---|
+| `eval/cases.py` | 5 份合成夹具（的/地/得、成语错字、标点缺失、结构逻辑、干净文档）。答案由构造决定，零隐私零标注成本 |
+| `eval/score.py` | 确定性打分 + 聚合 + 两轮对拍。纯函数，10 条单测直接测它 |
+| `eval/runner.py` | CLI。读一行 provider、跑批改、落 `eval/runs/<时间戳>-<id>.json` |
+
+**四个指标**（`None` 表示该夹具不参与，聚合时不进分母，绝不当 0 平均）：
+
+| 指标 | 判法 | 为什么必须是它 |
+|---|---|---|
+| `locate_rate` | 有 `start` 的意见占比 | 定位失效=前端卡片点不动，用户看不到批注 |
+| `recall` | 期望错处被任意意见的 `original` 覆盖 | 漏检是最贵的失效 |
+| `fix_rate` | 修订稿里**正确写法出现且错误写法消失**，两者同时成立 | 见下 |
+| `type_coverage` / `false_positives` | 要求的类型是否各有一条 / 超出 `max_issues` 的条数 | 硬挑刺同样是缺陷，所以"干净文档"也是一条夹具 |
+
+`fix_rate` 的双条件不能省：只查"正确写法在不在"会被原文里本来就有的同形词蒙过去；只查"错误写法没了"会被"整段删掉"蒙过去。这个指标就是为阶段 1.5 那次实测发现写的——真机一轮意见 6 条全对、`revised_text` 却与原文一字不差，只看 `degraded` 和条数完全发现不了。
+
+**档位归因（补上 §9.4 留的缺口）**：`LLMResult.format_tier` 记录 `chat_json` 实际落在 `json_schema` / `json_object` / `plain` 哪一档，拒绝降档时打 INFO 日志。**没有落库**（那要加列，属改表结构，做前先问），但 run JSON 与后端日志都能读到了。
+
+**裁判（`--judge`）是旁路**：判分失败只记 `error`，绝不带走已跑完的客观指标——和 `record_llm_call()` 同一个原则，观测手段不能变成故障源。
+
+**跑法**（`server` 目录下，会真花钱）：
+
+```bash
+uv run python -m eval.runner --provider 5 --case clean     # 先单条验通链路
+uv run python -m eval.runner --provider 5 --label baseline-1
+uv run python -m eval.runner --provider 5 --prompt-file cand.txt --baseline eval/runs/xxx.json
+```
+
+`--prompt-file` 整体替换批改指令（必须含 `{{content}}`），run JSON 记 `prompt_digest`，这就是最简版提示词版本管理：A/B 靠两轮数字对拍，不靠"感觉变好了"。
+
+---
+
 ## 6. 数据库设计
 
 ```sql
@@ -630,8 +667,9 @@ Nginx 反代：前端静态文件直接 serve，`/api/` 代理到 `127.0.0.1:800
 12. ✅ 日志页 UX 增强：搜索筛选、失败重试、空状态提示
 13. ✅ **阶段 0：LLM 传输层地基**（见 9.3）
 14. ✅ **阶段 1：结构化批改输出**（见 9.4）
-15. ✅ **阶段 1.5：输入格式扩到 PDF + 产品改名**（见 9.5）
-16. ⬜ 联调 + Docker 部署（推迟到阶段 2.5 与 Postgres 一起做）
+15. ✅ **阶段 1.5：输入格式扩到 PDF + 项目去 Word 化改名**（见 9.5）
+16. ✅ **阶段 2 最小版：评测台**（见 9.6；完整形态的真实夹具留到需要时再补）
+17. ⬜ 联调 + Docker 部署（推迟到阶段 2.5 与 Postgres 一起做）
 
 ### 9.2 Agent 化演进路线（阶段 0–5）
 
@@ -642,7 +680,7 @@ Nginx 反代：前端静态文件直接 serve，`/api/` 代理到 `127.0.0.1:800
 | **0** | LLM 传输层地基：多轮 messages、结构化输出三级降级、token/耗时/attempts 计量、分层超时 + 重试白名单、并发闸、provider 能力路由、logging handler | 无 | ✅ **已完成** 2026-11-14 |
 | **1** | 批改输出结构化：自由文本 → 问题清单 JSON（位置/类型/原文/建议/置信度），前端可点击定位标注 | 0 | ✅ **已完成** 2026-11-15 |
 | **1.5** | 输入格式扩到 PDF（提取层与 docx 同构）+ 项目去 Word 化改名。不在原路线里，是用户 2026-11-15 提的需求：后续真有 PDF 需求 | 1 | ✅ **已完成** 2026-11-15 |
-| **2** | 评测台：golden set + rubric + LLM-as-judge + prompt 版本管理 + 回归对比 | 1 | ⬜ 这才是"Agent 调优"的本体 |
+| **2** | 评测台：golden set + rubric + LLM-as-judge + prompt 版本管理 + 回归对比 | 1.5 | 🟡 **最小版已完成** 2026-11-15（合成夹具 + 确定性指标 + `--prompt-file` A/B + 同源自判）。缺：真实文档夹具、第二厂商当裁判、档位落库 |
 | **2.5** | Postgres 迁移：独立 `pgvector/pgvector:pg16` 容器，业务 + LangGraph 检查点 + 向量统一一库 | 2 | ⬜ 到需要时再定，阶段 0–2 用不到 |
 | **3** | LangGraph 首练**长文档分块批改**：fan-out/fan-in + PostgresSaver 检查点 + 条件重试 + interrupt 人工确认。顺带突破单次上下文上限 | 2.5 | ⬜ |
 | **4** | RAG 规范库：多文档上传、分块、pgvector 检索，把格式规范条款注入批改 prompt 并带引用溯源 | 3 | ⬜ |
@@ -859,6 +897,37 @@ Nginx 反代：前端静态文件直接 serve，`/api/` 代理到 `127.0.0.1:800
 2. `chat_json` 用到了阶梯的哪一档**没有任何记录**：降级路径是静默的，端点接受 `json_schema` 还是被降到的，事后无法区分。跨端点比较（阶段 2）必须有这个归因，届时给 `llm_calls` 加一列。
 3. pymupdf 的依赖树偏重（见 5.10），demo 交付副本的 `requirements.txt` 要跟着补，属交付决定。
 4. 扫描版 PDF（无文字层）现在只报错，OCR 属阶段 5。
+
+### 9.6 阶段 2 最小版交付情况（2026-11-15）：评测台
+
+改动 4 个文件 + 1 处 `LLMResult` 字段扩展，**没有新增依赖、没有改表结构**。
+
+| 文件 | 改了什么 |
+|---|---|
+| `eval/cases.py` | 新增：5 份合成中文夹具 + 期望（`expect_fixes / expect_types / min_issues / max_issues`） |
+| `eval/score.py` | 新增：4 个确定性指标 + 聚合 + `diff_runs` 带符号对拍 |
+| `eval/runner.py` | 新增：CLI（`--provider / --case / --prompt-file / --judge / --baseline / --label`） |
+| `services/llm.py` | `LLMResult.format_tier` + `_tier_name()`；拒绝降档的日志从 DEBUG 升到 INFO |
+| `tests/test_eval_score.py` | 新增 10 例，含一条**夹具自洽性检查**（期望的错处必须真的在文档里） |
+| `.gitignore` | `server/eval/runs/` 不入库（本机数字，抄进文档即可） |
+
+**首轮基线（provider 5 qwen3.7-flash，5 条夹具，18,625 token，全部 `tier=json_schema`）**：
+
+| 指标 | 值 | 读数 |
+|---|---|---|
+| `recall` | **1.0000** | 期望指出的错处一条没漏 |
+| `locate_rate` | 0.8600 | 意见里有 14% 指不到原文位置 |
+| `fix_rate` | **0.6389** | 修订稿只落地了约 2/3 —— 印证 §9.5 的发现；标点夹具最低 0.3333 |
+| `type_coverage` | 0.6250 | 的/地/得夹具 0.0：模型把这类判成"用词/语法"而不是 `typo` |
+| `false_positives` | 0 | 干净文档只挑出 1 条，没硬找 |
+
+**这轮就学到的三件事**（都是数字给出的，不是猜的）：
+
+1. **同一份提示、同一份夹具，两次跑的数字会漂**（`de-di-de` 两轮 recall 1.0 / 0.8333，fix_rate 0.8333 / 0.6667）。5 条夹具的单轮结论只够看方向，A/B 要么加重复要么加夹具，否则会把噪声当改进。
+2. **同源自判会放水**：裁判给那条 `fix_rate=0.6667` 的结果打了 **5/5** 并写"所有误用都已修正"。模型给自己家打分系统性偏高，这是已知偏差，不是这套指标的失败——所以客观指标必须先于主观分存在。
+3. **`format_tier` 立刻有回报**：批改调用稳定落在 `json_schema`，裁判那次（schema 含 array）落到了 `json_object`。没有这个字段，"换了端点分数变差"永远只能靠猜。
+
+**还没做**：真实文档夹具（要用户提供并接受真 token 花费）、第二厂商当裁判、`type_coverage` 的期望要不要放宽成允许多类型（的地得到底算 `typo` 还是 `wording` 是评分口径问题，需要用户拍板）。
 
 ---
 

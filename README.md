@@ -60,6 +60,10 @@ uv run python test_e2e.py   # 端到端冒烟：需后端已在 8000 运行，�
 uv run uvicorn test_llm_server:app --port 19000    # 另开终端
 uv run python test_e2e_structural.py               # 40 项断言
 
+# 批改质量评测台（合成夹具 + 确定性指标）：⚠ 会调真实模型、产生 token 费用
+uv run python -m eval.runner --provider 5 --case clean   # 先单条验通链路
+uv run python -m eval.runner --provider 5                # 再跑全部 5 条，落 eval/runs/
+
 cd ../client
 npm run build               # vue-tsc 类型检查 + 构建
 ```

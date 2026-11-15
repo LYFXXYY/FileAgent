@@ -25,7 +25,7 @@ import logging
 import random
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import httpx
@@ -87,6 +87,10 @@ class LLMResult:
     finish_reason: str | None
     # 含首次尝试，1 表示一次成功；>1 说明中间碰到过可重试的失败
     attempts: int
+    # chat_json 实际落在 response_format 阶梯的哪一档：json_schema / json_object / plain。
+    # 纯 chat 走 None。跨端点比较必须知道这个，否则"分数差"分不清是模型差
+    # 还是端点不支持严格档——评测台没有它就等于瞎评
+    format_tier: str | None = None
 
 
 def get_client() -> httpx.AsyncClient:
@@ -320,6 +324,13 @@ def _rejected_response_format(message: str) -> bool:
     return any(kw in lowered for kw in ("response_format", "json_schema", "json_object"))
 
 
+def _tier_name(response_format: dict[str, Any] | None) -> str:
+    """把 response_format 折成档位名：评测台和日志只看这一串"""
+    if response_format is None:
+        return "plain"
+    return str(response_format.get("type"))
+
+
 async def chat_json(
     messages: list[dict[str, Any]],
     provider: ModelProvider,
@@ -337,6 +348,9 @@ async def chat_json(
 
     ⚠ 只在"端点明确拒绝 response_format"时降档。**输出解析失败就地返回、不再往下打**——
     降级方向是越来越松，同一份提示再打一次大概率还是烂 JSON，白烧一倍 token。
+
+    成功那次的档位写进 `LLMResult.format_tier`，拒绝降档时打 INFO 日志：
+    换端点后到底是模型变弱了还是严格档没被支持，必须能从这两处读出来。
     """
     last_error = "模型未返回可解析的 JSON"
     for response_format in _format_ladder(json_schema):
@@ -348,16 +362,20 @@ async def chat_json(
             if not _rejected_response_format(str(e)):
                 raise
             last_error = str(e)
-            logger.debug("端点拒绝 response_format=%s，降级重试", response_format)
+            logger.info(
+                "端点不接受 response_format=%s，降到下一档重试",
+                _tier_name(response_format),
+            )
             continue
 
+        tagged = replace(result, format_tier=_tier_name(response_format))
         try:
-            return result, extract_json(result.content)
+            return tagged, extract_json(tagged.content)
         except LLMError as e:
             # 模型不按格式出货是预期结果而不是异常。更松的一档只会更不像 JSON，
             # 所以把原始内容交回调用方自己兜，而不是再花钱打一次
             logger.debug("端点输出不可解析为 JSON，交调用方降级：%s", str(e)[:200])
-            return result, None
+            return tagged, None
 
     raise LLMError(last_error)
 
