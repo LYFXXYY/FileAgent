@@ -5,7 +5,7 @@ import type { ProcessResponse, UploadResponse } from './types'
 
 export const processApi = {
   /**
-   * 上传 .docx 文件
+   * 上传 .docx / .pdf 文档
    * task_id 是 query 参数（后端这样设计的），file 走 multipart/form-data
    */
   upload(taskId: number, file: File) {

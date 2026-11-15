@@ -1,5 +1,5 @@
 """
-操作日志 ORM —— 记录每一次 Word 上传 → LLM 处理 → 下载的全链路
+操作日志 ORM —— 记录每一次文档上传 → LLM 处理 → 下载的全链路
 
 【状态流转】
   pending → processing → done / failed
@@ -7,7 +7,7 @@
 
 【字段说明】
   original_filename  → 用户上传时的原始文件名（存到磁盘上文件名可能变）
-  original_content   → 上传时 python-docx 提取的纯文本（保存以便 diff 对比）
+  original_content   → 上传时从 .docx / .pdf 提取的纯文本（保存以便 diff 对比）
   processed_content  → LLM 返回的结果文本
   error_message      → 失败时存具体错误信息（如超时、API Key 无效）
 """
@@ -19,6 +19,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text, func
+from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database import Base
@@ -26,6 +27,12 @@ from database import Base
 if TYPE_CHECKING:
     from models.task import Task
     from models.user import User
+
+
+# 正文两列在 MySQL 上要 LONGTEXT：一份 PDF 论文动辄几万字，TEXT 的 64KB 是字节上限、
+# 中文按 3 字节算，两万来字就撞墙。本机老库手工建的就是 LONGTEXT，用 with_variant
+# 让新建库和它一致（SQLite 单测仍走 TEXT），不要再出现"声明和线上对不上"第三种。
+DocumentText = Text().with_variant(LONGTEXT(), "mysql")
 
 
 # ---------- 状态枚举 ----------
@@ -62,10 +69,9 @@ class OperationLog(Base):
     original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
 
     # ---------- 正文内容 ----------
-    # 本机真实列是 LONGTEXT 而非 TEXT（见 SPEC §6 结构漂移表）——这两张表早期手工按
-    # SPEC 建过，create_all() 从不 ALTER，所以 ORM 声明和线上列对不上，以线上为准
-    original_content: Mapped[str | None] = mapped_column(Text, nullable=True)
-    processed_content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 权威副本在库里，磁盘文件只是审计留存；diff 要靠 original_content 逐字匹配定位
+    original_content: Mapped[str | None] = mapped_column(DocumentText, nullable=True)
+    processed_content: Mapped[str | None] = mapped_column(DocumentText, nullable=True)
     # 结构化批改的问题清单 JSON，仅批改任务写入。
     # NULL = 非批改任务或历史数据；有值但 degraded=true = 模型没按格式出货，已退回自由文本
     structured_output: Mapped[str | None] = mapped_column(Text, nullable=True)

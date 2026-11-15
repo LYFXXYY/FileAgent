@@ -303,9 +303,9 @@ SQLAlchemy 连接池配置：`pool_size=10, max_overflow=20, pool_pre_ping=True`
 
 这是核心业务链路，分三步：
 
-1. **上传**：接收 .docx 文件 → 校验扩展名 → python-docx 提取文本 → 存 operation_log(status=pending) → **返回 extracted_text 供前端预览**
+1. **上传**：接收 .docx / .pdf → 校验扩展名 → 按扩展名派发到对应提取器（见 5.10）→ 存 operation_log(status=pending) → **返回 extracted_text 供前端预览**
 2. **处理**：`POST /process/{id}` **立即返回** `status=processing`，真正的 LLM 调用放进 FastAPI `BackgroundTasks` 异步执行——取 task.prompt_template → `{{content}}` 替换为文档文本 → 调 LLM → 后台把结果写回 `processed_content(status=done)` 或 `error_message(status=failed)`。前端通过轮询拿结果。
-3. **下载**：读 operation_log → 如果是批改任务，diff 对比原文与结果；否则直接写入 → 生成 .docx 返回
+3. **下载**：读 operation_log → 如果是批改任务，diff 对比原文与结果；否则直接写入 → 生成 .docx 返回（文件名取原名去扩展再补 `.docx`，PDF 输入不会拿到一个叫 `.pdf` 的 docx）
 
 **为什么处理要后台化（不在请求里 await）**：LLM 可能耗时十几秒到一两分钟。若在请求内 `await`，客户端一旦断开（刷新/关页/网络抖动），请求被取消，日志会**永远卡在 processing**。改用后台任务 + 独立 DB session（`SessionLocal()`，不能用请求级 session，它在响应发出后就关了），响应先发出去，处理在后台跑完，断开重连也不影响。
 
@@ -407,8 +407,37 @@ SQLAlchemy 连接池配置：`pool_size=10, max_overflow=20, pool_pre_ping=True`
 ```bash
 uv run uvicorn test_llm_server:app --port 19000   # 另开一个终端
 uv run uvicorn main:app --port 8000               # 或另选端口
-uv run python test_e2e_structural.py              # 34 项断言
+uv run python test_e2e_structural.py              # 40 项断言
 ```
+
+### 5.10 文档提取层（阶段 1.5：输入格式扩到 PDF）
+
+平台定位是"文档 AI 处理"，但提取器只有 docx 一个，这一轮补上 PDF。**输出的分发口径**：
+
+| 扩展名 | 提取器 | 依赖 | 说明 |
+|---|---|---|---|
+| `.docx` | `services/word.py:extract_text_from_docx` | python-docx | 只读 `doc.paragraphs`，表格/文本框不进正文 |
+| `.pdf` | `services/pdf.py:extract_text_from_pdf` | PyMuPDF 2.x | 两遍拼段落 + 噪声剔除，见下 |
+
+白名单**不再是单独的常量**：`api/v1/process.py:TEXT_EXTRACTORS` 是"扩展名 → 提取器"的字典，`ALLOWED_EXTENSIONS = set(TEXT_EXTRACTORS)`。加格式只动这张表，白名单跟着走，不会出现"支持了但拒绝"或"白名单放行了但没提取器"。
+
+**核心约束：PDF 的提取结果必须和 docx 同构**（`"\n"` 分隔的自然段）。整条下游（diff、`_find_unused_span` 定位、`create_diff_docx` 重组段落、前端 `buildParagraphs`）都建立在这个约定上；只要 PDF 交出"每视觉行一段"，diff 就会把半句话当段落、批注指到换行处。为此做两遍：
+
+1. **block 内按行拼**：Word/LaTeX 导出的件一个自然段是一个 block，内部以 `\n` 分行。拼接口径分三类——英文断词（行尾 `-` + 下行小写）去连字符直接接、两侧都是 CJK 不加空格（加了反而让 `original` 匹配不上）、其余补一个空格。
+2. **block 间按几何邻接拼**：PPT/幻灯导出的件是**每视觉行各占一个 block**（pdf-to-ppt 那份 skill 也是这么记录的），只在"垂直间隙 ≤5pt + 左边缘差 ≤3pt + 上一段没以句末标点收束"三条同时成立时才合并。左边缘条件顺带挡住了跨栏误合。
+
+**噪声剔除两条规则**（都是判据而非硬编码）：
+
+- 页码：内容必须是纯数字/罗马数字，**并且**落在页面上 8% 或下 20% 的留白带里。少了位置条件会把正文里的年份、条款号、表格序号一起删掉（`2024` 恰好是四位数）。
+- 跨页高频装饰：短文本（≤20 字符）、在 ≥60% 的页面原样出现、且不带句末标点、且文档 ≥3 页。用频次是因为换模板装饰词就变了，但"每页都有一模一行"不变；带标点的重复行是内容（诗词副歌、免责声明），宁可留噪声也不能丢字。
+
+**三条失败路径都是 400，不是 500**（`PdfError` 由路由层转）：打不开（坏文件）、有打开密码、没有文字层。最后一条最常见——扫描件必须明确告诉用户"当前不支持图片型 PDF"，回一段空文本会让人以为文档本来就是空的。
+
+**已知边界**：多栏长段落跨栏仍会被切开（文本层只给坐标不给阅读顺序，几何合并刻意不跨栏）；不做 OCR；不读表格结构。这些和 docx 那边一致，属功能边界不是缺陷。
+
+**依赖代价（实测）**：`uv add pymupdf` 让 `uv.lock` 从 46 包涨到 56、`.venv` 到 303M（pymupdf 99M + 它带来的 onnxruntime 49M + numpy 22M，因为 `pymupdf-layout` 拉了版面分析模型）。留下的理由：阶段 5 的 PDF→PPT 本来就要 PyMuPDF 的 block/图片几何能力，换成纯 Python 的 pypdf 省 170M 但到阶段 5 还得再引一次，反而变成两套 PDF 库。要瘦身就整体退到 pypdf 并接受只做单遍提取。
+
+> 顺带修正了 ORM 与真实库的一处漂移：`operation_logs.original_content / processed_content` 改为 `Text().with_variant(LONGTEXT, "mysql")`。MySQL 的 `TEXT` 是 64KB **字节**上限，中文按 3 字节算两万字就撞墙，而 PDF 输入让长文档变成常态；本机老库早就是 LONGTEXT，这样声明让新建库和它一致（SQLite 单测仍走 TEXT）。`structured_output` 保持 TEXT——它只装问题清单，不装全文。
 
 ---
 
@@ -501,7 +530,7 @@ CREATE TABLE llm_calls (
 > | `tasks.provider_id` 删除规则 | `ON DELETE SET NULL` | **NO ACTION** | 靠应用层先置空才没 500；新加删除路径若忘了就炸 |
 > | `operation_logs.task_id` 删除规则 | `ON DELETE SET NULL` | **NO ACTION** | 同上 |
 > | `operation_logs.status` | ORM 写 `nullable=False` | **NULL YES** default `pending` | 实际不会写进 NULL，暂无影响 |
-> | `original_content` / `processed_content` | ORM 声明 `Text`（65KB） | **LONGTEXT** | 库里本来就没有 65KB 限制，AGENTS.md 旧说法已更正 |
+> | `original_content` / `processed_content` | ~~ORM 声明 `Text`（65KB）~~ 已改 `with_variant(LONGTEXT, "mysql")` | **LONGTEXT** | 漂移已消除（2026-11-15，见 5.10）：新建库和老库都是 LONGTEXT |
 >
 > 根因：`create_all()` **只建新表、绝不 ALTER 已有表**。这几张表早期是按本节 DDL 手工建的，后来 s2 修复只在 ORM 侧加了 `ondelete`，数据库没跟上。新库从零启动会拿到 ORM 的正确规则，老库不会。
 >
@@ -601,7 +630,8 @@ Nginx 反代：前端静态文件直接 serve，`/api/` 代理到 `127.0.0.1:800
 12. ✅ 日志页 UX 增强：搜索筛选、失败重试、空状态提示
 13. ✅ **阶段 0：LLM 传输层地基**（见 9.3）
 14. ✅ **阶段 1：结构化批改输出**（见 9.4）
-15. ⬜ 联调 + Docker 部署（推迟到阶段 2.5 与 Postgres 一起做）
+15. ✅ **阶段 1.5：输入格式扩到 PDF + 产品改名**（见 9.5）
+16. ⬜ 联调 + Docker 部署（推迟到阶段 2.5 与 Postgres 一起做）
 
 ### 9.2 Agent 化演进路线（阶段 0–5）
 
@@ -611,6 +641,7 @@ Nginx 反代：前端静态文件直接 serve，`/api/` 代理到 `127.0.0.1:800
 |---|---|---|---|
 | **0** | LLM 传输层地基：多轮 messages、结构化输出三级降级、token/耗时/attempts 计量、分层超时 + 重试白名单、并发闸、provider 能力路由、logging handler | 无 | ✅ **已完成** 2026-11-14 |
 | **1** | 批改输出结构化：自由文本 → 问题清单 JSON（位置/类型/原文/建议/置信度），前端可点击定位标注 | 0 | ✅ **已完成** 2026-11-15 |
+| **1.5** | 输入格式扩到 PDF（提取层与 docx 同构）+ 项目去 Word 化改名。不在原路线里，是用户 2026-11-15 提的需求：后续真有 PDF 需求 | 1 | ✅ **已完成** 2026-11-15 |
 | **2** | 评测台：golden set + rubric + LLM-as-judge + prompt 版本管理 + 回归对比 | 1 | ⬜ 这才是"Agent 调优"的本体 |
 | **2.5** | Postgres 迁移：独立 `pgvector/pgvector:pg16` 容器，业务 + LangGraph 检查点 + 向量统一一库 | 2 | ⬜ 到需要时再定，阶段 0–2 用不到 |
 | **3** | LangGraph 首练**长文档分块批改**：fan-out/fan-in + PostgresSaver 检查点 + 条件重试 + interrupt 人工确认。顺带突破单次上下文上限 | 2.5 | ⬜ |
@@ -800,6 +831,34 @@ Nginx 反代：前端静态文件直接 serve，`/api/` 代理到 `127.0.0.1:800
 
 **仍未验证**：`json_schema` 严格档只在 mock 端点验证过降级路径，没拿真实国产端点跑过一次严格模式。
 
+### 9.5 阶段 1.5 交付情况（2026-11-15）：PDF 输入 + 去 Word 化
+
+改动 12 个文件，新增 1 个 service，**首次引入运行时依赖**（pymupdf，锁 46 → 56 包）。
+
+| 文件 | 改了什么 |
+|---|---|
+| `services/pdf.py` | 新增：两遍段落重建 + 页码/跨页噪声剔除 + 三条失败路径（`PdfError`） |
+| `api/v1/process.py` | `TEXT_EXTRACTORS` 派发表（白名单由它派生）；下载文件名改 `stem + .docx`；文案去 Word 化 |
+| `models/operation_log.py` | 正文两列 `Text().with_variant(LONGTEXT, "mysql")`，与本机老库对齐 |
+| `tests/test_pdf.py` | 新增 20 例：拼接/几何合并/噪声/三条错误路径 + 3 例合成 PDF 端到端 |
+| `test_e2e_structural.py` | 新增第 8 节 PDF 链路（6 项）：提取与 docx 同构、定位、结果名换成 `.docx` |
+| `client/views/Home.vue`、`api/process.ts` | `accept=".docx,.pdf"` + 上传区文案 |
+| `AGENTS.md` / `README.md` / `SPEC.md` | 定位与格式口径同步；README 顺手修掉两处陈旧计数（表数、用例数） |
+
+**验证到什么程度**（都是实测）：
+
+- `pytest` 110 passed（+20）；`test_e2e_structural.py` **40/40**（+6）；`test_e2e.py` 33/33 无回归；ruff check / format 全绿；`npm run build` 通过。
+- **真机跑通**（用户授权"能调用到 agent 就可以跑测试"）：合成中文 PDF → provider 5（qwen3.7-flash）→ done、`degraded=False`、4 条 的/地/得 意见全部精确定位（`start=9 end=16` 手算核对），下载名 `批改_校园随笔.docx`。用合成文本而非本机文档，避免私人内容外发。跑完按 `task_name` 清掉日志与计量行。
+- 提取质量核对：3 段各由 2 个视觉块拼回、页脚 `3` 被位置规则剔除、无跨栏误合。
+
+**这一轮发现的真缺陷（不是新功能带来的麻烦）**：下载文件名以前是 `批改_ + original_filename`，PDF 输入会产出一个叫 `.pdf` 的 docx，下载方直接打不开。已改成去扩展再补 `.docx`，docx 输入的结果名不变。
+
+**遗留与代价**：
+
+1. 真机那次跑回来的 `revised_text` 与原文一模一样（4 条意见都对，但修订文没落地修改）——批改 prompt 的产出质量问题，正是阶段 2 评测台要量化的东西，这轮不顺手改 prompt。
+2. `chat_json` 用到了阶梯的哪一档**没有任何记录**：降级路径是静默的，端点接受 `json_schema` 还是被降到的，事后无法区分。跨端点比较（阶段 2）必须有这个归因，届时给 `llm_calls` 加一列。
+3. pymupdf 的依赖树偏重（见 5.10），demo 交付副本的 `requirements.txt` 要跟着补，属交付决定。
+4. 扫描版 PDF（无文字层）现在只报错，OCR 属阶段 5。
 
 ---
 

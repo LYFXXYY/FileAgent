@@ -452,7 +452,7 @@ function reset() {
     <div class="page-header">
       <div>
         <h2 class="page-title">工作台</h2>
-        <p class="page-subtitle">选择任务 → 上传 Word → LLM 处理 → 下载结果</p>
+        <p class="page-subtitle">选择任务 → 上传文档 → LLM 处理 → 下载结果</p>
       </div>
       <el-button v-if="currentStep > 0" @click="reset">重新开始</el-button>
     </div>
@@ -525,11 +525,11 @@ function reset() {
               <path d="M12 3V15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
           </div>
-          <h3>上传 Word 文档</h3>
-          <p class="card-desc">支持 .docx 格式，拖拽或点击上传</p>
+          <h3>上传文档</h3>
+          <p class="card-desc">当前支持 .docx / .pdf 文字型文档，拖拽或点击上传</p>
           <el-upload
             drag
-            accept=".docx"
+            accept=".docx,.pdf"
             :auto-upload="false"
             :show-file-list="false"
             :limit="1"
@@ -544,7 +544,7 @@ function reset() {
               <path d="M9 15L12 12L15 15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
             </svg></el-icon>
             <div class="el-upload__text">
-              拖拽 .docx 文件到此处，或 <em>点击选择</em>
+              拖拽 .docx / .pdf 文件到此处，或 <em>点击选择</em>
             </div>
           </el-upload>
           <div v-if="pickedFile" class="picked-file">
@@ -631,7 +631,7 @@ function reset() {
             </svg>
           </div>
           <h3>处理完成</h3>
-          <p class="card-desc">点击下方按钮下载结果 Word 文件</p>
+          <p class="card-desc">下载处理结果，批改任务可同时查看下方问题清单</p>
 
           <!-- 批改任务问题清单卡片：点击卡片定位原文高亮，点击高亮定位卡片 -->
           <template v-if="gradingIssues">

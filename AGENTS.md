@@ -5,7 +5,8 @@
 
 ## 1. 项目速览
 
-Word 文档 AI 处理平台：上传 `.docx` → 按用户自定义 Prompt 调 LLM → 下载结果（批改类任务输出红字 diff 标注）。
+文档 AI 处理平台：上传文档 → 按用户自定义 Prompt 调 LLM → 下载结果。**当前输入支持 `.docx` 与文字型 `.pdf`**（派发表 `api/v1/process.py:TEXT_EXTRACTORS`，白名单由它派生），批改类任务输出红字 diff 标注 + 可定位的问题清单；**结果永远是 `.docx`**。
+平台定位已不止 Word，但扫描件（无文字层）不做 OCR、表格不进正文——改文案前先认清这一点，别把 UI 写成"任意文档全能处理"。
 前后端分离单体，当前阶段无消息队列、无 Redis、无 Docker。
 
 | 层 | 位置 | 技术 |
@@ -24,7 +25,7 @@ Word 文档 AI 处理平台：上传 `.docx` → 按用户自定义 Prompt 调 L
 ```bash
 uv sync                                        # 装依赖（含 dev 组）
 uv run uvicorn main:app --reload --port 8000    # 起后端，Swagger 在 /docs
-uv run pytest -q                               # 90 passed；纯函数 + 假 client + 内存 SQLite，不连 MySQL 不出网
+uv run pytest -q                               # 110 passed；纯函数 + 假 client + 内存 SQLite + 合成 PDF，不连 MySQL 不出网
 uv run ruff check .                            # 全绿
 uv run ruff format --check .                   # 全部已格式化
 uv lock --check                                # 依赖锁一致性
@@ -32,7 +33,7 @@ uv run python migrate_add_provider_capabilities.py         # 幂等：补 provid
 uv run python migrate_add_log_structured_output.py         # 幂等：补 log.structured_output
 uv run python test_e2e.py                      # 端到端 33 项：需后端在 8000，会造数据，见 §7
 uv run uvicorn test_llm_server:app --port 19000            # 假 OpenAI 端点（另开终端）
-uv run python test_e2e_structural.py           # 结构化批改端到端 34 项，零真实 token
+uv run python test_e2e_structural.py           # 结构化批改 + PDF 输入端到端 40 项，零真实 token
 ```
 
 ⚠ **8000 端口在本机可能"看不见地被占用"**：WSL 侧若有服务监听 8000，因 mirrored 网络，Windows `netstat` 查不到该监听，现象是 uvicorn 报 `[Errno 10048]` 而 `curl localhost:8000` 却能收到对方的 404。查证要跑 `wsl -e bash -lc "ss -ltnp | grep ':8000'"`。换端口时 `test_e2e_structural.py` 走 `FA_API` / `FA_MOCK_LLM` 环境变量，`test_e2e.py` 仍是硬编码 8000。
@@ -89,9 +90,9 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - 同步/异步约定：纯 DB 操作用 `def`（FastAPI 自动丢线程池），涉及外部 HTTP 才 `async def`。已知同步阻塞点用 `# noqa: ASYNC230` 并写明理由（`process.py:89`）。
 - 日志用 `logging.getLogger("fileagent...")`，**不要 print**（Windows GBK 控制台中文乱码）；独立脚本需 `sys.stdout.reconfigure(encoding="utf-8")`。root handler 已在 `main.py:46` 的 `_setup_logging()` 里配好，级别走 `LOG_LEVEL`。⚠ 那个 `basicConfig(force=True)` 不能省——`--reload` 会反复重导入模块，不清掉旧 handler 每行日志会打印两遍。
 - `LogStatus` 是 `enum.StrEnum`，配 `Enum(..., values_callable=...)` 存 **value**（`"pending"`）而非 name；MySQL 列类型为 `enum('pending','processing','done','failed')`。改枚举要连带回归后端状态流转与前端字符串比较。
-- 正文权威副本在 `operation_logs.original_content`，磁盘文件只是审计留存。ORM 声明的是 `Text`，但**本机真实列是 `LONGTEXT`**（早期按 SPEC §6 手工建的表，`create_all()` 不会 ALTER），所以实际没有 65KB 限制；新建库会拿到 `TEXT`，两者行为不同要留意。
-- `extract_text_from_docx` **只读 `doc.paragraphs`，不含表格/文本框**（`server/services/word.py:30`）——已知功能边界，不是 bug。
-- 上传白名单只有 `.docx`，落盘名 `uuid4().hex + ext`。
+- 正文权威副本在 `operation_logs.original_content`，磁盘文件只是审计留存。两列声明已改为 `Text().with_variant(LONGTEXT, "mysql")`，与本机老库一致（MySQL `TEXT` 是 64KB **字节**上限，中文两万字就撞，长 PDF 是常态）；`structured_output` 仍是 `Text`，因为它只装问题清单。
+- 提取层两条硬边界：`extract_text_from_docx` **只读 `doc.paragraphs`**（不含表格/文本框），`extract_text_from_pdf` **不读表格、不做 OCR**——已知功能边界，不是 bug。细则见 §3.8。
+- 上传白名单 = `TEXT_EXTRACTORS.keys()`（`.docx` / `.pdf`），落盘名 `uuid4().hex + ext`。
 - 认证：直接用 bcrypt，**不要引 passlib**（1.7.4 与 bcrypt 4.1+ 不兼容），密码截 72 字节；JWT HS256，`sub` 是字符串化 user_id；无 `/auth/me`、无刷新 token。
 - 下载中文文件名必须 RFC 5987：`filename*=UTF-8''{quote(...)}`（`process.py:324`）。
 - diff 用 `SequenceMatcher(autojunk=False)`——**关 autojunk 对中文是必须的**，否则"的/是/在"被当噪声导致结果不准（`server/services/diff.py:30`）。
@@ -124,6 +125,16 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - 计量 `purpose` 现在分 `chat` / `grading` / `grading_degraded`，评测台按它分组。新增调用点要传对的 purpose。
 - 结构化只在 `task.is_grading == True` 生效，普通任务走 `chat` 不走 `chat_json`。
 
+### 3.8 文档提取层（阶段 1.5）
+
+- **PDF 的提取结果必须与 docx 同构**（`\n` 分隔的自然段）。diff、`_find_unused_span` 定位、`create_diff_docx`、前端 `buildParagraphs` 全押在"一行一段"这个约定上；PDF 交出"每视觉行一段"就会把半句话当段落、批注指到换行处。要改 `services/pdf.py` 先跑 `test_e2e_structural.py` 第 8 节，它直接断言两种来源提取出的字符串相等。
+- **两遍拼接**：block 内按行拼（Word/LaTeX 导出件），block 间按几何邻接拼（幻灯导出件每行一个 block）。邻接合并三条同时成立才合：垂直间隙 ≤5pt、左边缘差 ≤3pt、上一段没以句末标点收束。**左边缘条件不能删**——它挡的是双栏排版里上下对齐的两栏，跨栏缝合比切段更糟。
+- **拼接规则里 CJK 不加空格**是必须的：加了空格 `original` 片段与 `original_content` 就对不上，整条定位链路失效。
+- **页码判据必须带位置条件**：纯数字/罗马数字 + 落在上 8% 或下 20% 留白带。只按内容判会把正文里的年份、条款号、表格序号当页码删掉（`2024` 恰好是四位数）。
+- **跨页高频装饰用频次判，不硬编码字符串**，且三条护栏：文档 ≥3 页、文本 ≤20 字符、**带句末标点的一律放过**。丢内容的代价远大于留噪声。
+- 失败一律 `PdfError` → 路由转 400（打不开 / 有打开密码 / 没有文字层）。**扫描件绝不回空文本**——那会让用户以为文档本来就是空的。
+- 依赖：`pymupdf`（锁 46 → 56 包，venv 303M，`pymupdf-layout` 拖进 onnxruntime + numpy）。留着的理由是阶段 5 PDF→PPT 本来就要它的 block/图片几何能力；换 pypdf 省 170M 但到阶段 5 还得再引一次，变成两套 PDF 库并存。`import pymupdf`，**不要用 `fitz`**（2.x 里已弃用，会打 FutureWarning）。
+
 ## 4. 前端不可违反的约定
 
 - **token 双写**：登录成功同时写 Pinia store 和 `localStorage`；axios 拦截器只读 `localStorage`（在 API 层拿不到 store）。key 常量集中在 `client/src/api/client.ts`（`fileagent_token` / `fileagent_username`），别处不要硬编码。- 401 处理要排除 `/auth/login`（那是密码错误），用 `window.location.replace` 带 `redirect` 参数（拦截器层拿不到 router 实例）。
@@ -135,6 +146,7 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - 路径别名 `@` → `src`，`vite.config.ts` 与 `tsconfig.app.json` 两处都要配。
 - Element Plus 是**全量引入 + 全量 CSS**（`client/src/main.ts:10`），所以尽管路由做了懒加载，产物仍是单个 ~890kB chunk，build 的体积告警是已知现象。
 - provider 的 `capabilities` 后端存逗号分隔**字符串**、表单要的是**数组**，转换只认 `KNOWN_CAPABILITIES` 里的已知值（`client/src/views/Providers.vue` 的 `toCapabilityList()` / `buildPayload()`）——顺带做了顺序归一化和脏值丢弃，未知标记不会把表单卡死也不会吃 422。提交**必须走 `buildPayload()`**，别把带 `capabilityList` 临时字段的 form 整个发出去。
+- 上传格式只在两处声明：`Home.vue` 的 `accept=".docx,.pdf"` 和上传区文案。**前端不做扩展名校验**，`accept` 只管文件选择对话框，拖拽照样能拖进 `.txt`——真校验在后端白名单，400 文案已是给用户看的。加格式时要同时改这两处 + 后端派发表。
 - 结构化批改的原文高亮在 `Home.vue:buildParagraphs()`：按 `\n` 分段，用全局偏移 `start/end` 落到段内区间再套 span。**非高亮片段也必须给 `index: null`**（`Span.index` 是 `number | null` 必填），漏了会让相邻片段的 `seg.index` 是 `undefined`，点击时把 `activeIssueIndex` 写成 `undefined` 从而永不匹配。匹配不到位置的 issue 显示"未定位"，不要猜位置。
 - `gradingIssues` / `gradingDegraded` 和 `processedContent` 一样要走 `syncToStore()` + `home.ts` 持久化，并在 `reset()` / `goBackToUpload()` 里成对清空；`applyResult()` 是唯一铺结果到 UI 的入口（3 处轮询/上传回调都调它），别在调用点各自赋值。
 
@@ -150,7 +162,7 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 |---|---|---|
 | `tasks.provider_id` / `operation_logs.task_id` 删除规则 | `ON DELETE SET NULL` | **NO ACTION** |
 | `operation_logs.status` | `nullable=False` | **NULL 允许**，default `pending` |
-| `original_content` / `processed_content` | `Text` | **LONGTEXT** |
+| `original_content` / `processed_content` | ~~`Text`~~ 已改 `with_variant(LONGTEXT, "mysql")` | **LONGTEXT**（与新声明一致） |
 | `model_providers.capabilities`、整张 `llm_calls` | — | 已按 ORM 建好，规则正确 |
 
 根因就是 `create_all()` 不 ALTER：这几张表早期按 SPEC §6 手工建，后来的修复只动了 ORM。**要对齐老库得单独写重建外键的迁移脚本，属改表结构操作，做前先问用户。**
@@ -167,16 +179,17 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 
 ## 7. 当前基线与已知缺口
 
-当前路线（阶段 0–5，含为什么这么排）在 SPEC §9.2；阶段 0 交付与验证明细在 SPEC §9.3，阶段 1 在 SPEC §9.4，改 bug 前先看这几张表。
+当前路线（阶段 0–5，含为什么这么排）在 SPEC §9.2；阶段 0 交付与验证明细在 SPEC §9.3，阶段 1 在 §9.4，阶段 1.5（PDF 输入 + 去 Word 化）在 §9.5，改 bug 前先看这几张表。
 
-门禁基线（均已实测通过）：`uv run pytest -q` → **90 passed**；`uv run ruff check .` → 全绿；`ruff format --check .` → 41 files already formatted；`uv lock --check` → 一致（46 包，阶段 0/1 均未新增依赖）；`npm run build` → 通过；`uv run python test_e2e.py` → 33/33；`uv run python test_e2e_structural.py` → 34/34。
+门禁基线（均已实测通过）：`uv run pytest -q` → **110 passed**；`uv run ruff check .` → 全绿；`ruff format --check .` → 44 files already formatted；`uv lock --check` → 一致（**56 包**，阶段 1.5 首次引入运行时依赖 pymupdf）；`npm run build` → 通过；`uv run python test_e2e.py` → 33/33；`uv run python test_e2e_structural.py` → **40/40**。
 
 - **`server/test_e2e.py` 是仓库自带的端到端冒烟脚本，不是遗留物，别删**：需后端已在 8000 运行、连真实 MySQL。它会注册 `tester_*` / `other_*` 两个临时账号，造 1 条日志和 1 个上传文件；脚本自身只删 task/provider，**账号、日志、落盘文件、以及新增的 `llm_calls` 行要跑完手动清**。第 7 节现在真走重试路径（连不上假 provider → 重试 3 次 → failed），第 10 节直接改库把日志置为 done 来验证下载，都属预期行为。
-- **`server/test_e2e_structural.py` + `test_llm_server.py` 是阶段 1 新增的结构化端到端**，同样别删：需后端 + 假 LLM 两个进程都在跑，全程零真实 token。mock 端点**刻意不支持 `response_format`**（回 400）来如实模拟国产兼容端点并逼出 `chat_json` 的降级路径，所以 LLM 日志里出现 2 条 `400 Bad Request` 是预期行为不是故障。它注册 `e2e_s_*` 账号，跑完清理方式和上面一样。
+- **`server/test_e2e_structural.py` + `test_llm_server.py` 是阶段 1 新增的结构化端到端**，同样别删：需后端 + 假 LLM 两个进程都在跑，全程零真实 token。mock 端点**刻意不支持 `response_format`**（回 400）来如实模拟国产兼容端点并逼出 `chat_json` 的降级路径，所以 LLM 日志里出现的 `400 Bad Request`（每次 `chat_json` 两条：`json_schema` 和 `json_object` 各一档）是预期行为不是故障。第 8 节是阶段 1.5 加的 **PDF 输入链路**：用 pymupdf 现场合成"每视觉行一个 block"的中文 PDF，断言提取结果与 docx **逐字相等**、定位成功、下载名换成 `.docx`——改提取器必跑它。它注册 `e2e_s_*` 账号，跑完清理方式和上面一样。
 - 单测**不连 MySQL 也不出网**：HTTP 走假 client（替 `services.llm.get_client`），provider 路由走内存 SQLite。所以 `pytest` 绿不代表能连上数据库，端到端才是那一层的验证。加测试请保持这个边界，也别引入 `pytest-asyncio`——现有测试直接 `asyncio.run()` 就够。
 - `uploads/`、`outputs/`、`.env`、各类缓存已 ignore；`.env.example` 靠 `.gitignore` 里的 `!.env.example` 例外入库。
 - SPEC §11 示例写 `JWT_EXPIRE_HOURS=2`，本机 `.env` 实际是 24；`.env` 不入库，以本机为准。
-- 未做：限流、api_key 字段级加密、Alembic、Docker / 多 worker、表格提取、老库外键规则对齐、成本价格表（计量只存 token 不算钱，留给评测台阶段）、问题清单写进交付 docx、`json_schema` 严格档对真实端点的验证。
+- 未做：限流、api_key 字段级加密、Alembic、Docker / 多 worker、表格提取（docx 表格和 PDF 表格都不进正文）、扫描件 OCR、加密 PDF 解密、老库外键规则对齐、成本价格表（计量只存 token 不算钱，留给评测台阶段）、问题清单写进交付 docx、`chat_json` 实际用了阶梯的哪一档**没有落库**（降级是静默的，跨端点比较必须有这个归因，阶段 2 给 `llm_calls` 加一列）。
+- 真机跑过的一手结论（2026-11-15，qwen3.7-flash + 合成中文 PDF）：结构化链路 OK（`degraded=False`、4 条 的/地/得 全部精确定位）。但该端点回来的 `revised_text` 与原文一字不差——意见对、修订没落地。这是 prompt 产出质量，不是提取或解析缺陷，正属阶段 2 评测台要量化的范围，别在提取层"顺手改 prompt"掩盖它。
 
 ## 8. 两份副本，手动同步
 
@@ -185,7 +198,7 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - 它有 `README.md` / `DEPLOY.md` / `deploy.ps1` / `.env.example` / `requirements.txt`，**没有 SPEC.md**。
 - 它的注释已按"去 AI 味"重写，**剥掉了 Java 对比块**；主仓库保留。
 - 两边业务逻辑应保持一致，但**没有任何自动同步**：主仓库改了逻辑要手动同步过去（反之亦然），注释风格各自保留。
-- ⚠ **demo 副本目前落后主仓库两个阶段（阶段 0 + 阶段 1）**，实测确认它仍是老版：`services/llm.py` 只有 `call_llm`，没有 `models/llm_call.py`、没有 `capabilities`、没有 `structured_output`。同步时要一并带过去：新版 `services/llm.py`、`services/grading.py`、`schemas/grading.py`、`models/llm_call.py`、两个 migrate 脚本、`test_llm_server.py` 与 `test_e2e_structural.py`、`.env.example` 的 6 个新配置项，以及前端 provider 能力多选和 Home.vue 的问题清单卡片。demo 侧 `pyproject.toml` 已是 `fileagent-server` 且有 `requirements.txt`（需补依赖说明），注释仍按 demo 的去 AI 味风格重写（不带 Java 对比块）。要不要同步、同步到哪一轮，属于交付决定，先问用户。
+- ⚠ **demo 副本目前落后主仓库三轮（阶段 0 + 阶段 1 + 阶段 1.5）**，实测确认它仍是老版：`services/llm.py` 只有 `call_llm`，没有 `models/llm_call.py`、没有 `capabilities`、没有 `structured_output`、没有 `services/pdf.py`。同步时要一并带过去：新版 `services/llm.py`、`services/grading.py`、`services/pdf.py`、`schemas/grading.py`、`models/llm_call.py`、两个 migrate 脚本、`test_llm_server.py` 与 `test_e2e_structural.py`、`.env.example` 的 6 个新配置项，以及前端 provider 能力多选、Home.vue 问题清单卡片、上传区 `.pdf` 白名单与文案。demo 侧 `pyproject.toml` 已是 `fileagent-server`，**`requirements.txt` 必须补 `pymupdf`**（阶段 1.5 首次引入运行时依赖，漏了 PDF 上传直接 500）；注释仍按 demo 的去 AI 味风格重写（不带 Java 对比块）。要不要同步、同步到哪一轮，属于交付决定，先问用户。
 
 ## 9. 提交
 

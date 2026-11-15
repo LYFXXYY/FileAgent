@@ -6,7 +6,7 @@
   3) cd server && uv run python test_e2e_structural.py
 
 验证的是「AI 模型 → 结构化解析 → 定位 → 入库 → 下载 diff」全链路，
-不依赖任何真实 API Key、不产生 token 费用。
+外加 docx / PDF 两种输入的提取同构，不依赖任何真实 API Key、不产生 token 费用。
 
 默认端口 8000 / 19000。被占用时用 FA_API 与 FA_MOCK_LLM 同时覆盖，例如：
   FA_API=http://127.0.0.1:8081/api/v1 FA_MOCK_LLM=http://127.0.0.1:19001/v1 \\
@@ -19,11 +19,13 @@ import io
 import os
 import sys
 import time
+from urllib.parse import unquote
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 import httpx
+import pymupdf
 from docx import Document
 
 API = os.environ.get("FA_API", "http://127.0.0.1:8000/api/v1")
@@ -41,6 +43,23 @@ def check(name: str, condition: bool, extra: str = ""):
     else:
         FAIL += 1
         print(f"  [FAIL] {name} {extra}")
+
+
+def make_pdf(lines: list[str]) -> bytes:
+    """
+    造一份每视觉行各占一个文本块的 PDF —— 正是最难处理的那种（幻灯导出件常见形态）
+
+    中文要用内置 china-s 字体，默认字体写中文会变成一串间隔号。
+    """
+    doc = pymupdf.open()
+    page = doc.new_page()
+    y = 72.0
+    for text in lines:
+        page.insert_text((72, y), text, fontname="china-s", fontsize=11)
+        y += 17.0
+    data = doc.tobytes()
+    doc.close()
+    return data
 
 
 def wait_backend() -> bool:
@@ -127,7 +146,8 @@ def main():
     )
     check("上传 201", r.status_code == 201, r.text)
     log_id = r.json()["log_id"]
-    check("原文提取含高兴", "高兴" in r.json()["extracted_text"], r.json()["extracted_text"])
+    docx_extracted = r.json()["extracted_text"]
+    check("原文提取含高兴", "高兴" in docx_extracted, docx_extracted)
 
     print("\n===== 5. 触发处理（后台） =====")
     r = c.post(f"{API}/process/{log_id}", headers=tok)
@@ -174,7 +194,51 @@ def main():
         check("docx 含修订文", "高兴地跳了起来" in text, text[:200])
         check("docx 含原文（diff 未丢字）", "他高兴的跳了起来" in text, text[:200])
 
-    print("\n===== 8. 计量旁路写入 llm_calls =====")
+    print("\n===== 8. PDF 输入：提取同构、定位照旧、结果名换成 .docx =====")
+    r = c.post(
+        f"{API}/upload?task_id={task_id}",
+        headers=tok,
+        files={
+            "file": (
+                "e2e.pdf",
+                make_pdf(["这是一篇测试作文。", "他高兴的跳了起来。"]),
+                "application/pdf",
+            )
+        },
+    )
+    check("PDF 上传 201", r.status_code == 201, r.text)
+    pdf_log = r.json()["log_id"]
+    pdf_extracted = r.json()["extracted_text"]
+    # 两种来源必须吐出完全一样的段落结构，否则 diff 与定位要为 PDF 单独写一套
+    check("PDF 提取与 docx 同构", pdf_extracted == docx_extracted, repr(pdf_extracted))
+
+    c.post(f"{API}/process/{pdf_log}", headers=tok)
+    pdf_final = {}
+    for _ in range(30):
+        time.sleep(1)
+        pdf_final = c.get(f"{API}/process/{pdf_log}/status", headers=tok).json()
+        if pdf_final.get("status") in ("done", "failed"):
+            break
+    check("PDF 轮询到 done", pdf_final.get("status") == "done", str(pdf_final))
+    pdf_issues = pdf_final.get("issues") or []
+    check(
+        "PDF 也拿到定位",
+        bool(pdf_issues) and pdf_issues[0].get("start") is not None,
+        str(pdf_issues),
+    )
+
+    r = c.get(f"{API}/download/{pdf_log}", headers=tok)
+    disposition = r.headers.get("content-disposition", "")
+    result_name = (
+        unquote(disposition.split("filename*=UTF-8''")[-1]) if "UTF-8''" in disposition else ""
+    )
+    check("结果文件名换成 .docx", result_name == "批改_e2e.docx", disposition)
+    if r.status_code == 200:
+        parsed = Document(io.BytesIO(r.content))
+        text = "\n".join(p.text for p in parsed.paragraphs)
+        check("PDF 的 diff 含修订文", "高兴地跳了起来" in text, text[:200])
+
+    print("\n===== 9. 计量旁路写入 llm_calls =====")
     sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
     import database
 
@@ -190,7 +254,7 @@ def main():
             check("model_name 取响应", call.model_name == "answered-model", call.model_name)
             check("latency_ms > 0", call.latency_ms > 0, str(call.latency_ms))
 
-    print("\n===== 9. 删 provider → SET NULL，name 快照保留 =====")
+    print("\n===== 10. 删 provider → SET NULL，name 快照保留 =====")
     r = c.delete(f"{API}/providers/{provider_id}", headers=tok)
     check("DELETE provider 204", r.status_code == 204, str(r.status_code))
     with database.SessionLocal() as db:

@@ -2,7 +2,7 @@
 核心业务流程路由：上传 → LLM 处理 → 下载
 
 【流程设计（3 步分离）】
-  1. POST /upload            → 上传 .docx → 提取文本 → 建 operation_log(pending) → 返回 log_id
+  1. POST /upload            → 上传文档 → 提取文本 → 建 operation_log(pending) → 返回 log_id
   2. POST /process/{log_id}  → 拼 Prompt → 调 LLM → 更新 log(processed_content, done/failed)
   3. GET  /download/{log_id} → 读 log → 生成 .docx（批改任务标红 diff） → 返回文件
 
@@ -49,6 +49,7 @@ from services.llm import (
     record_llm_call,
     resolve_provider,
 )
+from services.pdf import PdfError, extract_text_from_pdf
 from services.word import create_diff_docx, create_plain_docx, extract_text_from_docx
 
 logger = logging.getLogger("fileagent.process")
@@ -56,8 +57,13 @@ logger = logging.getLogger("fileagent.process")
 router = APIRouter()
 settings = get_settings()
 
-# 允许的上传扩展名（白名单，防任意文件类型）
-ALLOWED_EXTENSIONS = {".docx"}
+# 支持的输入格式 → 文本提取器。白名单直接由这张表的键派生，
+# 免得加了格式却忘了改白名单（或反过来），两处对不上就是 500。
+TEXT_EXTRACTORS = {
+    ".docx": extract_text_from_docx,
+    ".pdf": extract_text_from_pdf,
+}
+ALLOWED_EXTENSIONS = set(TEXT_EXTRACTORS)
 
 
 def _resolve_dir(subdir: str) -> str:
@@ -75,12 +81,12 @@ def _resolve_dir(subdir: str) -> str:
 @router.post("/upload", response_model=UploadResponse, status_code=201)
 async def upload(
     task_id: int,
-    file: UploadFile = File(..., description="要上传的 .docx 文件"),
+    file: UploadFile = File(..., description="要上传的文档（.docx / .pdf）"),
     db: Session = Depends(get_db),
     current: User = Depends(get_current_user),
 ):
     """
-    上传 Word 文档并提取文本
+    上传文档并提取文本
 
     - task_id 通过 query 参数传（?task_id=1）
     - file 通过 multipart/form-data 传
@@ -95,12 +101,15 @@ async def upload(
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(400, f"只允许 {ALLOWED_EXTENSIONS}，当前 {ext!r}")
 
-    # 3. 读取字节 + 提取文本
+    # 3. 读取字节 + 按扩展名派发到对应的提取器
     file_bytes = await file.read()  # UploadFile.read() 是 async
     try:
-        text = extract_text_from_docx(file_bytes)
+        text = TEXT_EXTRACTORS[ext](file_bytes)
+    except PdfError as e:
+        # PdfError 的文案本身就是给用户看的（扫描件、加密等情况），直接透出
+        raise HTTPException(400, str(e)) from e
     except Exception as e:
-        raise HTTPException(400, f"Word 文件解析失败：{e}") from e
+        raise HTTPException(400, f"文档解析失败：{e}") from e
 
     # 4. 落盘（可选：本项目主要用 log 里的 original_content，文件保留供审计）
     # ASYNC230：写的是已在内存里的小 docx，阻塞时间极短；上面的 python-docx 解析同样是
@@ -364,7 +373,7 @@ async def download(
     db: Session = Depends(get_db),
     current: User = Depends(get_current_user),
 ):
-    """下载结果 Word —— 批改任务生成带红字标注的 diff，普通任务直接输出"""
+    """下载结果文档 —— 批改任务生成带红字标注的 diff，普通任务直接输出"""
     log = (
         db.query(OperationLog)
         .filter(OperationLog.id == log_id, OperationLog.user_id == current.id)
@@ -378,12 +387,15 @@ async def download(
     task = db.query(Task).filter(Task.id == log.task_id).first()
     is_grading = bool(task and task.is_grading)
 
+    # 结果永远是 .docx，所以文件名取原名去掉扩展再补 .docx——
+    # 直接拼 original_filename 会让 PDF 输出一份叫 "xxx.pdf" 的 docx，下载方打不开
+    stem = os.path.splitext(log.original_filename or "文档")[0]
     if is_grading:
         buf = create_diff_docx(log.original_content or "", log.processed_content or "")
-        filename = f"批改_{log.original_filename}"
+        filename = f"批改_{stem}.docx"
     else:
         buf = create_plain_docx(log.processed_content or "")
-        filename = f"结果_{log.original_filename}"
+        filename = f"结果_{stem}.docx"
 
     # StreamingResponse 直接把 BytesIO 流转发给客户端，不需要落盘
     # 类比 Java 的 ResponseEntity<InputStreamResource> + Content-Disposition
