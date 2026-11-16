@@ -435,7 +435,9 @@ uv run python test_e2e_structural.py              # 40 项断言
 
 **已知边界**：多栏长段落跨栏仍会被切开（文本层只给坐标不给阅读顺序，几何合并刻意不跨栏）；不做 OCR；不读表格结构。这些和 docx 那边一致，属功能边界不是缺陷。
 
-**依赖代价（实测）**：`uv add pymupdf` 让 `uv.lock` 从 46 包涨到 56、`.venv` 到 303M（pymupdf 99M + 它带来的 onnxruntime 49M + numpy 22M，因为 `pymupdf-layout` 拉了版面分析模型）。留下的理由：阶段 5 的 PDF→PPT 本来就要 PyMuPDF 的 block/图片几何能力，换成纯 Python 的 pypdf 省 170M 但到阶段 5 还得再引一次，反而变成两套 PDF 库。要瘦身就整体退到 pypdf 并接受只做单遍提取。
+**依赖代价（2026-11-16 已减负）**：PyMuPDF 2.1 把版面分析（`pymupdf-layout` → onnxruntime + numpy + protobuf + flatbuffers）和 Markdown 导出（`pymupdf4llm` → networkx + tabulate）做成硬依赖，装上后 venv 一度到 337M / 84 包。但 `services/pdf.py` 只用 `page.get_text("blocks")`，对这些**零引用**，于是用 `pyproject.toml` 的 `[tool.uv] override-dependencies`（永不成立的 environment marker）把整条链摘掉：**75 包 / 233M**，`import pymupdf`、块提取、142 项测试全部照过。阶段 5 真要用版面分析时删掉那几行就装回来——别把它当成已经付过的成本。要换 pypdf 省得更多，但届时还得再引一次 PyMuPDF，变成两套 PDF 库并存，不值。
+
+> 顺带修正：`pyproject.toml` 的 `description` 还写着"Word 文档 AI 处理平台"，已改为"文档 AI 处理平台"；`pytest` 原本同时出现在 `project.dependencies` 和 dev 组里，已从生产依赖里摘掉（部署时不该装 pytest）。
 
 > 顺带修正了 ORM 与真实库的一处漂移：`operation_logs.original_content / processed_content` 改为 `Text().with_variant(LONGTEXT, "mysql")`。MySQL 的 `TEXT` 是 64KB **字节**上限，中文按 3 字节算两万字就撞墙，而 PDF 输入让长文档变成常态；本机老库早就是 LONGTEXT，这样声明让新建库和它一致（SQLite 单测仍走 TEXT）。`structured_output` 保持 TEXT——它只装问题清单，不装全文。
 

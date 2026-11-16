@@ -26,7 +26,7 @@
 ```bash
 uv sync                                        # 装依赖（含 dev 组）
 uv run uvicorn main:app --reload --port 8000    # 起后端，Swagger 在 /docs
-uv run pytest -q                               # 139 passed；纯函数 + 假 client + 内存 SQLite + 合成 PDF，不连 MySQL 不出网
+uv run pytest -q                               # 142 passed；纯函数 + 假 client + 内存 SQLite + 合成 PDF，不连 MySQL 不出网
 uv run ruff check .                            # 全绿
 uv run ruff format --check .                   # 全部已格式化
 uv lock --check                                # 依赖锁一致性
@@ -137,7 +137,7 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - **页码判据必须带位置条件**：纯数字/罗马数字 + 落在上 8% 或下 20% 留白带。只按内容判会把正文里的年份、条款号、表格序号当页码删掉（`2024` 恰好是四位数）。
 - **跨页高频装饰用频次判，不硬编码字符串**，且三条护栏：文档 ≥3 页、文本 ≤20 字符、**带句末标点的一律放过**。丢内容的代价远大于留噪声。
 - 失败一律 `PdfError` → 路由转 400（打不开 / 有打开密码 / 没有文字层）。**扫描件绝不回空文本**——那会让用户以为文档本来就是空的。
-- 依赖：`pymupdf`（锁 46 → 56 包，venv 303M，`pymupdf-layout` 拖进 onnxruntime + numpy）。留着的理由是阶段 5 PDF→PPT 本来就要它的 block/图片几何能力；换 pypdf 省 170M 但到阶段 5 还得再引一次，变成两套 PDF 库并存。`import pymupdf`，**不要用 `fitz`**（2.x 里已弃用，会打 FutureWarning）。
+- 依赖：`pymupdf` 2.x 把版面分析（`pymupdf-layout` → onnxruntime + numpy）和 Markdown 导出（`pymupdf4llm` → networkx + tabulate）做成了**硬依赖**。`services/pdf.py` 只用 `get_text("blocks")`，对这些零引用，所以 `pyproject.toml` 的 `[tool.uv] override-dependencies` 用"永不成立的 marker"把它们摘掉了：锁 **75 包**、`.venv` **233M**（摘之前是 84 包 / 337M）。**阶段 5 真要用版面分析时，删掉那几行 override 就能装回来**，别把它当成已经付过的成本。`import pymupdf`，**不要用 `fitz`**（2.x 里已弃用，会打 FutureWarning）。
 
 ### 3.9 评测台（阶段 2 最小版）
 
@@ -212,7 +212,9 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 
 当前路线（阶段 0–5，含为什么这么排）在 SPEC §9.2；阶段 0 交付与验证明细在 SPEC §9.3，阶段 1 在 §9.4，阶段 1.5（PDF 输入 + 去 Word 化）在 §9.5，阶段 2 最小版（评测台 + 基线数字）在 §9.6，阶段 3（长文档分块批改图）在 §9.7，缺陷台账第五轮在 §10，改 bug 前先看这几张表。
 
-门禁基线（均已实测通过）：`uv run pytest -q` → **139 passed**；`uv run ruff check .` → 全绿；`ruff format --check .` → 54 files already formatted；`uv lock --check` → 一致（**84 包**，阶段 1.5 引入 pymupdf、阶段 3 引入 langgraph 全家桶）；`npm run build` → 通过；`uv run python test_e2e.py` → 33/33；`uv run python test_e2e_structural.py` → **51/51**（第 10 节要 `LONGDOC_CHUNK_CHARS=60`）。
+门禁基线（均已实测通过）：`uv run pytest -q` → **142 passed**；`uv run ruff check .` → 全绿；`ruff format --check .` → 54 files already formatted；`uv lock --check` → 一致（**75 包 / .venv 233M**，摘掉 pymupdf 的版面分析死重之前是 84 包 / 337M）；`npm run build` → 通过；`uv run python test_e2e.py` → 33/33；`uv run python test_e2e_structural.py` → **51/51**（第 10 节要 `LONGDOC_CHUNK_CHARS=60`）。
+
+⚠ 有一条断言**还没实跑过**：第 10 节新加的 `progress` 契约检查（响应必须带这个键，跑完为 null，用来守住和 `client/src/api/types.ts` 的字段名一致）。下次起后端时一并验证，别当成已通过。
 
 - **`server/test_e2e.py` 是仓库自带的端到端冒烟脚本，不是遗留物，别删**：需后端已在 8000 运行、连真实 MySQL。它会注册 `tester_*` / `other_*` 两个临时账号，造 1 条日志和 1 个上传文件；脚本自身只删 task/provider，**账号、日志、落盘文件、以及新增的 `llm_calls` 行要跑完手动清**。第 7 节现在真走重试路径（连不上假 provider → 重试 3 次 → failed），第 10 节直接改库把日志置为 done 来验证下载，都属预期行为。
 - **`server/test_e2e_structural.py` + `test_llm_server.py` 是阶段 1 新增的结构化端到端**，同样别删：需后端 + 假 LLM 两个进程都在跑，全程零真实 token。mock 端点**刻意不支持 `response_format`**（回 400）来如实模拟国产兼容端点并逼出 `chat_json` 的降级路径，所以 LLM 日志里出现的 `400 Bad Request`（每次 `chat_json` 两条：`json_schema` 和 `json_object` 各一档）是预期行为不是故障。第 8 节是阶段 1.5 加的 **PDF 输入链路**：用 pymupdf 现场合成"每视觉行一个 block"的中文 PDF，断言提取结果与 docx **逐字相等**、定位成功、下载名换成 `.docx`——改提取器必跑它。它注册 `e2e_s_*` 账号，跑完清理方式和上面一样。
@@ -229,6 +231,7 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - 它有 `README.md` / `DEPLOY.md` / `deploy.ps1` / `.env.example` / `requirements.txt`，**没有 SPEC.md**。
 - 它的注释已按"去 AI 味"重写，**剥掉了 Java 对比块**；主仓库保留。
 - 两边业务逻辑应保持一致，但**没有任何自动同步**：主仓库改了逻辑要手动同步过去（反之亦然），注释风格各自保留。
+- ⚠ **pip 侧表达不了这个 override**：主仓库靠 `pyproject.toml` 的 `[tool.uv] override-dependencies` 摘掉 pymupdf 的版面分析死重，demo 副本的 `requirements.txt` 用 pip 装 `pymupdf` 会把 onnxruntime + numpy 一起拖回来（多约 100M）。要在 demo 侧也省掉，只能写 `--no-deps` 的手工装法或者接受体积差异 —— 属交付决定，做前先问用户。
 - ⚠ **demo 副本目前落后主仓库四轮（阶段 0 + 1 + 1.5 + 3）**，实测确认它仍是老版：`services/llm.py` 只有 `call_llm`，没有 `models/llm_call.py`、没有 `capabilities`、没有 `structured_output`、没有 `services/pdf.py`、没有 `services/chunking.py` / `graphs/`。同步时要一并带过去：新版 `services/llm.py`、`services/grading.py`、`services/pdf.py`、`services/chunking.py`、`graphs/__init__.py` + `graphs/grading_graph.py`、`schemas/grading.py`、`models/llm_call.py`、两个 migrate 脚本、`test_llm_server.py` 与 `test_e2e_structural.py`、`.env.example` 的新配置项（6 个 LLM/日志 + 3 个分块），以及前端 provider 能力多选、Home.vue 问题清单卡片、上传区 `.pdf` 白名单与文案。demo 侧 `pyproject.toml` 已是 `fileagent-server`，**`requirements.txt` 必须补 `pymupdf` + `langgraph` + `langgraph-checkpoint-sqlite`**（阶段 1.5 与 3 的运行时依赖，漏 pymupdf 则 PDF 上传 500，漏 langgraph 则长文档批改 500）；`.gitignore` 里没有 `.env.example` 之外还要留 `checkpoints/`。注释仍按 demo 的去 AI 味风格重写（不带 Java 对比块）。要不要同步、同步到哪一轮，属于交付决定，先问用户。
 
 ## 9. 提交

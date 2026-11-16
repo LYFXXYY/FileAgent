@@ -1,7 +1,7 @@
 [project]
 name = "fileagent-server"
 version = "0.1.0"
-description = "FileAgent 后端：Word 文档 AI 处理平台（FastAPI + SQLAlchemy + python-docx）"
+description = "FileAgent 后端：文档 AI 处理平台（FastAPI + SQLAlchemy + python-docx + PyMuPDF）"
 requires-python = ">=3.12"
 dependencies = [
     "bcrypt>=4.1.0",
@@ -12,7 +12,6 @@ dependencies = [
     "pydantic-settings>=2.15.0",
     "pymupdf>=2.1",
     "pymysql>=1.2.3",
-    "pytest>=9.1.1",
     "python-docx>=1.2.0",
     "python-jose[cryptography]>=3.5.0",
     "python-multipart>=0.0.32",
@@ -24,6 +23,24 @@ dependencies = [
 dev = [
     "pytest>=9.1.1",
     "ruff>=0.16.8",
+]
+
+[tool.uv]
+# PyMuPDF 2.x 把版面分析（pymupdf-layout → onnxruntime + numpy）和 Markdown 导出
+# （pymupdf4llm → networkx + tabulate）做成了**硬依赖**，合计约 73M。
+# 我们的 services/pdf.py 只用 `page.get_text("blocks")`，对这些一次都不引用，
+# 所以用"永不成立的 marker"把它们从解析结果里摘掉——pymupdf 本体不依赖它们就能跑，
+# 实测 import 与全部 PDF 用例都通过。
+# ⚠ 真要用版面分析（阶段 5 的表格/图片角色判定）时，删掉这几行即可装回来。
+override-dependencies = [
+    "pymupdf-layout; python_version < '3.0'",
+    "pymupdf_layout; python_version < '3.0'",
+    "pymupdf4llm; python_version < '3.0'",
+    "onnxruntime; python_version < '3.0'",
+    "numpy; python_version < '3.0'",
+    "networkx; python_version < '3.0'",
+    "tabulate; python_version < '3.0'",
+    "psutil; python_version < '3.0'",
 ]
 
 [tool.pytest.ini_options]
