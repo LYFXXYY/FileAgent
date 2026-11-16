@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import os
 from dataclasses import dataclass
 from typing import Annotated, Any, TypedDict
@@ -53,6 +54,8 @@ from schemas.grading import GRADING_JSON_SCHEMA
 from services.chunking import Chunk, reassemble, split_document
 from services.grading import build_messages, parse_grading_output
 from services.llm import LLMError, LLMResult, chat_json
+
+logger = logging.getLogger("fileagent.graph")
 
 # 扇出上限：一次塞几十个分支进图，排到信号闸外面只会白白占内存
 _MAX_INFLIGHT_HINT = 8
@@ -138,6 +141,44 @@ class ChunkCall:
             finish_reason=self.finish_reason,
             attempts=self.attempts,
         )
+
+
+@dataclass(frozen=True)
+class ChunkProgress:
+    """分块进度快照，给 status 轮询显示"已批 M/N 块" """
+
+    total: int
+    done: int
+
+
+async def read_progress(thread_id: str, checkpoint_path: str | None = None) -> ChunkProgress | None:
+    """
+    从检查点读分块进度。读不到就返回 None，让前端不显示进度，而不是显示骗人的 0/0。
+
+    两个如实的限制：
+    - `plan` 节点跑完之前没有块数，前端这段时间只能看到"处理中"；
+    - 检查点按 super-step 落盘，扇出里某块抛异常会让整步写入作废，所以失败重跑时
+      `done` 可能回落到 0。这不是丢数据（按块缓存在 store 里，钱不会重复烧），
+      但数字确实会跳，别在这里编一个更好看的版本。
+    """
+    settings = get_settings()
+    path = _resolve_dir_file(checkpoint_path or settings.checkpoint_path)
+
+    try:
+        async with AsyncSqliteSaver.from_conn_string(path) as saver:
+            snapshot = await saver.aget_tuple({"configurable": {"thread_id": thread_id}})
+    except Exception as e:  # 文件还没建、被清掉了、或格式不认识
+        logger.warning("读分块进度失败 thread_id=%s：%s", thread_id, str(e)[:200])
+        return None
+
+    if snapshot is None:
+        return None
+
+    values = (snapshot.checkpoint or {}).get("channel_values") or {}
+    plan = values.get("plan") or []
+    if not plan:
+        return None
+    return ChunkProgress(total=len(plan), done=len(values.get("results") or []))
 
 
 @dataclass(frozen=True)

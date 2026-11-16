@@ -19,7 +19,7 @@ import { extractErrorMessage } from '@/api/client'
 import { processApi } from '@/api/process'
 import { providerApi } from '@/api/providers'
 import { taskApi } from '@/api/tasks'
-import type { GradingIssue, Provider, Task } from '@/api/types'
+import type { ChunkProgress, GradingIssue, Provider, Task } from '@/api/types'
 import { useHomeStore } from '@/stores/home'
 
 const homeStore = useHomeStore()
@@ -40,6 +40,14 @@ const processingError = ref(homeStore.processingError)
 const processedContent = ref(homeStore.processedContent)
 const gradingIssues = ref(homeStore.gradingIssues)
 const gradingDegraded = ref(homeStore.gradingDegraded)
+// 长文档分块进度。刻意不进 store：它是瞬时状态，刷新后第一次轮询就会重新拿到，
+// 持久化反而会显示上一次任务的块数，那是骗人
+const chunkProgress = ref<ChunkProgress | null>(null)
+const chunkPercent = computed(() => {
+  const p = chunkProgress.value
+  if (!p || p.total <= 0) return 0
+  return Math.round((p.done / p.total) * 100)
+})
 
 // ---------- 结构化批改渲染 ----------
 // 按问题类型上色，前端只认 8 个 canonical 值（与 schemas/grading.py 的 ISSUE_TYPES 对齐）
@@ -185,6 +193,7 @@ async function pollOnce() {
 
   try {
     const resp = await processApi.status(logId)
+    applyProgress(resp.data)
     if (resp.data.status === 'done') {
       stopPolling()
       currentStep.value = 3
@@ -223,6 +232,11 @@ function applyResult(resp: { processed_content: string | null; issues: GradingIs
   processedContent.value = resp.processed_content
   gradingIssues.value = resp.issues
   gradingDegraded.value = resp.grading_degraded
+}
+
+// 分块进度的唯一铺值入口（和 applyResult 同理：三处状态读取都要走它，别各自赋值）
+function applyProgress(resp: { status: string; progress?: ChunkProgress | null }) {
+  chunkProgress.value = resp.status === 'processing' ? resp.progress ?? null : null
 }
 
 // ---------- 生命周期 ----------
@@ -286,6 +300,7 @@ async function refreshProcessingStatus() {
   if (currentStep.value === 2 && logId !== null && homeStore.processing) {
     try {
       const resp = await processApi.status(logId)
+      applyProgress(resp.data)
       if (resp.data.status === 'done') {
         stopPolling()
         currentStep.value = 3
@@ -352,6 +367,8 @@ async function doProcess() {
   if (!uploadResult.value) return
   processing.value = true
   processingError.value = null
+  // 上一轮的块数进度不能留到这一轮：换了文档切成几块都可能变了
+  chunkProgress.value = null
   syncToStore()
   try {
     const resp = await processApi.process(uploadResult.value.log_id)
@@ -410,6 +427,7 @@ function goBackToUpload() {
   stopPolling()
   processing.value = false
   processingError.value = null
+  chunkProgress.value = null
   currentStep.value = 1
   syncToStore()
 }
@@ -425,6 +443,7 @@ function processNewFile() {
   processedContent.value = null
   gradingIssues.value = null
   gradingDegraded.value = false
+  chunkProgress.value = null
   homeStore.logId = null
   syncToStore()
 }
@@ -443,6 +462,7 @@ function reset() {
   processedContent.value = null
   gradingIssues.value = null
   gradingDegraded.value = false
+  chunkProgress.value = null
   homeStore.clear() // 清空 store 中的持久化状态
 }
 </script>
@@ -607,6 +627,16 @@ function reset() {
             show-icon
             style="margin-bottom: 16px"
           />
+          <div v-if="chunkProgress" class="chunk-progress">
+            <p class="chunk-progress-label">
+              长文档分块批改：已完成 {{ chunkProgress.done }} / {{ chunkProgress.total }} 块
+            </p>
+            <el-progress :percentage="chunkPercent" :stroke-width="8" :show-text="false" />
+            <p class="hint">
+              各块并行处理，进度按已批完的块数计。某一块失败后重跑，进度会回落到 0，
+              但已成功的块不会重复调用模型、也不会重复花钱
+            </p>
+          </div>
           <div class="step-actions">
             <el-button @click="goBackToUpload" :disabled="processing">上一步</el-button>
             <el-button
@@ -859,6 +889,29 @@ function reset() {
   border-radius: 6px;
   border-left: 3px solid #faad14;
   text-align: left;
+}
+
+/* 长文档分块进度：只在后端给到 progress 时出现 */
+.chunk-progress {
+  margin: 0 0 var(--space-md);
+  padding: var(--space-sm) var(--space-md);
+  background: #f5f7fa;
+  border-radius: 8px;
+  border-left: 3px solid #409eff;
+  text-align: left;
+}
+
+.chunk-progress-label {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #303133;
+}
+
+.chunk-progress .hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #909399;
 }
 
 .empty-hint {

@@ -24,6 +24,17 @@ class UploadResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ChunkProgressResponse(BaseModel):
+    """长文档分块批改的进度快照
+
+    只有分块路径才有值：读的是 LangGraph 检查点，`plan` 节点跑完之前拿不到块数，
+    那种情况下字段是 None 而不是 0/0——没有依据的数字比没有数字更坏。
+    """
+
+    total: int
+    done: int
+
+
 class ProcessResponse(BaseModel):
     """处理完成后的结果
 
@@ -40,5 +51,7 @@ class ProcessResponse(BaseModel):
     # true = 是批改任务但模型没按格式出 JSON，已退回自由文本。
     # 丢了它，前端只能显示"0 处问题"，等于把失败伪装成没问题
     grading_degraded: bool = False
+    # 分块进度。非分块任务（短文、摘要类）恒为 None
+    progress: ChunkProgressResponse | None = None
 
     model_config = {"from_attributes": True}

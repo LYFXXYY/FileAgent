@@ -289,6 +289,9 @@ def main():
             break
 
     check("长文档轮询到 done", long_final.get("status") == "done", str(long_final)[:300])
+    # 契约检查：字段名要和 client/src/api/types.ts 的 ChunkProgress 对得上，
+    # 跑完之后它是 null，但键必须在——前端靠"有没有这个键"决定显示进度还是普通等待
+    check("响应带 progress 字段", "progress" in long_final, str(sorted(long_final))[:200])
     long_issues = long_final.get("issues") or []
     check("分块后出问题清单", len(long_issues) >= 3, str(len(long_issues)))
     check("分块没有触发降级", long_final.get("grading_degraded") is False)

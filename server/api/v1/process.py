@@ -27,14 +27,14 @@ from sqlalchemy.orm import Session
 
 from config import get_settings
 from database import SessionLocal, get_db
-from graphs.grading_graph import grade_long_document
+from graphs.grading_graph import grade_long_document, read_progress
 from middleware.auth import get_current_user
 from models.operation_log import LogStatus, OperationLog
 from models.provider import ModelProvider
 from models.task import Task
 from models.user import User
 from schemas.grading import GRADING_JSON_SCHEMA, GradingIssue, GradingResult
-from schemas.process import ProcessResponse, UploadResponse
+from schemas.process import ChunkProgressResponse, ProcessResponse, UploadResponse
 from services.grading import (
     build_messages,
     deserialize_issues,
@@ -418,6 +418,13 @@ async def process_status(
         raise HTTPException(404, "记录不存在")
 
     done = log.status == LogStatus.DONE
+    progress = None
+    if log.status == LogStatus.PROCESSING:
+        # 只在处理中读检查点：跑完之后这个字段没有意义，别为已结束的日志白开一次 sqlite
+        snapshot = await read_progress(f"log-{log_id}")
+        if snapshot is not None:
+            progress = ChunkProgressResponse(total=snapshot.total, done=snapshot.done)
+
     return ProcessResponse(
         log_id=log.id,
         status=log.status,
@@ -426,6 +433,7 @@ async def process_status(
         processed_content=log.processed_content if done else None,
         issues=deserialize_issues(log.structured_output) if done else None,
         grading_degraded=is_degraded(log.structured_output) if done else False,
+        progress=progress,
     )
 
 

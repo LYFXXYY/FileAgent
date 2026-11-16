@@ -104,6 +104,13 @@ export interface GradingIssue {
   end: number | null
 }
 
+export interface ChunkProgress {
+  /** 切成几块。plan 节点跑完之前后端给 null，此时不显示进度 */
+  total: number
+  /** 已批完几块 */
+  done: number
+}
+
 export interface ProcessResponse {
   log_id: number
   status: 'pending' | 'processing' | 'done' | 'failed'
@@ -114,6 +121,8 @@ export interface ProcessResponse {
   issues: GradingIssue[] | null
   /** true = 模型未按 JSON 格式出货，已退回自由文本（和 issues=[] 不是一回事） */
   grading_degraded: boolean
+  /** 长文档分块进度；短文、非批改任务、以及还没切块时为 null */
+  progress?: ChunkProgress | null
 }
 
 // ========== 操作日志 ==========

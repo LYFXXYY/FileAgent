@@ -17,7 +17,7 @@ from test_llm import _provider, _Response
 
 import services.llm as llm
 from graphs import grading_graph
-from graphs.grading_graph import grade_long_document
+from graphs.grading_graph import grade_long_document, read_progress
 
 # 三段各 19–20 字的文档，预算 30 字 → 稳定切成 3 块（每块正好一段）
 DOC = "\n".join(
@@ -197,6 +197,34 @@ def test_retry_only_bills_the_failed_chunk(env):
     assert retry.calls == [1], f"续跑只该重打失败的那块，实际打了 {retry.calls}"
     assert result.cached_chunks == 2
     assert result.revised_text == EXPECTED_REVISED
+
+
+def test_progress_reads_total_and_done_from_checkpoint(env):
+    """跑完之后进度必须是 N/N，前端靠它区分是卡住了还是快好了"""
+    _run(env, _RouteClient())
+
+    progress = asyncio.run(read_progress("log-1", checkpoint_path=env.ckpt))
+    assert progress is not None
+    assert (progress.total, progress.done) == (3, 3)
+
+
+def test_progress_is_none_for_unknown_thread(env):
+    """没跑过的 thread 返回 None，不是 0/0：没有依据的数字比没有数字更坏"""
+    assert asyncio.run(read_progress("log-does-not-exist", checkpoint_path=env.ckpt)) is None
+
+
+def test_progress_does_not_pretend_after_a_failed_fanout(env):
+    """
+    扇出里一块失败时，整步检查点写入一起作废，所以 done 不该显示"跑了一半"
+
+    这条断言写的是**行为现状**而不是愿望：钱确实不会重复烧（按块缓存在 store 里），
+    但进度数字会跳，别在前端把它抹平成一个更好看的版本。
+    """
+    with pytest.raises(llm.LLMError):
+        _run(env, _RouteClient(die=(1,)))
+
+    progress = asyncio.run(read_progress("log-1", checkpoint_path=env.ckpt))
+    assert progress is None or progress.done == 0
 
 
 def test_cache_is_invalidated_when_instruction_changes(env):
