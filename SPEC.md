@@ -478,7 +478,59 @@ uv run python -m eval.runner --provider 5 --prompt-file cand.txt --baseline eval
 
 ---
 
+### 5.12 长文档分块批改图（阶段 3：LangGraph 首练）
+
+只有**批改类**任务、且整篇长度超过 `LONGDOC_CHUNK_CHARS`（默认 6000 字）时才进图：
+
+```
+START → plan → (Send 扇出) → grade_chunk × N → merge → END
+```
+
+| 节点 | 干什么 | 花不花钱 |
+|---|---|---|
+| `plan` | 调 `services/chunking.split_document` 算块边界 | 否 |
+| `grade_chunk` | 先查按块缓存，没命中才 `chat_json` 批这一块，并把块内偏移平移成整篇偏移 | 每块一次 |
+| `merge` | 按块序号排序、`reassemble` 拼回整篇、展平意见清单、汇总 degraded | 否 |
+
+**为什么只有批改类分块**：摘要、翻译、润色的产出要对**整篇**负责，逐块做完再拼只会得到 N 份局部摘要，比一次性塞进去更差。真要处理超长摘要得走"先逐块摘要再整篇汇总"的两段式，那是另一个功能，不在这里顺手做。
+
+**分块的三条不变式**（`services/chunking.py`，改它必跑 `tests/test_chunking.py`）：
+
+1. `chunk.text == source[chunk.start:chunk.end]` —— 块就是原文的连续切片，不重排不加空格
+2. 块不重叠，块之间只允许隔着空白（段落分隔与空行）
+3. `reassemble(source, chunks, [c.text for c in chunks]) == source` —— 逐字拼得回去
+
+切点优先段落边界，段落本身超预算退到句末标点，再超才硬切。代价如实说：跨切点的片段
+会匹配失败留 `None`（显示"未定位"），**不会**指到别处去——这跟 §5.8"绝不要求模型输出
+坐标"是同一条纪律。硬切时的贪心是"预算内尽量靠后取句点"，取第一个超预算的句点是错的
+（切出来的块本身还会超预算，第一版就这么错过）。
+
+**省钱的根据是按块 store，不是 checkpoint**。检查点按 super-step 落盘，扇出里有一块抛异常，
+整步的写入一起作废——实测重跑时三块全都重打。所以：
+
+| 机制 | 管什么 | 不管什么 |
+|---|---|---|
+| `AsyncSqliteSaver`（`checkpoints/grading.sqlite3`） | 进程在两步之间没了，下次从那步之后接着跑 | 同一步内的部分成功 |
+| `SqliteStore`（`checkpoints/grading.chunks.sqlite3`） | 每块成功后立刻落盘；重跑时键 `(thread_id, index)` 命中就不外呼 | — |
+
+缓存命中还要求**块文本、批改指令摘要、模型名**三者一致：换 prompt 或换提供商还在吃旧结果，
+那种"看起来变好了"最难查。命中缓存的块**不写 `llm_calls`**——本轮没发生外呼，记账就是重复计成本。
+
+**reducer 不能用 `operator.add`**：同一 thread 的历次运行会堆在一起，用户点第二次"处理"时 3 块变
+6 段，`reassemble` 直接报"块数与段数不一致"。这里用的是按块序号覆盖的 upsert reducer。
+追加语义是给聊天式线程用的，"重跑一条日志"要的是这次的结果就是最终结果。
+
+**为什么另建一个 `graphs/` 包**：图节点是编排，`services/` 是能力。混在一起，节点里偷偷查库
+就没人拦得住，而 §5.7 那条"传输层不碰 DB"的边界正是靠这种分层守住的——provider 由调用方
+解析后用闭包传进节点，状态里只留可序列化内容（塞 ORM 对象的话 msgpack 检查点写不下去）。
+
+**这一轮刻意没做**：图级 `RetryPolicy`（`chat()` 已按白名单重试，再套一层就是双倍烧钱）、
+`interrupt` 人工确认分块方案（要先有 UI，别为了用上 API 制造一次交互）、非批改类的分段汇总。
+
+---
+
 ## 6. 数据库设计
+
 
 ```sql
 CREATE TABLE users (
@@ -669,7 +721,8 @@ Nginx 反代：前端静态文件直接 serve，`/api/` 代理到 `127.0.0.1:800
 14. ✅ **阶段 1：结构化批改输出**（见 9.4）
 15. ✅ **阶段 1.5：输入格式扩到 PDF + 项目去 Word 化改名**（见 9.5）
 16. ✅ **阶段 2 最小版：评测台**（见 9.6；完整形态的真实夹具留到需要时再补）
-17. ⬜ 联调 + Docker 部署（推迟到阶段 2.5 与 Postgres 一起做）
+17. ✅ **阶段 3 主体：长文档分块批改图（LangGraph）**（见 9.7）
+18. ⬜ 联调 + Docker 部署（推迟到阶段 4 与 Postgres 一起做）
 
 ### 9.2 Agent 化演进路线（阶段 0–5）
 
@@ -681,8 +734,8 @@ Nginx 反代：前端静态文件直接 serve，`/api/` 代理到 `127.0.0.1:800
 | **1** | 批改输出结构化：自由文本 → 问题清单 JSON（位置/类型/原文/建议/置信度），前端可点击定位标注 | 0 | ✅ **已完成** 2026-11-15 |
 | **1.5** | 输入格式扩到 PDF（提取层与 docx 同构）+ 项目去 Word 化改名。不在原路线里，是用户 2026-11-15 提的需求：后续真有 PDF 需求 | 1 | ✅ **已完成** 2026-11-15 |
 | **2** | 评测台：golden set + rubric + LLM-as-judge + prompt 版本管理 + 回归对比 | 1.5 | 🟡 **最小版已完成** 2026-11-15（合成夹具 + 确定性指标 + `--prompt-file` A/B + 同源自判）。缺：真实文档夹具、第二厂商当裁判、档位落库 |
-| **2.5** | Postgres 迁移：独立 `pgvector/pgvector:pg16` 容器，业务 + LangGraph 检查点 + 向量统一一库 | 2 | ⬜ 到需要时再定，阶段 0–2 用不到 |
-| **3** | LangGraph 首练**长文档分块批改**：fan-out/fan-in + PostgresSaver 检查点 + 条件重试 + interrupt 人工确认。顺带突破单次上下文上限 | 2.5 | ⬜ |
+| **2.5** | Postgres 迁移：独立 `pgvector/pgvector:pg16` 容器，业务 + LangGraph 检查点 + 向量统一一库 | 2 | ⏭ **并入阶段 4**（用户 2026-11-15 定：阶段 3 用 SQLite 检查点就够，等 RAG 真需要 pgvector 时一次性迁，避免建了又拆） |
+| **3** | LangGraph 首练**长文档分块批改**：fan-out/fan-in + 检查点 + 按块幂等续跑。顺带突破单次上下文上限 | 2 | 🟡 **主体已完成** 2026-11-15（用户改口径：检查点先用 SQLite，Postgres 推到阶段 4）。缺 `interrupt` 人工确认分块方案（要先做 UI） |
 | **4** | RAG 规范库：多文档上传、分块、pgvector 检索，把格式规范条款注入批改 prompt 并带引用溯源 | 3 | ⬜ |
 | **5** | PDF→PPT：把确定性 PDF 几何处理移植成 service，LLM 只接管大纲规划与视觉批评修订循环 | 4 + VLM | ⬜ |
 
@@ -775,12 +828,104 @@ Nginx 反代：前端静态文件直接 serve，`/api/` 代理到 `127.0.0.1:800
 **一个实测发现的环境事实**：本机 **8000 端口被 WSL 侧另一个项目的 `backend.app:app` 占着**，而且因为 WSL 是 mirrored 网络，Windows 的 `netstat` 看不到这个监听，只表现为 `uvicorn --port 8000` 报 `[Errno 10048]` 而 `curl localhost:8000` 能收到对方 FastAPI 的 404。排查这类"端口没人监听但连得上"的情况，要去 `wsl -e bash -lc "ss -ltnp | grep ':端口'"` 查，别在 Windows 侧白费劲。`test_e2e_structural.py` 因此支持 `FA_API` / `FA_MOCK_LLM` 换端口。
 
 **遗留**：
-- `chat_json` 的 `json_schema` 严格档至今只在 mock 端点上验证过降级路径，**还没拿真实国产端点跑通过一次严格模式**。真实端点是否支持 `strict: True`、字段是否有丢，需要在下一步用你配的豆包/qwen 实测。
+- `chat_json` 的 `json_schema` 严格档至今只在 mock 端点上验证过降级路径，**还没拿真实国产端点跑通过一次严格模式**。真实端点是否支持 `strict: True`、字段是否有丢，需要在下一步用你配的豆包/qwen 实测。（后续已补：阶段 1.5 与阶段 2 的真实端点实测都命中 `json_schema` 档，见 9.5 / 9.6。）
 - 结构化清单目前只在批改任务生效（`is_grading`），普通润色/改写任务不产出清单。
 - docx 下载仍是纯红字 diff，**没有**把问题清单汇总进交付文档——那是独立的排版工作，未混进本阶段。
 - demo 副本仍落后阶段 0 + 1 两轮。
 
+### 9.5 阶段 1.5 交付情况（2026-11-15）：PDF 输入 + 去 Word 化
+
+改动 12 个文件，新增 1 个 service，**首次引入运行时依赖**（pymupdf，锁 46 → 56 包）。
+
+| 文件 | 改了什么 |
+|---|---|
+| `services/pdf.py` | 新增：两遍段落重建 + 页码/跨页噪声剔除 + 三条失败路径（`PdfError`） |
+| `api/v1/process.py` | `TEXT_EXTRACTORS` 派发表（白名单由它派生）；下载文件名改 `stem + .docx`；文案去 Word 化 |
+| `models/operation_log.py` | 正文两列 `Text().with_variant(LONGTEXT, "mysql")`，与本机老库对齐 |
+| `tests/test_pdf.py` | 新增 20 例：拼接/几何合并/噪声/三条错误路径 + 3 例合成 PDF 端到端 |
+| `test_e2e_structural.py` | 新增第 8 节 PDF 链路（6 项）：提取与 docx 同构、定位、结果名换成 `.docx` |
+| `client/views/Home.vue`、`api/process.ts` | `accept=".docx,.pdf"` + 上传区文案 |
+| `AGENTS.md` / `README.md` / `SPEC.md` | 定位与格式口径同步；README 顺手修掉两处陈旧计数（表数、用例数） |
+
+**验证到什么程度**（都是实测）：
+
+- `pytest` 110 passed（+20）；`test_e2e_structural.py` **40/40**（+6）；`test_e2e.py` 33/33 无回归；ruff check / format 全绿；`npm run build` 通过。
+- **真机跑通**（用户授权"能调用到 agent 就可以跑测试"）：合成中文 PDF → provider 5（qwen3.7-flash）→ done、`degraded=False`、4 条 的/地/得 意见全部精确定位（`start=9 end=16` 手算核对），下载名 `批改_校园随笔.docx`。用合成文本而非本机文档，避免私人内容外发。跑完按 `task_name` 清掉日志与计量行。
+- 提取质量核对：3 段各由 2 个视觉块拼回、页脚 `3` 被位置规则剔除、无跨栏误合。
+
+**这一轮发现的真缺陷（不是新功能带来的麻烦）**：下载文件名以前是 `批改_ + original_filename`，PDF 输入会产出一个叫 `.pdf` 的 docx，下载方直接打不开。已改成去扩展再补 `.docx`，docx 输入的结果名不变。
+
+**遗留与代价**：
+
+1. 真机那次跑回来的 `revised_text` 与原文一模一样（4 条意见都对，但修订文没落地修改）——批改 prompt 的产出质量问题，正是阶段 2 评测台要量化的东西，这轮不顺手改 prompt。
+2. `chat_json` 用到了阶梯的哪一档**没有任何记录**：降级路径是静默的，端点接受 `json_schema` 还是被降到的，事后无法区分。跨端点比较（阶段 2）必须有这个归因，届时给 `llm_calls` 加一列。
+3. pymupdf 的依赖树偏重（见 5.10），demo 交付副本的 `requirements.txt` 要跟着补，属交付决定。
+4. 扫描版 PDF（无文字层）现在只报错，OCR 属阶段 5。
+
+### 9.6 阶段 2 最小版交付情况（2026-11-15）：评测台
+
+改动 4 个文件 + 1 处 `LLMResult` 字段扩展，**没有新增依赖、没有改表结构**。
+
+| 文件 | 改了什么 |
+|---|---|
+| `eval/cases.py` | 新增：5 份合成中文夹具 + 期望（`expect_fixes / expect_types / min_issues / max_issues`） |
+| `eval/score.py` | 新增：4 个确定性指标 + 聚合 + `diff_runs` 带符号对拍 |
+| `eval/runner.py` | 新增：CLI（`--provider / --case / --prompt-file / --judge / --baseline / --label`） |
+| `services/llm.py` | `LLMResult.format_tier` + `_tier_name()`；拒绝降档的日志从 DEBUG 升到 INFO |
+| `tests/test_eval_score.py` | 新增 10 例，含一条**夹具自洽性检查**（期望的错处必须真的在文档里） |
+| `.gitignore` | `server/eval/runs/` 不入库（本机数字，抄进文档即可） |
+
+**基线两轮（provider 5 qwen3.7-flash，5 条夹具，批改全部 `tier=json_schema`）**：
+
+| 指标 | baseline-1（旧单值口径，18,625 token） | baseline-2（现组口径，19,990 token） | 读数 |
+|---|---|---|---|
+| `recall` | 1.0000 | 0.9167 | 第二轮成语错字漏了 1/4，同提示同夹具的漂移 |
+| `locate_rate` | 0.8600 | 0.8333 | 稳定约 15% 的意见点不到原文 |
+| `fix_rate` | 0.6389 | 0.5833 | 修订稿只落地一半多，两轮都是 |
+| `type_coverage` | 0.6250 | **1.0000** | 变化全部来自口径（单值 → 组内任一命中），模型行为一点没变 |
+| `false_positives` | 0 | 0 | 干净文档两轮各挑 1 条，没硬找 |
+
+**这几轮数字给出的四条结论**（都是量出来的，不是猜的）：
+
+1. **标点夹具的 `fix_rate` 两轮都是 0.3333**，而其它夹具会漂——不漂的那一项是系统性缺陷：模型肯重排句子，但不肯真正补逗号/句号。这是 prompt 能正面攻的目标，也是"重复跑"真正有价值的地方：只有稳定复现的差值才值得改代码。
+2. **单轮数字会漂**：`recall` 1.0 → 0.9167、`de-di-de` 的 recall 曾在 1.0 与 0.8333 之间跳。5 条夹具的单轮差值只够看方向，要下"A/B 变好了"的结论得先加重复轮次（优先级排在加真实夹具之前）。
+3. **同源自判会放水**：裁判给那条 `fix_rate=0.6667` 的结果打了 **5/5** 并写"所有误用都已修正"。模型给自己家打分系统性偏高，这是已知偏差，不是这套指标的失败——所以客观指标必须先于主观分存在。
+4. **`format_tier` 立刻有回报**：批改调用稳定落在 `json_schema`，裁判那次（schema 含 array）落到了 `json_object`。没有这个字段，"换了端点分数变差"永远只能靠猜。
+
+**还没做**（用户 2026-11-15 定：推到阶段 3 一起做）：真实文档夹具、第二厂商当裁判、**同夹具重复轮次**（两轮实测已给它排到加夹具之前）、`format_tier` 落进 `llm_calls`（改表结构，做前先问）、**浏览器端 UI 走查**（上传 PDF → 点卡片高亮 → 下载名，目前只有 API 级验证，用户同意放最后）。评分口径已定：类型期望按组写、组内任一命中即覆盖（的地得算 `typo`/`grammar`/`wording` 都算数）。
+
 ---
+
+### 9.7 阶段 3 交付情况（2026-11-15）：长文档分块批改图
+
+改动 3 个新文件 + 4 处接线，**第二次引入运行时依赖**（langgraph 全家桶，锁 56 → 84 包，venv 303M → 337M）。
+
+| 文件 | 改了什么 |
+|---|---|
+| `services/chunking.py` | 新增：分块 + 拼回，三条不变式（切片正确 / 不重叠 / 逐字还原） |
+| `graphs/grading_graph.py` | 新增：`plan → Send 扇出 → merge`，`AsyncSqliteSaver` 检查点 + `SqliteStore` 按块幂等 |
+| `api/v1/process.py` | `_ModelOutput.calls` 改成一笔一笔的计量列表；批改超预算才进图；`thread_id=log-{id}` |
+| `config.py` / `.env.example` | `LONGDOC_CHUNK_CHARS` / `LONGDOC_ENABLED` / `CHECKPOINT_PATH` 三项 |
+| `tests/test_chunking.py` | 新增 11 例（含无标点长串硬切、空行留白、预算为 0 报错） |
+| `tests/test_grading_graph.py` | 新增 7 例（全局偏移、拼回、单块降级、续跑只重打失败块、换 prompt 破缓存） |
+| `test_e2e_structural.py` | 新增第 10 节 11 项：长文档走完整业务链路（扇出、逐字核对偏移、每次外呼各记一行） |
+| `.gitignore` | `server/checkpoints/` 不入库 |
+
+**门禁**：`pytest` 139 passed（+18）；`ruff check` / `format --check` 全绿（54 files）；`uv lock --check` 一致；`npm run build` 通过（前端零改动）；`test_e2e_structural.py` 40 → **51/51**（需后端带 `LONGDOC_CHUNK_CHARS=60` 启动）；`test_e2e.py` 33/33 无回归。
+
+**写测试时抓出的四个真问题**（都不是测试写错，是实现错，逐个记下来免得改回去）：
+
+1. **`operator.add` reducer 会让重跑累加**：同一条日志点第二次"处理"，3 块变 6 段，`reassemble` 报"块数与段数不一致"。改成按块序号 upsert。
+2. **只平移了 `start` 没平移 `end`**：第 1 块恰好是恒等偏移所以看不出来，第 2 块起意见区间整体偏短。全局偏移必须成对平移。
+3. **`SqliteStore(path)` 传字符串直接炸**在 `create_function` 上——构造函数要的是 `sqlite3.Connection`，路径得走 `from_conn_string()` 上下文管理器，且要显式 `setup()` 建表。
+4. **假 client 按顺序吐响应在扇出下是错的**：并发分支谁先到端点不确定，A 块会拿到 B 块的答复，测试"看起来通过"其实在测运气。改成按请求内容路由（`_RouteClient`）。
+
+**检查点到底给了什么**（这是本阶段最想记住的一条）：扇出里有一块抛异常，整步的 checkpoint 写入一起作废，重跑时**所有块都重打**——实测过。所以"第 99 块挂了别把前 98 块再烧一遍"靠的是按块 `SqliteStore`，不是靠 `AsyncSqliteSaver`。两个都留着，各管各的粒度。
+
+**这一轮没做**：`interrupt` 人工确认分块方案（要先有 UI）、图级 `RetryPolicy`（`chat()` 已重试，再套一层双倍烧钱）、非批改类的分段汇总、`checkpoints/` 的体积治理与 TTL、多 worker 下的 saver。
+
+---
+
 
 ## 10. 缺陷修复总结
 
@@ -867,68 +1012,25 @@ Nginx 反代：前端静态文件直接 serve，`/api/` 代理到 `127.0.0.1:800
 
 **回归验证**：pytest 90 passed；`test_e2e_structural.py` 34/34（假端点，零 token）；`test_e2e.py` 33/33 无回归；`npm run build` 通过；ruff check / format 全绿；`uv lock --check` 一致且无新增依赖；迁移脚本幂等；测试数据六项计数全部还原 MATCH。
 
-**仍未验证**：`json_schema` 严格档只在 mock 端点验证过降级路径，没拿真实国产端点跑过一次严格模式。
+**仍未验证**：`json_schema` 严格档只在 mock 端点验证过降级路径，没拿真实国产端点跑过一次严格模式。（阶段 1.5 / 阶段 2 的真实端点实测已命中 `json_schema`，见 9.5 / 9.6。）
 
-### 9.5 阶段 1.5 交付情况（2026-11-15）：PDF 输入 + 去 Word 化
+### 第五轮：阶段 1.5 ~ 3（PDF 输入、评测台、分块批改）
 
-改动 12 个文件，新增 1 个 service，**首次引入运行时依赖**（pymupdf，锁 46 → 56 包）。
+只列缺陷本体，机理见 9.5 / 9.6 / 9.7。
 
-| 文件 | 改了什么 |
-|---|---|
-| `services/pdf.py` | 新增：两遍段落重建 + 页码/跨页噪声剔除 + 三条失败路径（`PdfError`） |
-| `api/v1/process.py` | `TEXT_EXTRACTORS` 派发表（白名单由它派生）；下载文件名改 `stem + .docx`；文案去 Word 化 |
-| `models/operation_log.py` | 正文两列 `Text().with_variant(LONGTEXT, "mysql")`，与本机老库对齐 |
-| `tests/test_pdf.py` | 新增 20 例：拼接/几何合并/噪声/三条错误路径 + 3 例合成 PDF 端到端 |
-| `test_e2e_structural.py` | 新增第 8 节 PDF 链路（6 项）：提取与 docx 同构、定位、结果名换成 `.docx` |
-| `client/views/Home.vue`、`api/process.ts` | `accept=".docx,.pdf"` + 上传区文案 |
-| `AGENTS.md` / `README.md` / `SPEC.md` | 定位与格式口径同步；README 顺手修掉两处陈旧计数（表数、用例数） |
-
-**验证到什么程度**（都是实测）：
-
-- `pytest` 110 passed（+20）；`test_e2e_structural.py` **40/40**（+6）；`test_e2e.py` 33/33 无回归；ruff check / format 全绿；`npm run build` 通过。
-- **真机跑通**（用户授权"能调用到 agent 就可以跑测试"）：合成中文 PDF → provider 5（qwen3.7-flash）→ done、`degraded=False`、4 条 的/地/得 意见全部精确定位（`start=9 end=16` 手算核对），下载名 `批改_校园随笔.docx`。用合成文本而非本机文档，避免私人内容外发。跑完按 `task_name` 清掉日志与计量行。
-- 提取质量核对：3 段各由 2 个视觉块拼回、页脚 `3` 被位置规则剔除、无跨栏误合。
-
-**这一轮发现的真缺陷（不是新功能带来的麻烦）**：下载文件名以前是 `批改_ + original_filename`，PDF 输入会产出一个叫 `.pdf` 的 docx，下载方直接打不开。已改成去扩展再补 `.docx`，docx 输入的结果名不变。
-
-**遗留与代价**：
-
-1. 真机那次跑回来的 `revised_text` 与原文一模一样（4 条意见都对，但修订文没落地修改）——批改 prompt 的产出质量问题，正是阶段 2 评测台要量化的东西，这轮不顺手改 prompt。
-2. `chat_json` 用到了阶梯的哪一档**没有任何记录**：降级路径是静默的，端点接受 `json_schema` 还是被降到的，事后无法区分。跨端点比较（阶段 2）必须有这个归因，届时给 `llm_calls` 加一列。
-3. pymupdf 的依赖树偏重（见 5.10），demo 交付副本的 `requirements.txt` 要跟着补，属交付决定。
-4. 扫描版 PDF（无文字层）现在只报错，OCR 属阶段 5。
-
-### 9.6 阶段 2 最小版交付情况（2026-11-15）：评测台
-
-改动 4 个文件 + 1 处 `LLMResult` 字段扩展，**没有新增依赖、没有改表结构**。
-
-| 文件 | 改了什么 |
-|---|---|
-| `eval/cases.py` | 新增：5 份合成中文夹具 + 期望（`expect_fixes / expect_types / min_issues / max_issues`） |
-| `eval/score.py` | 新增：4 个确定性指标 + 聚合 + `diff_runs` 带符号对拍 |
-| `eval/runner.py` | 新增：CLI（`--provider / --case / --prompt-file / --judge / --baseline / --label`） |
-| `services/llm.py` | `LLMResult.format_tier` + `_tier_name()`；拒绝降档的日志从 DEBUG 升到 INFO |
-| `tests/test_eval_score.py` | 新增 10 例，含一条**夹具自洽性检查**（期望的错处必须真的在文档里） |
-| `.gitignore` | `server/eval/runs/` 不入库（本机数字，抄进文档即可） |
-
-**基线两轮（provider 5 qwen3.7-flash，5 条夹具，批改全部 `tier=json_schema`）**：
-
-| 指标 | baseline-1（旧单值口径，18,625 token） | baseline-2（现组口径，19,990 token） | 读数 |
+| ID | 优先级 | 问题 | 修复方案 |
 |---|---|---|---|
-| `recall` | 1.0000 | 0.9167 | 第二轮成语错字漏了 1/4，同提示同夹具的漂移 |
-| `locate_rate` | 0.8600 | 0.8333 | 稳定约 15% 的意见点不到原文 |
-| `fix_rate` | 0.6389 | 0.5833 | 修订稿只落地一半多，两轮都是 |
-| `type_coverage` | 0.6250 | **1.0000** | 变化全部来自口径（单值 → 组内任一命中），模型行为一点没变 |
-| `false_positives` | 0 | 0 | 干净文档两轮各挑 1 条，没硬找 |
+| s1 | 高 | 下载名是 `批改_ + 原文件名`，PDF 输入会产出一个叫 `.pdf` 的 docx，下载方打不开 | 取 stem 再补 `.docx`；docx 输入的结果名不变 |
+| s2 | 高 | 分块图用 `operator.add` 当 reducer，同日志重跑把 3 块累加成 6 段，`reassemble` 报错 | 换成按块序号 upsert 的 reducer |
+| s3 | 高 | 块内偏移只平移了 `start` 没平移 `end`，意见区间整体偏短 | `start`/`end` 成对平移（第 1 块恒等偏移所以看不出来） |
+| s4 | 中 | 以为"检查点能让失败的块重跑不重复计费"，实测扇出内一块失败会整步作废、全部重打 | 加 `SqliteStore` 按块幂等（键含块文本 + 指令摘要 + 模型名）；命中的块不写 `llm_calls` |
+| s5 | 中 | ORM 声明 `Text` 与本机老库 `LONGTEXT` 漂移，长 PDF 会撞 64KB 字节上限 | `Text().with_variant(LONGTEXT, "mysql")`，新建库与老库一致 |
+| s6 | 低 | 评测台类型期望写死单值，的地得被判成"用词"就整片红，指标在跟模型较劲 | 类型期望改成按组 OR 语义，组间仍 AND |
+| s7 | 低 | `SqliteStore(path)` 传字符串在 `create_function` 处炸 | 走 `from_conn_string()` 上下文并显式 `setup()` |
 
-**这几轮数字给出的四条结论**（都是量出来的，不是猜的）：
+**测试脚手架的教训**：假 client 按脚本顺序吐响应，在扇出并发下会把 A 块的答复发给 B 块——测试"通过"只是在测运气。改成按请求内容路由（`tests/test_grading_graph.py` 的 `_RouteClient`）。
 
-1. **标点夹具的 `fix_rate` 两轮都是 0.3333**，而其它夹具会漂——不漂的那一项是系统性缺陷：模型肯重排句子，但不肯真正补逗号/句号。这是 prompt 能正面攻的目标，也是"重复跑"真正有价值的地方：只有稳定复现的差值才值得改代码。
-2. **单轮数字会漂**：`recall` 1.0 → 0.9167、`de-di-de` 的 recall 曾在 1.0 与 0.8333 之间跳。5 条夹具的单轮差值只够看方向，要下"A/B 变好了"的结论得先加重复轮次（优先级排在加真实夹具之前）。
-3. **同源自判会放水**：裁判给那条 `fix_rate=0.6667` 的结果打了 **5/5** 并写"所有误用都已修正"。模型给自己家打分系统性偏高，这是已知偏差，不是这套指标的失败——所以客观指标必须先于主观分存在。
-4. **`format_tier` 立刻有回报**：批改调用稳定落在 `json_schema`，裁判那次（schema 含 array）落到了 `json_object`。没有这个字段，"换了端点分数变差"永远只能靠猜。
-
-**还没做**（用户 2026-11-15 定：推到阶段 3 一起做）：真实文档夹具、第二厂商当裁判、**同夹具重复轮次**（两轮实测已给它排到加夹具之前）、`format_tier` 落进 `llm_calls`（改表结构，做前先问）、**浏览器端 UI 走查**（上传 PDF → 点卡片高亮 → 下载名，目前只有 API 级验证，用户同意放最后）。评分口径已定：类型期望按组写、组内任一命中即覆盖（的地得算 `typo`/`grammar`/`wording` 都算数）。
+**回归验证（本轮）**：pytest 139 passed；`test_e2e_structural.py` 51/51（后端需带 `LONGDOC_CHUNK_CHARS=60`）；`test_e2e.py` 33/33；ruff check / format 全绿；`uv lock --check` 一致（84 包）；`npm run build` 通过。
 
 ---
 
@@ -949,6 +1051,11 @@ LLM_MAX_RETRIES=2
 LLM_MAX_CONCURRENCY=4
 LLM_TRUST_ENV_PROXY=true
 
+# 长文档分块批改（阶段 3）
+LONGDOC_CHUNK_CHARS=6000
+LONGDOC_ENABLED=true
+CHECKPOINT_PATH=checkpoints/grading.sqlite3
+
 LOG_LEVEL=INFO
 ```
 
@@ -957,6 +1064,8 @@ LOG_LEVEL=INFO
 > **LLM 相关取值口径**：`LLM_TIMEOUT_CONNECT` 只管建连，`LLM_TIMEOUT_READ` 等响应收完（长文档调大这一个）；`LLM_MAX_RETRIES` 只对网络错误 / 超时 / 429 / 5xx 生效；`LLM_MAX_CONCURRENCY` 是进程内上限；`LLM_TRUST_ENV_PROXY=false` 用来绕开 `NO_PROXY` 含非法条目（如裸 `[::1]`）时 httpx 构造即报 `InvalidURL: Invalid port` 的问题——需要走系统代理访问境外端点时**不要关它**。
 >
 > `JWT_EXPIRE_HOURS` 文档口径是 2（也是 `config.py` 的默认值），本机 `.env` 可能为了开发方便设成 24。`.env` 不入库，以本机为准。
+>
+> **分块批改口径**：`LONGDOC_CHUNK_CHARS` 是每块字符预算（中文约 1 字 ≈ 1 token），整篇不超过它就不进图；`LONGDOC_ENABLED=false` 把长文档也压回单发路径，用来跟分块结果做 A/B（评测台的 `--prompt-file` 只管提示词，切不切块得靠这个开关）。`CHECKPOINT_PATH` 是图状态文件，按块缓存自动用同目录的 `.chunks` 兄弟文件——两个连接写同一个 sqlite 会撞库锁。两者都在 `server/checkpoints/`，已 gitignore，**只增不自缩**，属定期清理项。
 
 
 ---

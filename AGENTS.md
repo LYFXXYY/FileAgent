@@ -7,6 +7,7 @@
 
 文档 AI 处理平台：上传文档 → 按用户自定义 Prompt 调 LLM → 下载结果。**当前输入支持 `.docx` 与文字型 `.pdf`**（派发表 `api/v1/process.py:TEXT_EXTRACTORS`，白名单由它派生），批改类任务输出红字 diff 标注 + 可定位的问题清单；**结果永远是 `.docx`**。
 平台定位已不止 Word，但扫描件（无文字层）不做 OCR、表格不进正文——改文案前先认清这一点，别把 UI 写成"任意文档全能处理"。
+**批改类长文档**（> `LONGDOC_CHUNK_CHARS`，默认 6000 字）走 LangGraph 分块图扇出批改，见 §3.10；非批改类任务不分块。
 前后端分离单体，当前阶段无消息队列、无 Redis、无 Docker。
 
 | 层 | 位置 | 技术 |
@@ -25,7 +26,7 @@
 ```bash
 uv sync                                        # 装依赖（含 dev 组）
 uv run uvicorn main:app --reload --port 8000    # 起后端，Swagger 在 /docs
-uv run pytest -q                               # 110 passed；纯函数 + 假 client + 内存 SQLite + 合成 PDF，不连 MySQL 不出网
+uv run pytest -q                               # 139 passed；纯函数 + 假 client + 内存 SQLite + 合成 PDF，不连 MySQL 不出网
 uv run ruff check .                            # 全绿
 uv run ruff format --check .                   # 全部已格式化
 uv lock --check                                # 依赖锁一致性
@@ -33,9 +34,11 @@ uv run python migrate_add_provider_capabilities.py         # 幂等：补 provid
 uv run python migrate_add_log_structured_output.py         # 幂等：补 log.structured_output
 uv run python test_e2e.py                      # 端到端 33 项：需后端在 8000，会造数据，见 §7
 uv run uvicorn test_llm_server:app --port 19000            # 假 OpenAI 端点（另开终端）
-uv run python test_e2e_structural.py           # 结构化批改 + PDF 输入端到端 40 项，零真实 token
+uv run python test_e2e_structural.py           # 结构化批改 + PDF + 分块端到端 51 项，零真实 token
 uv run python -m eval.runner --provider 5 --case clean   # 评测台冒烟：**会真花钱**，先单条再全量
 ```
+
+⚠ **`test_e2e_structural.py` 第 10 节要后端带 `LONGDOC_CHUNK_CHARS=60` 启动**才会真的切块；用默认 6000 时那节 11 项断言会失败（不是回归，是预算没到分块门槛）。跑完 `server/checkpoints/` 下会留两个 sqlite（图状态 + 按块缓存），已 gitignore，可随手删。
 
 ⚠ **8000 端口在本机可能"看不见地被占用"**：WSL 侧若有服务监听 8000，因 mirrored 网络，Windows `netstat` 查不到该监听，现象是 uvicorn 报 `[Errno 10048]` 而 `curl localhost:8000` 却能收到对方的 404。查证要跑 `wsl -e bash -lc "ss -ltnp | grep ':8000'"`。换端口时 `test_e2e_structural.py` 走 `FA_API` / `FA_MOCK_LLM` 环境变量，`test_e2e.py` 仍是硬编码 8000。
 
@@ -148,6 +151,21 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - **`eval/runner.py` 是运维脚本，按 provider 主键直取、不做 `user_id` 隔离**。别把 §3.1 那条"每个查询都带 user_id"当成这里漏掉的 bug —— 那条约束管的是对外路由。
 - 档位归因现在只在 `LLMResult.format_tier` + run JSON + INFO 日志里，**没有落库**（要加列就是改表，先问用户）。跨端点长期对比需要它进 `llm_calls`。
 
+### 3.10 长文档分块批改（阶段 3 · LangGraph）
+
+- **只有批改类分块**。摘要/翻译/润色超长时仍走单发：它们的产出要对整篇负责，逐块做完再拼只会得到 N 份局部结果。要真做长文摘要得"逐块摘要 + 整篇汇总"两段式，那是另一个功能，别在这里顺手加。
+- **分块三条不变式**（`services/chunking.py`，改它必跑 `tests/test_chunking.py`）：块文本 == 原文连续切片、块不重叠且中间只隔空白、`reassemble(source, chunks, [c.text…]) == source`。任何一条破了，全局偏移和修订文都是错的，而且没有信号。
+- **全局偏移必须成对平移**：`start` 和 `end` 一起加 `chunk.start`。只移 `start` 时第 1 块是恒等偏移，测试要到第 2 块才发现区间偏短——这类"第一块恰好对"的 bug 最会伪装。
+- **reducer 不能是 `operator.add`**：同一条日志点第二次"处理"会把 3 块累加成 6 段，`reassemble` 直接报错。要按块序号 upsert（`_upsert_results`）。
+- **省钱的根据是按块 `SqliteStore`，不是 checkpoint**。检查点按 super-step 落盘，扇出里一块抛异常会整步写入作废，实测重跑时所有块都重打。所以 `grade_chunk` 开头先查缓存、成功后立刻写缓存。
+- **命中缓存的块不写 `llm_calls`**：本轮没发生外呼，记账就是重复计成本。`ChunkCall.cached` 就是为这个字段存在的，别在调用方丢掉。
+- 缓存键是 `(thread_id, chunk_index)`，但**命中还要求块文本 + 指令摘要 + 模型名三者一致**。换 prompt 或换提供商还在吃旧结果，那种"看起来变好了"最难查。
+- **节点不查库**：provider 由路由解析后闭包传进 `_build_graph`；状态里只放可 msgpack 序列化的值（塞 ORM 对象检查点直接写不下去）。这条是 §3.6"传输层不碰 DB"边界的延续。
+- `SqliteStore` 构造函数要的是 `sqlite3.Connection`，**路径要走 `SqliteStore.from_conn_string()` 上下文并显式 `setup()`**；传字符串会炸在 `create_function` 上。图状态与按块缓存分两个 sqlite 文件（同文件两个连接会撞库锁）。
+- **别加图级 `RetryPolicy`**：`chat()` 已按白名单重试，再套一层就是同一个提示打两次、双倍烧钱（同 §3.6 的"降级 ≠ 重试"）。
+- 假 client 在扇出下**必须按请求内容路由**（见 `tests/test_grading_graph.py` 的 `_RouteClient`）：按脚本顺序吐响应会把 A 块的答复发给 B 块，测试通过只是在测运气。
+- `checkpoints/` 已 gitignore、只增不自缩，属定期清理项；`interrupt` 人工确认分块方案还没做（要先有 UI）。
+
 ## 4. 前端不可违反的约定
 
 - **token 双写**：登录成功同时写 Pinia store 和 `localStorage`；axios 拦截器只读 `localStorage`（在 API 层拿不到 store）。key 常量集中在 `client/src/api/client.ts`（`fileagent_token` / `fileagent_username`），别处不要硬编码。- 401 处理要排除 `/auth/login`（那是密码错误），用 `window.location.replace` 带 `redirect` 参数（拦截器层拿不到 router 实例）。
@@ -192,16 +210,16 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 
 ## 7. 当前基线与已知缺口
 
-当前路线（阶段 0–5，含为什么这么排）在 SPEC §9.2；阶段 0 交付与验证明细在 SPEC §9.3，阶段 1 在 §9.4，阶段 1.5（PDF 输入 + 去 Word 化）在 §9.5，阶段 2 最小版（评测台 + 首轮基线数字）在 §9.6，改 bug 前先看这几张表。
+当前路线（阶段 0–5，含为什么这么排）在 SPEC §9.2；阶段 0 交付与验证明细在 SPEC §9.3，阶段 1 在 §9.4，阶段 1.5（PDF 输入 + 去 Word 化）在 §9.5，阶段 2 最小版（评测台 + 基线数字）在 §9.6，阶段 3（长文档分块批改图）在 §9.7，缺陷台账第五轮在 §10，改 bug 前先看这几张表。
 
-门禁基线（均已实测通过）：`uv run pytest -q` → **120 passed**；`uv run ruff check .` → 全绿；`ruff format --check .` → 49 files already formatted；`uv lock --check` → 一致（**56 包**，阶段 1.5 首次引入运行时依赖 pymupdf，阶段 2 未再新增）；`npm run build` → 通过；`uv run python test_e2e.py` → 33/33；`uv run python test_e2e_structural.py` → **40/40**。
+门禁基线（均已实测通过）：`uv run pytest -q` → **139 passed**；`uv run ruff check .` → 全绿；`ruff format --check .` → 54 files already formatted；`uv lock --check` → 一致（**84 包**，阶段 1.5 引入 pymupdf、阶段 3 引入 langgraph 全家桶）；`npm run build` → 通过；`uv run python test_e2e.py` → 33/33；`uv run python test_e2e_structural.py` → **51/51**（第 10 节要 `LONGDOC_CHUNK_CHARS=60`）。
 
 - **`server/test_e2e.py` 是仓库自带的端到端冒烟脚本，不是遗留物，别删**：需后端已在 8000 运行、连真实 MySQL。它会注册 `tester_*` / `other_*` 两个临时账号，造 1 条日志和 1 个上传文件；脚本自身只删 task/provider，**账号、日志、落盘文件、以及新增的 `llm_calls` 行要跑完手动清**。第 7 节现在真走重试路径（连不上假 provider → 重试 3 次 → failed），第 10 节直接改库把日志置为 done 来验证下载，都属预期行为。
 - **`server/test_e2e_structural.py` + `test_llm_server.py` 是阶段 1 新增的结构化端到端**，同样别删：需后端 + 假 LLM 两个进程都在跑，全程零真实 token。mock 端点**刻意不支持 `response_format`**（回 400）来如实模拟国产兼容端点并逼出 `chat_json` 的降级路径，所以 LLM 日志里出现的 `400 Bad Request`（每次 `chat_json` 两条：`json_schema` 和 `json_object` 各一档）是预期行为不是故障。第 8 节是阶段 1.5 加的 **PDF 输入链路**：用 pymupdf 现场合成"每视觉行一个 block"的中文 PDF，断言提取结果与 docx **逐字相等**、定位成功、下载名换成 `.docx`——改提取器必跑它。它注册 `e2e_s_*` 账号，跑完清理方式和上面一样。
 - 单测**不连 MySQL 也不出网**：HTTP 走假 client（替 `services.llm.get_client`），provider 路由走内存 SQLite。所以 `pytest` 绿不代表能连上数据库，端到端才是那一层的验证。加测试请保持这个边界，也别引入 `pytest-asyncio`——现有测试直接 `asyncio.run()` 就够。
 - `uploads/`、`outputs/`、`.env`、各类缓存已 ignore；`.env.example` 靠 `.gitignore` 里的 `!.env.example` 例外入库。
 - SPEC §11 示例写 `JWT_EXPIRE_HOURS=2`，本机 `.env` 实际是 24；`.env` 不入库，以本机为准。
-- 未做：限流、api_key 字段级加密、Alembic、Docker / 多 worker、表格提取（docx 表格和 PDF 表格都不进正文）、扫描件 OCR、加密 PDF 解密、老库外键规则对齐、成本价格表（计量只存 token 不算钱）、问题清单写进交付 docx。评测台的下一步：真实文档夹具、第二厂商当裁判、同夹具跑重复轮次（单轮会漂）、把 `format_tier` 落进 `llm_calls`（改表结构，做前先问）。
+- 未做：限流、api_key 字段级加密、Alembic、Docker / 多 worker、表格提取（docx 表格和 PDF 表格都不进正文）、扫描件 OCR、加密 PDF 解密、老库外键规则对齐、成本价格表（计量只存 token 不算钱）、问题清单写进交付 docx。阶段 3 未做：`interrupt` 人工确认分块方案（要先有 UI）、长文摘要的两段式（逐块摘要 + 整篇汇总）、`checkpoints/` 体积治理与 TTL、多 worker 下的 Postgres saver/store。评测台的下一步：真实文档夹具、第二厂商当裁判、同夹具跑重复轮次（单轮会漂）、把 `format_tier` 落进 `llm_calls`（改表结构，做前先问）。
 - 真机跑过的一手结论（2026-11-15，qwen3.7-flash + 合成中文 PDF）：结构化链路 OK（`degraded=False`、4 条 的/地/得 全部精确定位）。但该端点回来的 `revised_text` 与原文一字不差——意见对、修订没落地。这是 prompt 产出质量，不是提取或解析缺陷，正属阶段 2 评测台要量化的范围，别在提取层"顺手改 prompt"掩盖它。
 
 ## 8. 两份副本，手动同步
@@ -211,7 +229,7 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - 它有 `README.md` / `DEPLOY.md` / `deploy.ps1` / `.env.example` / `requirements.txt`，**没有 SPEC.md**。
 - 它的注释已按"去 AI 味"重写，**剥掉了 Java 对比块**；主仓库保留。
 - 两边业务逻辑应保持一致，但**没有任何自动同步**：主仓库改了逻辑要手动同步过去（反之亦然），注释风格各自保留。
-- ⚠ **demo 副本目前落后主仓库三轮（阶段 0 + 阶段 1 + 阶段 1.5）**，实测确认它仍是老版：`services/llm.py` 只有 `call_llm`，没有 `models/llm_call.py`、没有 `capabilities`、没有 `structured_output`、没有 `services/pdf.py`。同步时要一并带过去：新版 `services/llm.py`、`services/grading.py`、`services/pdf.py`、`schemas/grading.py`、`models/llm_call.py`、两个 migrate 脚本、`test_llm_server.py` 与 `test_e2e_structural.py`、`.env.example` 的 6 个新配置项，以及前端 provider 能力多选、Home.vue 问题清单卡片、上传区 `.pdf` 白名单与文案。demo 侧 `pyproject.toml` 已是 `fileagent-server`，**`requirements.txt` 必须补 `pymupdf`**（阶段 1.5 首次引入运行时依赖，漏了 PDF 上传直接 500）；注释仍按 demo 的去 AI 味风格重写（不带 Java 对比块）。要不要同步、同步到哪一轮，属于交付决定，先问用户。
+- ⚠ **demo 副本目前落后主仓库四轮（阶段 0 + 1 + 1.5 + 3）**，实测确认它仍是老版：`services/llm.py` 只有 `call_llm`，没有 `models/llm_call.py`、没有 `capabilities`、没有 `structured_output`、没有 `services/pdf.py`、没有 `services/chunking.py` / `graphs/`。同步时要一并带过去：新版 `services/llm.py`、`services/grading.py`、`services/pdf.py`、`services/chunking.py`、`graphs/__init__.py` + `graphs/grading_graph.py`、`schemas/grading.py`、`models/llm_call.py`、两个 migrate 脚本、`test_llm_server.py` 与 `test_e2e_structural.py`、`.env.example` 的新配置项（6 个 LLM/日志 + 3 个分块），以及前端 provider 能力多选、Home.vue 问题清单卡片、上传区 `.pdf` 白名单与文案。demo 侧 `pyproject.toml` 已是 `fileagent-server`，**`requirements.txt` 必须补 `pymupdf` + `langgraph` + `langgraph-checkpoint-sqlite`**（阶段 1.5 与 3 的运行时依赖，漏 pymupdf 则 PDF 上传 500，漏 langgraph 则长文档批改 500）；`.gitignore` 里没有 `.env.example` 之外还要留 `checkpoints/`。注释仍按 demo 的去 AI 味风格重写（不带 Java 对比块）。要不要同步、同步到哪一轮，属于交付决定，先问用户。
 
 ## 9. 提交
 
