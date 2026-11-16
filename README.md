@@ -15,13 +15,14 @@
 - **多格式输入**：`.docx` 与文字型 `.pdf` 走同一份"按行分隔的自然段"提取契约——PDF 侧会把被排版切成多行的段落拼回原样、剔掉页码与跨页重复的页眉装饰，所以 diff、原文定位、结果生成都不区分来源
 - **三步处理**：上传 → 处理 → 下载。处理在后台执行、前端轮询状态，刷新 / 切页 / 断连都不丢进度
 - **结构化批改**：问题清单按原文逐字匹配定位，匹配不到就标「未定位」，绝不把批注指到错位置
+- **长文档分块批改**：批改类任务超过预算（默认 6000 字）时自动切块并行批改，再按原位置拼回一篇——偏移仍是整篇偏移，清单照旧可点。跑到一半失败重跑，**已成功的块不再重复计费**
 - **操作日志**：分页 + 状态筛选 + 文件名搜索 + 批注条数，失败可重试，完成可重新下载
 
 ## 技术栈
 
 | 层 | 技术 |
 |---|---|
-| 后端 | FastAPI · SQLAlchemy 2.0 · PyMySQL · python-docx · PyMuPDF（PDF 提取）· httpx · bcrypt + python-jose |
+| 后端 | FastAPI · SQLAlchemy 2.0 · PyMySQL · python-docx · PyMuPDF（PDF 提取）· LangGraph（长文档分块）· httpx · bcrypt + python-jose |
 | 前端 | Vue 3（`<script setup>`）· TypeScript · Vite · Element Plus · Pinia |
 | 数据库 | MySQL 8，5 张表：`users` / `model_providers` / `tasks` / `operation_logs` / `llm_calls` |
 | 工具链 | uv（Python 3.12）· ruff · pytest · vue-tsc |
@@ -52,13 +53,13 @@ npm run dev                                     # http://localhost:5173
 
 ```bash
 cd server
-uv run pytest -q            # 110 个用例（diff / word / pdf / llm 传输层 / 结构化批改），不碰 DB 和网络
+uv run pytest -q            # 139 个用例（diff / word / pdf / 分块 / llm 传输层 / 结构化批改 / 评测台），不碰 DB 和网络
 uv run ruff check .         # lint
 uv run python test_e2e.py   # 端到端冒烟：需后端已在 8000 运行，会注册临时账号造数据
 
-# 结构化批改 + PDF 输入的端到端（零真实 token，需另起一个假 LLM 端点）
+# 结构化批改 + PDF 输入 + 长文档分块的端到端（零真实 token，需另起一个假 LLM 端点）
 uv run uvicorn test_llm_server:app --port 19000    # 另开终端
-uv run python test_e2e_structural.py               # 40 项断言
+uv run python test_e2e_structural.py               # 51 项断言（第 10 节要后端带 LONGDOC_CHUNK_CHARS=60 启动）
 
 # 批改质量评测台（合成夹具 + 确定性指标）：⚠ 会调真实模型、产生 token 费用
 uv run python -m eval.runner --provider 5 --case clean   # 先单条验通链路
@@ -75,4 +76,4 @@ npm run build               # vue-tsc 类型检查 + 构建
 
 ## 说明
 
-`server/uploads/`、`server/outputs/`、`.env` 均不入库。当前阶段未做限流、API Key 字段级加密、Alembic 迁移、多 worker 部署、扫描版 PDF 的 OCR 与表格提取，详见 AGENTS.md §7。
+`server/uploads/`、`server/outputs/`、`server/checkpoints/`（LangGraph 图状态与按块缓存）、`.env` 均不入库。当前阶段未做限流、API Key 字段级加密、Alembic 迁移、多 worker 部署、扫描版 PDF 的 OCR 与表格提取，详见 AGENTS.md §7。

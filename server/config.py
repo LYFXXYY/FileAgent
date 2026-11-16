@@ -63,6 +63,16 @@ class Settings(BaseSettings):
     # 但 NO_PROXY 里若有非法写法（如裸 [::1]）会导致客户端构造直接报错，此时设 False
     llm_trust_env_proxy: bool = True
 
+    # ---------- 长文档分块批改（阶段 3）----------
+    # 每块字符预算。中文约 1 字 ≈ 1 token，6000 字给"意见清单 + 修订文"的输出留足余量。
+    # 整篇不超过这个值就不分块，走原来的单发路径（短文不该因为上图而变慢）
+    longdoc_chunk_chars: int = 6000
+    # 总开关。关掉后长文档仍单发，用于和分块路径做效果对比（评测台 A/B）
+    longdoc_enabled: bool = True
+    # LangGraph 检查点文件（相对 server/，也可写绝对路径）。
+    # 同一 log_id 重跑时已完成的块不再重复计费；文件会一直长，属运维清理项
+    checkpoint_path: str = "checkpoints/grading.sqlite3"
+
     # ---------- 日志 ----------
     # root logger 级别。排查重试/并发问题时调成 DEBUG
     log_level: str = "INFO"

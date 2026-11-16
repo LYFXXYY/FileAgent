@@ -27,12 +27,13 @@ from sqlalchemy.orm import Session
 
 from config import get_settings
 from database import SessionLocal, get_db
+from graphs.grading_graph import grade_long_document
 from middleware.auth import get_current_user
 from models.operation_log import LogStatus, OperationLog
 from models.provider import ModelProvider
 from models.task import Task
 from models.user import User
-from schemas.grading import GRADING_JSON_SCHEMA
+from schemas.grading import GRADING_JSON_SCHEMA, GradingIssue, GradingResult
 from schemas.process import ProcessResponse, UploadResponse
 from services.grading import (
     build_messages,
@@ -226,10 +227,11 @@ async def _run_processing(log_id: int) -> None:
 
         # 快照成普通值：计量写入要丢线程池，不能跨线程用这个 session 的 ORM 对象
         provider_ref = (provider.id, provider.name)
-        prompt = task.prompt_template.replace("{{content}}", log.original_content or "")
 
         try:
-            output = await _run_model(task, provider, prompt, log.original_content or "")
+            output = await _run_model(
+                task, provider, task.prompt_template, log.original_content or "", log.id
+            )
         except LLMError as e:
             await _meter(
                 log,
@@ -241,7 +243,8 @@ async def _run_processing(log_id: int) -> None:
             _mark_failed(db, log, str(e)[:2000])
             return
 
-        await _meter(log, provider_ref, purpose=output.purpose, result=output.result)
+        for call in output.calls:
+            await _meter(log, provider_ref, purpose=call.purpose, result=call.result)
 
         log.processed_content = output.revised_text
         log.structured_output = output.structured
@@ -300,20 +303,44 @@ async def _meter(
 
 
 @dataclass(frozen=True)
-class _ModelOutput:
-    """一次模型调用的产出：计量结果、修订正文、结构化清单 JSON、计量用途"""
+class _MeteredCall:
+    """一笔要写进 llm_calls 的真实外呼"""
 
     result: LLMResult
+    purpose: str
+
+
+@dataclass(frozen=True)
+class _ModelOutput:
+    """
+    一次处理的产出
+
+    `calls` 是**列表**而不是单个结果：分块批改一轮会打 N 次模型，每次都要单独记账，
+    不然长文档的成本在 llm_calls 里只有一行，看起来跟短文档一样便宜。
+    """
+
     revised_text: str
     structured: str | None
-    purpose: str
+    calls: tuple[_MeteredCall, ...]
+
+
+def _should_chunk(original_text: str) -> bool:
+    """
+    只有批改类才分块（调用方已判过 is_grading），且长到超预算
+
+    摘要、翻译、润色不分块：它们的产出需要对**整篇**负责，逐块做完再拼只会得到
+    N 份局部摘要，比一次性塞进去更差。上限不够就报错，也不假装能分块。
+    """
+    budget = settings.longdoc_chunk_chars
+    return bool(settings.longdoc_enabled) and len(original_text) > budget
 
 
 async def _run_model(
     task: Task,
     provider: ModelProvider,
-    prompt: str,
+    prompt_template: str,
     original_text: str,
+    log_id: int,
 ) -> _ModelOutput:
     """
     批改任务要结构化清单，普通任务只要一段修订文本
@@ -322,9 +349,41 @@ async def _run_model(
     只是没有问题清单可点。把用户的文档判失败从来不是一个好选项。
     """
     if not task.is_grading:
-        result = await chat([{"role": "user", "content": prompt}], provider)
-        return _ModelOutput(result, result.content, None, "chat")
+        result = await chat(
+            [{"role": "user", "content": prompt_template.replace("{{content}}", original_text)}],
+            provider,
+        )
+        return _ModelOutput(result.content, None, (_MeteredCall(result, "chat"),))
 
+    if _should_chunk(original_text):
+        # thread_id 用 log_id：同一日志重跑命中同一时间线，已成功的块不再花钱
+        graded = await grade_long_document(
+            original_text,
+            provider,
+            prompt_template,
+            thread_id=f"log-{log_id}",
+        )
+        grading = GradingResult(
+            revised_text=graded.revised_text,
+            issues=[GradingIssue(**i) for i in graded.issues],
+            degraded=graded.degraded,
+        )
+        return _ModelOutput(
+            grading.revised_text,
+            serialize_result(grading),
+            # 命中缓存的块本轮没有外呼，再记账就是重复计成本
+            tuple(
+                _MeteredCall(
+                    c.as_llm_result(provider.model_name),
+                    # 用途里带上这块有没有真拿到清单，评测台才能把两类分开统计
+                    "grading_degraded" if c.degraded else "grading",
+                )
+                for c in graded.calls
+                if not c.cached
+            ),
+        )
+
+    prompt = prompt_template.replace("{{content}}", original_text)
     result, payload = await chat_json(
         build_messages(prompt),
         provider,
@@ -332,11 +391,14 @@ async def _run_model(
     )
     grading = parse_grading_output(result.content, payload, original_text)
     return _ModelOutput(
-        result,
         grading.revised_text,
         serialize_result(grading),
-        # 用途里带上是否真拿到了清单，评测台才能把这两类分开统计
-        "grading" if not grading.degraded else "grading_degraded",
+        (
+            _MeteredCall(
+                result,
+                "grading" if not grading.degraded else "grading_degraded",
+            ),
+        ),
     )
 
 

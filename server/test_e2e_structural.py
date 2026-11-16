@@ -2,17 +2,20 @@
 
 需要两个进程（两个终端）：
   1) cd server && uv run uvicorn test_llm_server:app --port 19000
-  2) cd server && uv run uvicorn main:app --port 8000   （或复用已启动的）
+  2) cd server && LONGDOC_CHUNK_CHARS=60 uv run uvicorn main:app --port 8000
+     （第 10 节靠这个预算才会真的切块；用默认 6000 时那节断言会失败）
   3) cd server && uv run python test_e2e_structural.py
 
 验证的是「AI 模型 → 结构化解析 → 定位 → 入库 → 下载 diff」全链路，
-外加 docx / PDF 两种输入的提取同构，不依赖任何真实 API Key、不产生 token 费用。
+外加 docx / PDF 两种输入的提取同构，以及长文档分块批改走完整条业务链路，
+不依赖任何真实 API Key、不产生 token 费用。
+
+它会注册 e2e_s_* 账号并造日志、落盘文件、llm_calls 行与 checkpoints/ 下的两个 sqlite
+（分块批改的检查点与按块缓存），跑完都要手动清（见 AGENTS.md §7）。
 
 默认端口 8000 / 19000。被占用时用 FA_API 与 FA_MOCK_LLM 同时覆盖，例如：
   FA_API=http://127.0.0.1:8081/api/v1 FA_MOCK_LLM=http://127.0.0.1:19001/v1 \\
     uv run python test_e2e_structural.py
-
-它会注册 e2e_s_* 账号并造日志、落盘文件与 llm_calls 行，跑完要手动清（见 AGENTS.md §7）。
 """
 
 import io
@@ -254,7 +257,75 @@ def main():
             check("model_name 取响应", call.model_name == "answered-model", call.model_name)
             check("latency_ms > 0", call.latency_ms > 0, str(call.latency_ms))
 
-    print("\n===== 10. 删 provider → SET NULL，name 快照保留 =====")
+    print("\n===== 10. 长文档分块批改（LangGraph 扇出，走完整条业务链路）=====")
+    # ⚠ 这一节要求后端用 LONGDOC_CHUNK_CHARS<=60 启动，否则整篇装得下、不会切块
+    buf = io.BytesIO()
+    doc = Document()
+    for i in range(1, 9):
+        doc.add_paragraph(f"第{i}段：他高兴的跳了起来，做事也很认真。")
+    doc.save(buf)
+    r = c.post(
+        f"{API}/upload?task_id={task_id}",
+        headers=tok,
+        files={
+            "file": (
+                "long.docx",
+                buf.getvalue(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    check("长文档上传 201", r.status_code == 201, r.text)
+    long_log = r.json()["log_id"]
+    long_source = r.json()["extracted_text"]
+    check("夹具长度超过分块预算", len(long_source) > 60, str(len(long_source)))
+
+    c.post(f"{API}/process/{long_log}", headers=tok)
+    long_final = {}
+    for _ in range(40):
+        time.sleep(1)
+        long_final = c.get(f"{API}/process/{long_log}/status", headers=tok).json()
+        if long_final.get("status") in ("done", "failed"):
+            break
+
+    check("长文档轮询到 done", long_final.get("status") == "done", str(long_final)[:300])
+    long_issues = long_final.get("issues") or []
+    check("分块后出问题清单", len(long_issues) >= 3, str(len(long_issues)))
+    check("分块没有触发降级", long_final.get("grading_degraded") is False)
+
+    located = [i for i in long_issues if i.get("start") is not None]
+    check(
+        "每条意见都有全局定位",
+        len(located) == len(long_issues),
+        f"{len(located)}/{len(long_issues)}",
+    )
+    mismatched = [i for i in located if long_source[i["start"] : i["end"]] != i["original"]]
+    check("全局偏移逐字对得上", not mismatched, str(mismatched[:2]))
+
+    revised = long_final.get("processed_content") or ""
+    check("最后一块也批到并拼回", "第8段" in revised, revised[-120:])
+    check(
+        "修订条数覆盖每一块",
+        len(long_issues) < len(revised),
+        f"{len(long_issues)} 条 vs {len(revised)} 字",
+    )
+
+    with database.SessionLocal() as db:
+        from models.llm_call import LlmCall
+
+        rows = db.query(LlmCall).filter(LlmCall.log_id == long_log).all()
+        check(
+            "每次外呼各记一行",
+            len(rows) == len(long_issues),
+            f"{len(rows)} 行 vs {len(long_issues)} 条",
+        )
+        check(
+            "用途都是 grading",
+            {x.purpose for x in rows} == {"grading"},
+            str({x.purpose for x in rows}),
+        )
+
+    print("\n===== 11. 删 provider → SET NULL，name 快照保留 =====")
     r = c.delete(f"{API}/providers/{provider_id}", headers=tok)
     check("DELETE provider 204", r.status_code == 204, str(r.status_code))
     with database.SessionLocal() as db:

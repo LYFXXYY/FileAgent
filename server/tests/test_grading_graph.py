@@ -1,0 +1,210 @@
+"""
+分块批改图单测 —— 扇出、全局偏移、拼回、降级、按块续跑
+
+不出网、不连 MySQL：HTTP 用假 client（跟 test_llm.py 同一套路），sqlite 落在 tmp_path。
+
+【为什么假 client 要按请求内容路由】
+`Send` 扇出的分支并发跑，谁先打到端点不确定。按顺序吐响应的脚本 client 会把第 1 块
+的答复发给第 3 块，测出来的偏移和拼回全是碰运气——那种测试只会让人误以为图是对的。
+"""
+
+import asyncio
+import json
+from types import SimpleNamespace
+
+import pytest
+from test_llm import _provider, _Response
+
+import services.llm as llm
+from graphs import grading_graph
+from graphs.grading_graph import grade_long_document
+
+# 三段各 19–20 字的文档，预算 30 字 → 稳定切成 3 块（每块正好一段）
+DOC = "\n".join(
+    [
+        "第一段里有一处错别字：他高兴的跳了起来。",
+        "第二段也有问题：认真的记录数据很重要。",
+        "第三段最后写：这道题做的很顺利。",
+    ]
+)
+
+# (块内特征串, 错处原文, 正确写法, 该块修订文)
+FIXES = [
+    ("他高兴的跳了起来", "他高兴的跳了起来", "他高兴地跳了起来", "第一段改后。"),
+    ("认真的记录数据", "认真的记录数据", "认真地记录数据", "第二段改后。"),
+    ("这道题做的很顺利", "这道题做的很顺利", "这道题做得很顺利", "第三段改后。"),
+]
+INSTRUCTION = "请批改：\n{{content}}"
+EXPECTED_REVISED = "第一段改后。\n第二段改后。\n第三段改后。"
+
+
+def _settings(**overrides):
+    base = {
+        "llm_timeout_connect": 10.0,
+        "llm_timeout_read": 30.0,
+        "llm_max_retries": 0,
+        "llm_max_concurrency": 4,
+        "llm_trust_env_proxy": True,
+        "longdoc_chunk_chars": 30,
+        "longdoc_enabled": True,
+        "checkpoint_path": "checkpoints/grading.sqlite3",
+    }
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def _ok(content: str) -> _Response:
+    return _Response(
+        payload={
+            "choices": [{"message": {"content": content}, "finish_reason": "stop"}],
+            "model": "answered-model",
+            "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+        }
+    )
+
+
+def _grade_payload(mark: str, fragment: str, fixed: str, revised: str) -> str:
+    return json.dumps(
+        {
+            "revised_text": revised,
+            "issues": [
+                {
+                    "type": "typo",
+                    "original": fragment,
+                    "suggestion": fixed,
+                    "reason": "的地得误用",
+                    "confidence": 0.9,
+                }
+            ],
+        },
+        ensure_ascii=False,
+    )
+
+
+class _RouteClient:
+    """
+    按请求里的块特征串决定响应，并记录每块被调用了几次
+
+    free_text / ghost / die 都是块的序号（0 起），用来造降级、错摘原文、外呼失败。
+    """
+
+    def __init__(self, *, die=(), free_text=(), ghost=()):
+        self.die, self.free_text, self.ghost = set(die), set(free_text), set(ghost)
+        self.calls = []
+
+    def _which(self, body: dict) -> int:
+        content = body["messages"][-1]["content"]
+        for i, (mark, *_rest) in enumerate(FIXES):
+            if mark in content:
+                return i
+        raise AssertionError(f"请求里没有已知块：{content[:60]}")
+
+    async def post(self, url, headers=None, json=None, **ignored):
+        idx = self._which(json)
+        self.calls.append(idx)
+        if idx in self.die:
+            raise llm.LLMError("端点连不上（共尝试 1 次）")
+        mark, fragment, fixed, revised = FIXES[idx]
+        if idx in self.free_text:
+            return _ok("这段不是 JSON，就是一段自由文本。")
+        if idx in self.ghost:
+            return _ok(_grade_payload(mark, "根本不存在的句子", fixed, revised))
+        return _ok(_grade_payload(mark, fragment, fixed, revised))
+
+
+@pytest.fixture()
+def env(monkeypatch, tmp_path):
+    """把传输层与配置的进程态都换成测试值，sqlite 落在临时目录"""
+    monkeypatch.setattr(llm, "_client", None)
+    monkeypatch.setattr(llm, "_semaphore", None)
+    monkeypatch.setattr(llm, "get_settings", lambda: _settings())
+    monkeypatch.setattr(grading_graph, "get_settings", lambda: _settings())
+    return SimpleNamespace(monkeypatch=monkeypatch, ckpt=str(tmp_path / "ckpt.sqlite3"))
+
+
+def _run(env, client, *, thread_id="log-1", instruction=INSTRUCTION):
+    env.monkeypatch.setattr(llm, "get_client", lambda: client)
+    return asyncio.run(
+        grade_long_document(
+            DOC, _provider(), instruction, thread_id=thread_id, checkpoint_path=env.ckpt
+        )
+    )
+
+
+def test_document_is_split_and_each_chunk_called_once(env):
+    client = _RouteClient()
+    result = _run(env, client)
+
+    assert result.chunk_count == 3
+    assert sorted(client.calls) == [0, 1, 2], "每块恰好一次外呼，不许漏块也不许多打"
+
+
+def test_issue_offsets_are_global(env):
+    """
+    块内偏移必须换成整篇偏移——前端按 original_content 全文高亮，
+    偏移错一位批注就指到别的句子上，而且没有任何信号
+    """
+    result = _run(env, _RouteClient())
+
+    assert len(result.issues) == 3
+    for issue in result.issues:
+        assert issue["start"] is not None
+        assert DOC[issue["start"] : issue["end"]] == issue["original"]
+
+
+def test_revised_text_is_reassembled_in_document_order(env):
+    result = _run(env, _RouteClient())
+
+    assert result.revised_text == EXPECTED_REVISED
+    assert result.degraded is False
+    assert result.cached_chunks == 0
+
+
+def test_unlocatable_fragment_stays_none(env):
+    """模型摘了原文里不存在的片段时不许猜位置，留 None 让前端显示未定位"""
+    result = _run(env, _RouteClient(ghost=(0,)))
+
+    assert result.issues[0]["start"] is None, "第 1 块的片段不在第 1 块里，不该有偏移"
+    for issue in result.issues[1:]:
+        assert DOC[issue["start"] : issue["end"]] == issue["original"], "其余块照常全局定位"
+
+
+def test_one_bad_chunk_degrades_without_failing_the_document(env):
+    """某一块吐自由文本时只降级那一段，其余块的结构化结果必须保住"""
+    result = _run(env, _RouteClient(free_text=(1,)))
+
+    assert result.degraded is True
+    assert len(result.issues) == 2, "坏块不该连累其它块的意见"
+    assert "这段不是 JSON" in result.revised_text
+    assert result.revised_text.count("\n") == 2, "降级块也要占住原来的段落位置"
+
+
+def test_retry_only_bills_the_failed_chunk(env):
+    """
+    第 2 块外呼失败后重跑：成功过的两块不该再花一次钱
+
+    检查点只按 super-step 落盘，扇出里一步失败会把整步写入一起作废，所以这件事
+    靠的是按块 store，不是靠 checkpoint——两样都得留着。
+    """
+    first = _RouteClient(die=(1,))
+    with pytest.raises(llm.LLMError):
+        _run(env, first)
+    assert sorted(first.calls) == [0, 1, 2], "三块都试过，其中两块成功"
+
+    retry = _RouteClient()
+    result = _run(env, retry)
+
+    assert retry.calls == [1], f"续跑只该重打失败的那块，实际打了 {retry.calls}"
+    assert result.cached_chunks == 2
+    assert result.revised_text == EXPECTED_REVISED
+
+
+def test_cache_is_invalidated_when_instruction_changes(env):
+    """换了提示词还在吃旧结果，看起来"变好了"其实是缓存，比 bug 难查"""
+    _run(env, _RouteClient())
+
+    second = _RouteClient()
+    result = _run(env, second, instruction=INSTRUCTION + "\n顺便统计字数。")
+
+    assert sorted(second.calls) == [0, 1, 2], "指令变了必须重打"
+    assert result.cached_chunks == 0
