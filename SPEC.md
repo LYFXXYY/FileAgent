@@ -724,7 +724,8 @@ Nginx 反代：前端静态文件直接 serve，`/api/` 代理到 `127.0.0.1:800
 15. ✅ **阶段 1.5：输入格式扩到 PDF + 项目去 Word 化改名**（见 9.5）
 16. ✅ **阶段 2 最小版：评测台**（见 9.6；完整形态的真实夹具留到需要时再补）
 17. ✅ **阶段 3 主体：长文档分块批改图（LangGraph）**（见 9.7）
-18. ⬜ 联调 + Docker 部署（推迟到阶段 4 与 Postgres 一起做）
+18. ✅ **依赖与产物减肥**：pymupdf 死重摘除 + Element Plus 按需引入（见 9.8）
+19. ⬜ 联调 + Docker 部署（推迟到阶段 4 与 Postgres 一起做）
 
 ### 9.2 Agent 化演进路线（阶段 0–5）
 
@@ -913,7 +914,7 @@ Nginx 反代：前端静态文件直接 serve，`/api/` 代理到 `127.0.0.1:800
 | `test_e2e_structural.py` | 新增第 10 节 11 项：长文档走完整业务链路（扇出、逐字核对偏移、每次外呼各记一行） |
 | `.gitignore` | `server/checkpoints/` 不入库 |
 
-**门禁**：`pytest` 139 passed（+18）；`ruff check` / `format --check` 全绿（54 files）；`uv lock --check` 一致；`npm run build` 通过（前端零改动）；`test_e2e_structural.py` 40 → **51/51**（需后端带 `LONGDOC_CHUNK_CHARS=60` 启动）；`test_e2e.py` 33/33 无回归。
+**门禁**：`pytest` 139 passed（+18）；`ruff check` / `format --check` 全绿（54 files）；`uv lock --check` 一致；`npm run build` 通过（前端零改动）；`test_e2e_structural.py` 40 → **51/51**，补上 `progress` 契约检查后 **52/52**（需后端带 `LONGDOC_CHUNK_CHARS=60` 启动）；`test_e2e.py` 33/33 无回归。
 
 **写测试时抓出的四个真问题**（都不是测试写错，是实现错，逐个记下来免得改回去）：
 
@@ -925,6 +926,38 @@ Nginx 反代：前端静态文件直接 serve，`/api/` 代理到 `127.0.0.1:800
 **检查点到底给了什么**（这是本阶段最想记住的一条）：扇出里有一块抛异常，整步的 checkpoint 写入一起作废，重跑时**所有块都重打**——实测过。所以"第 99 块挂了别把前 98 块再烧一遍"靠的是按块 `SqliteStore`，不是靠 `AsyncSqliteSaver`。两个都留着，各管各的粒度。
 
 **这一轮没做**：`interrupt` 人工确认分块方案（要先有 UI）、图级 `RetryPolicy`（`chat()` 已重试，再套一层双倍烧钱）、非批改类的分段汇总、`checkpoints/` 的体积治理与 TTL、多 worker 下的 saver。
+
+### 9.8 依赖与产物减肥（2026-11-16）
+
+用户口径：三项臃肿里做第 1 和第 3 项。第 2 项（langgraph 全家桶）**保留**——本工程的学习目标就是 LangGraph，手写 `gather` + 缓存能省包但省不掉学习价值，这笔账要算在目的上而不是体积上。Postgres 用户选择"先不碰"。
+
+**第 1 项：pymupdf 的版面分析死重**
+
+| 项 | 摘之前 | 摘之后 |
+|---|---|---|
+| `uv.lock` 包数 | 84 | **75** |
+| `.venv` | 337M | **233M** |
+| 被摘掉的 | onnxruntime、numpy、protobuf、flatbuffers、networkx、tabulate、psutil、pymupdf-layout、pymupdf4llm | — |
+
+做法：`pyproject.toml` 的 `[tool.uv] override-dependencies` 给这些包挂永不成立的 marker（`python_version < '3.0'`）。依据是 `services/pdf.py` 只用 `page.get_text("blocks")`，全仓 grep 对这些包**零引用**，且除 pymupdf 外没有别的包依赖它们。**要装回来就删那几行 override**，阶段 5 真做版面分析时是即得能力，不是沉没成本。
+
+⚠ 一个不对称：pip 表达不了 override。demo 副本的 `requirements.txt` 装 `pymupdf` 仍会拖回 onnxruntime（约 100M 差异），已记进 AGENTS §8 当交付决定。
+
+**第 3 项：Element Plus 按需引入**
+
+`app.use(ElementPlus)` + 全量 CSS 换成 `unplugin-vue-components` + `ElementPlusResolver`：
+
+| 项 | 之前 | 之后 |
+|---|---|---|
+| 首屏 JS | 893.11 kB（gzip 283.81） | **435.67 kB（gzip 152.58）** |
+| 产物形态 | 单个巨型 chunk + 体积告警 | 按路由分片，告警消失 |
+| CSS | 全量 `dist/index.css` | 只打进用过的组件样式 |
+
+插件扫不到三类东西，全部在 `main.ts` / `App.vue` 手工补上（漏一个就是"构建通过、界面裸样式"）：`ElMessage` / `ElMessageBox` 的样式、`v-loading` 指令注册、中文 locale 改用 `el-config-provider`。另外顺手清掉三处陈账：`@element-plus/icons-vue` 从没被 import 过（删）、`pytest` 同时挂在生产依赖和 dev 组里（从生产依赖摘掉）、`pyproject` 描述还写着"Word 文档 AI 处理平台"（改）。
+
+**验证到什么程度**：`npm run build` 通过；把 `dist/assets/*.css` 拼起来逐个 grep 32 个用过的 `el-*` 类名，`.el-message*` / `.el-loading-*` / `.el-progress*` / `.el-tabs__*` / `.el-select-dropdown__item` 全部命中；`el-option` / `el-tab-pane` / `el-config-provider` 三个查不到是**类名对不上**（它们的 style 入口引的是父组件 CSS），不是缺样式。**真实浏览器交互仍未走查**（弹窗外观、loading 遮罩、分页中文文案），留给连接器或用户自查。
+
+**门禁**：pytest 142 passed；ruff check / format 全绿；`uv lock --check` 一致（75 包）；`npm run build` 通过。
 
 ---
 
@@ -1032,7 +1065,7 @@ Nginx 反代：前端静态文件直接 serve，`/api/` 代理到 `127.0.0.1:800
 
 **测试脚手架的教训**：假 client 按脚本顺序吐响应，在扇出并发下会把 A 块的答复发给 B 块——测试"通过"只是在测运气。改成按请求内容路由（`tests/test_grading_graph.py` 的 `_RouteClient`）。
 
-**回归验证（本轮）**：pytest 139 passed；`test_e2e_structural.py` 51/51（后端需带 `LONGDOC_CHUNK_CHARS=60`）；`test_e2e.py` 33/33；ruff check / format 全绿；`uv lock --check` 一致（84 包）；`npm run build` 通过。
+**回归验证（本轮）**：pytest 139 passed；`test_e2e_structural.py` 52/52（后端需带 `LONGDOC_CHUNK_CHARS=60`）；`test_e2e.py` 33/33；ruff check / format 全绿；`uv lock --check` 一致（减肥后 75 包）；`npm run build` 通过。
 
 ---
 

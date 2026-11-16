@@ -34,11 +34,11 @@ uv run python migrate_add_provider_capabilities.py         # 幂等：补 provid
 uv run python migrate_add_log_structured_output.py         # 幂等：补 log.structured_output
 uv run python test_e2e.py                      # 端到端 33 项：需后端在 8000，会造数据，见 §7
 uv run uvicorn test_llm_server:app --port 19000            # 假 OpenAI 端点（另开终端）
-uv run python test_e2e_structural.py           # 结构化批改 + PDF + 分块端到端 51 项，零真实 token
+uv run python test_e2e_structural.py           # 结构化批改 + PDF + 分块端到端 52 项，零真实 token
 uv run python -m eval.runner --provider 5 --case clean   # 评测台冒烟：**会真花钱**，先单条再全量
 ```
 
-⚠ **`test_e2e_structural.py` 第 10 节要后端带 `LONGDOC_CHUNK_CHARS=60` 启动**才会真的切块；用默认 6000 时那节 11 项断言会失败（不是回归，是预算没到分块门槛）。跑完 `server/checkpoints/` 下会留两个 sqlite（图状态 + 按块缓存），已 gitignore，可随手删。
+⚠ **`test_e2e_structural.py` 第 10 节要后端带 `LONGDOC_CHUNK_CHARS=60` 启动**才会真的切块；用默认 6000 时那节 12 项断言会失败（不是回归，是预算没到分块门槛）。跑完 `server/checkpoints/` 下会留两个 sqlite（图状态 + 按块缓存），已 gitignore，可随手删。
 
 ⚠ **8000 端口在本机可能"看不见地被占用"**：WSL 侧若有服务监听 8000，因 mirrored 网络，Windows `netstat` 查不到该监听，现象是 uvicorn 报 `[Errno 10048]` 而 `curl localhost:8000` 却能收到对方的 404。查证要跑 `wsl -e bash -lc "ss -ltnp | grep ':8000'"`。换端口时 `test_e2e_structural.py` 走 `FA_API` / `FA_MOCK_LLM` 环境变量，`test_e2e.py` 仍是硬编码 8000。
 
@@ -175,7 +175,8 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - **Pinia setup store 只用 `ref` + `watch`**，不要用对象字面量 getter/setter 代理闭包变量：Pinia 会把访问器转成普通数据属性，导致 `restore()` 后 UI 拿不到值、setter 不触发保存（`client/src/stores/home.ts:16`）。
 - 持久化用 `sessionStorage`（key `fileagent_home_state`），**不存 File 对象**，恢复时 `pickedFile` 置 null。
 - 路径别名 `@` → `src`，`vite.config.ts` 与 `tsconfig.app.json` 两处都要配。
-- Element Plus 是**全量引入 + 全量 CSS**（`client/src/main.ts:10`），所以尽管路由做了懒加载，产物仍是单个 ~890kB chunk，build 的体积告警是已知现象。
+- Element Plus 是**按需引入**（`vite.config.ts` 的 `unplugin-vue-components` + `ElementPlusResolver`），首屏 JS 从 893kB 降到 ~436kB，构建的体积告警随之消失。三件插件管不到的东西必须在 `main.ts` 手工接上，漏了就是"构建通过、界面上裸样式"：**ElMessage / ElMessageBox / v-loading**（函数式与指令，不是标签，扫不到）以及它们各自的样式、还有中文 locale（改成 App.vue 里的 `el-config-provider`，不要再 `app.use(ElementPlus)`）。`src/components.d.ts` 是构建生成的，已 ignore，删掉也能重新生成。
+- 改了样式装载方式，验证不能只看 `npm run build` 过了：把 `dist/assets/*.css` 拼起来 grep 每个用过的 `el-*` 类名，才能确认样式真的进了产物（`el-option` / `el-tab-pane` / `el-config-provider` 三个是名字对不上，不是缺样式——它们的 style 入口引的是父组件 CSS）。真实交互（弹窗样式、loading 遮罩、分页中文文案）仍未在浏览器里跑过。
 - provider 的 `capabilities` 后端存逗号分隔**字符串**、表单要的是**数组**，转换只认 `KNOWN_CAPABILITIES` 里的已知值（`client/src/views/Providers.vue` 的 `toCapabilityList()` / `buildPayload()`）——顺带做了顺序归一化和脏值丢弃，未知标记不会把表单卡死也不会吃 422。提交**必须走 `buildPayload()`**，别把带 `capabilityList` 临时字段的 form 整个发出去。
 - 上传格式只在两处声明：`Home.vue` 的 `accept=".docx,.pdf"` 和上传区文案。**前端不做扩展名校验**，`accept` 只管文件选择对话框，拖拽照样能拖进 `.txt`——真校验在后端白名单，400 文案已是给用户看的。加格式时要同时改这两处 + 后端派发表。
 - 结构化批改的原文高亮在 `Home.vue:buildParagraphs()`：按 `\n` 分段，用全局偏移 `start/end` 落到段内区间再套 span。**非高亮片段也必须给 `index: null`**（`Span.index` 是 `number | null` 必填），漏了会让相邻片段的 `seg.index` 是 `undefined`，点击时把 `activeIssueIndex` 写成 `undefined` 从而永不匹配。匹配不到位置的 issue 显示"未定位"，不要猜位置。
@@ -212,9 +213,8 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 
 当前路线（阶段 0–5，含为什么这么排）在 SPEC §9.2；阶段 0 交付与验证明细在 SPEC §9.3，阶段 1 在 §9.4，阶段 1.5（PDF 输入 + 去 Word 化）在 §9.5，阶段 2 最小版（评测台 + 基线数字）在 §9.6，阶段 3（长文档分块批改图）在 §9.7，缺陷台账第五轮在 §10，改 bug 前先看这几张表。
 
-门禁基线（均已实测通过）：`uv run pytest -q` → **142 passed**；`uv run ruff check .` → 全绿；`ruff format --check .` → 54 files already formatted；`uv lock --check` → 一致（**75 包 / .venv 233M**，摘掉 pymupdf 的版面分析死重之前是 84 包 / 337M）；`npm run build` → 通过；`uv run python test_e2e.py` → 33/33；`uv run python test_e2e_structural.py` → **51/51**（第 10 节要 `LONGDOC_CHUNK_CHARS=60`）。
+门禁基线（均已实测通过）：`uv run pytest -q` → **142 passed**；`uv run ruff check .` → 全绿；`ruff format --check .` → 54 files already formatted；`uv lock --check` → 一致（**75 包 / .venv 233M**，摘掉 pymupdf 的版面分析死重之前是 84 包 / 337M）；`npm run build` → 通过；`uv run python test_e2e.py` → 33/33；`uv run python test_e2e_structural.py` → **52/52**（第 10 节要 `LONGDOC_CHUNK_CHARS=60`）。
 
-⚠ 有一条断言**还没实跑过**：第 10 节新加的 `progress` 契约检查（响应必须带这个键，跑完为 null，用来守住和 `client/src/api/types.ts` 的字段名一致）。下次起后端时一并验证，别当成已通过。
 
 - **`server/test_e2e.py` 是仓库自带的端到端冒烟脚本，不是遗留物，别删**：需后端已在 8000 运行、连真实 MySQL。它会注册 `tester_*` / `other_*` 两个临时账号，造 1 条日志和 1 个上传文件；脚本自身只删 task/provider，**账号、日志、落盘文件、以及新增的 `llm_calls` 行要跑完手动清**。第 7 节现在真走重试路径（连不上假 provider → 重试 3 次 → failed），第 10 节直接改库把日志置为 done 来验证下载，都属预期行为。
 - **`server/test_e2e_structural.py` + `test_llm_server.py` 是阶段 1 新增的结构化端到端**，同样别删：需后端 + 假 LLM 两个进程都在跑，全程零真实 token。mock 端点**刻意不支持 `response_format`**（回 400）来如实模拟国产兼容端点并逼出 `chat_json` 的降级路径，所以 LLM 日志里出现的 `400 Bad Request`（每次 `chat_json` 两条：`json_schema` 和 `json_object` 各一档）是预期行为不是故障。第 8 节是阶段 1.5 加的 **PDF 输入链路**：用 pymupdf 现场合成"每视觉行一个 block"的中文 PDF，断言提取结果与 docx **逐字相等**、定位成功、下载名换成 `.docx`——改提取器必跑它。它注册 `e2e_s_*` 账号，跑完清理方式和上面一样。

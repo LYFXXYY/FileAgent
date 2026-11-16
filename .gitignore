@@ -25,6 +25,8 @@ venv/
 node_modules/
 dist/
 .vite/
+# unplugin-vue-components 每次构建重新生成，入库只会让 diff 变吵
+client/src/components.d.ts
 
 # 上传/输出文件（运行时生成，不跟踪）
 server/uploads/

@@ -53,13 +53,13 @@ npm run dev                                     # http://localhost:5173
 
 ```bash
 cd server
-uv run pytest -q            # 139 个用例（diff / word / pdf / 分块 / llm 传输层 / 结构化批改 / 评测台），不碰 DB 和网络
+uv run pytest -q            # 142 个用例（diff / word / pdf / 分块与分块图 / llm 传输层 / 结构化批改 / 评测台），不碰 DB 和网络
 uv run ruff check .         # lint
 uv run python test_e2e.py   # 端到端冒烟：需后端已在 8000 运行，会注册临时账号造数据
 
 # 结构化批改 + PDF 输入 + 长文档分块的端到端（零真实 token，需另起一个假 LLM 端点）
 uv run uvicorn test_llm_server:app --port 19000    # 另开终端
-uv run python test_e2e_structural.py               # 51 项断言（第 10 节要后端带 LONGDOC_CHUNK_CHARS=60 启动）
+uv run python test_e2e_structural.py               # 52 项断言（第 10 节要后端带 LONGDOC_CHUNK_CHARS=60 启动）
 
 # 批改质量评测台（合成夹具 + 确定性指标）：⚠ 会调真实模型、产生 token 费用
 uv run python -m eval.runner --provider 5 --case clean   # 先单条验通链路
