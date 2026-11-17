@@ -95,7 +95,7 @@ def delete_provider(
     if provider is None:
         raise HTTPException(404, "提供商不存在")
 
-    # 先把引用该提供商的任务 provider_id 置空，否则 MySQL 外键约束会让删除失败（500）
+    # 先把引用该提供商的任务 provider_id 置空，否则外键约束会让删除失败（500）
     # 任务转为"未指定提供商"，处理时由系统选当前用户的默认 active 提供商
     db.query(Task).filter(Task.provider_id == provider_id).update(
         {Task.provider_id: None}, synchronize_session=False

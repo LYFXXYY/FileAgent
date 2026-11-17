@@ -19,7 +19,6 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text, func
-from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database import Base
@@ -29,14 +28,14 @@ if TYPE_CHECKING:
     from models.user import User
 
 
-# 正文两列在 MySQL 上要 LONGTEXT：一份 PDF 论文动辄几万字，TEXT 的 64KB 是字节上限、
-# 中文按 3 字节算，两万来字就撞墙。本机老库手工建的就是 LONGTEXT，用 with_variant
-# 让新建库和它一致（SQLite 单测仍走 TEXT），不要再出现"声明和线上对不上"第三种。
-DocumentText = Text().with_variant(LONGTEXT(), "mysql")
+# 正文两列：Postgres 的 TEXT 没有大小上限，直接 Text 即可。
+# 历史包袱：之前 MySQL 时代要 with_variant(LONGTEXT, "mysql") 是因为 TEXT 只有 64KB 字节上限、
+# 中文按 3 字节算两万来字就撞墙。阶段 4 迁 Postgres 后这层 variant 不再需要。
+DocumentText = Text()
 
 
 # ---------- 状态枚举 ----------
-# Python Enum → SQLAlchemy Enum → MySQL ENUM('pending','processing','done','failed')
+# Python Enum → SQLAlchemy Enum → Postgres 原生枚举类型 logstatus
 # 类比 Java 的 enum + @Enumerated(EnumType.STRING)
 class LogStatus(enum.StrEnum):
     PENDING = "pending"  # 已上传，等待处理

@@ -1,5 +1,5 @@
 """
-长文档分块批改图（阶段 3）—— LangGraph 首练：扇出扇入 + 检查点续跑
+长文档分块批改图（阶段 3，2026-11-16 起检查点 / 缓存迁到 Postgres）—— LangGraph 扇出扇入 + 续跑
 
 【图形状】
 
@@ -9,29 +9,33 @@
 拼回一篇，并把每块的局部偏移换成全局偏移（前端按整篇原文高亮，见 §3.7）。
 
 【省钱靠两样，缺一不可，别只留一个】
-- **检查点（AsyncSqliteSaver）**：按 super-step 落盘。它管的是"进程在两步之间没了，
-  下次从这一步之后接着跑"。**它不管块级失败**——同一个扇出步里有一块抛异常，
-  整步的写入一起作废，别的块的结果读不回来（实测过：重跑时三块全都重打）。
-- **按块幂等存储（SqliteStore）**：每块成功外呼后立刻把结果写进 store，节点开头先查。
+- **检查点（AsyncPostgresSaver）**：按 super-step 落盘到 `checkpoints` 表。它管的是"进程在两步
+  之间没了，下次从这一步之后接着跑"。**它不管块级失败**——同一个扇出步里有一块抛异常，
+  整步的写入一起作废，别的块的结果读不回来。
+- **按块幂等存储（AsyncPostgresStore）**：每块成功外呼后立刻把结果写进 store 表，节点开头先查。
   键是 `(thread_id, chunk_index)`，命中还要求**块文本、指令摘要、模型名**三者一致，
   换提示词或换模型都不会吃到旧结果。这才是"第 99 块挂了别把前 98 块再烧一遍"的根据。
 
 命中的块**不再写 llm_calls**：它这轮没发生外呼，记账进去就是重复计成本。
 
+【为什么用 Postgres 而不是 SQLite（2026-11-16 阶段 4 改）】
+- SQLite 时代两个连接（检查点 + 缓存）写同目录两个 .sqlite3 文件，靠分文件避开锁；
+  Postgres 一库到底，连接池由 psycopg 自己管，并发场景比 SQLite 稳。
+- 业务库（users/tasks/operation_logs）已经在 Postgres，检查点和缓存同库便于备份与跨进程共享。
+- 阶段 6 pgvector 上 embedding 时也是这张库，不再多引入一个存储后端。
+
 【这里刻意没有的东西】
 - **图级 RetryPolicy**：`chat()` 已经按白名单重试过一轮，再套一层就是把同一个提示
   打两次、双倍烧钱。分层重试只留一层。
-- **interrupt 人工确认**：确认"分块方案对不对"要先有 UI（第 2 步预览已经能做），
-  图内挂起等确认是下一步的事，别为了用上 API 而制造一次交互。
+- **interrupt 人工确认**：确认"分块方案对不对"要先有 UI，图内挂起等确认是下一步的事。
 - **节点里查库**：provider 由调用方解析后用闭包传进来。节点只碰模型，
   才能像 `services/llm.py` 那样用假 client 单测（§3.6 的边界不破）。
 
-【检查点存哪】
-`settings.checkpoint_path`（默认 `checkpoints/grading.sqlite3`）存图状态；
-按块结果另存一个同目录的 `.chunks.sqlite3`——两个连接写同一个 sqlite 文件会撞锁，
-分文件比调 WAL 便宜且可控。`thread_id = log-{log_id}`，一条日志一条时间线。
-单 worker 假设跟启动 reaper 一致；多 worker 或长期上线要换成 Postgres saver + Postgres
-store——那正是阶段 2.5/4 的既定动作。
+【依赖注入边界】
+`grade_long_document` 是**生产入口**，自己从 `settings.database_url` 派生 psycopg3 DSN 并构造
+AsyncPostgres 两件套；`_grade_with_backend` 是**测试入口**，调用方负责提供 checkpointer/store。
+单测走 SQLite（`AsyncSqliteSaver` + `AsyncSqliteStore`）落在 tmp_path，不连 Postgres、不出网，
+保持 §3.6 测试边界。
 """
 
 from __future__ import annotations
@@ -39,16 +43,19 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Annotated, Any, TypedDict
+from typing import Annotated, Any, Protocol, TypedDict
 
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+import psycopg
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, START, StateGraph
-from langgraph.store.sqlite import SqliteStore
+from langgraph.store.postgres.aio import AsyncPostgresStore
 from langgraph.types import Send
+from psycopg.rows import dict_row
 
-from config import BASE_DIR, get_settings
+from config import get_settings
 from models.provider import ModelProvider
 from schemas.grading import GRADING_JSON_SCHEMA
 from services.chunking import Chunk, reassemble, split_document
@@ -59,6 +66,42 @@ logger = logging.getLogger("fileagent.graph")
 
 # 扇出上限：一次塞几十个分支进图，排到信号闸外面只会白白占内存
 _MAX_INFLIGHT_HINT = 8
+
+# psycopg 默认 connect_timeout=None，Windows 上 TCP 握手会卡到内核层超时（数十秒）才报错，
+# 用户体验等同于"处理挂了"。5 秒足够本地 Docker 与同机房 Postgres，跨地域要放宽。
+_CONNECT_TIMEOUT_SECONDS = 5.0
+
+
+@asynccontextmanager
+async def _open_pg_conn(dsn: str) -> AsyncIterator[psycopg.AsyncConnection]:
+    """
+    自己握 psycopg.AsyncConnection 的上下文，强制带 connect_timeout
+
+    AsyncPostgresSaver/Store.from_conn_string 没透传 timeout，psycopg 默认 None，
+    踩 Windows 的坑——所以这里手工建连接再喂给 saver/store 的 __init__。
+    """
+    async with await psycopg.AsyncConnection.connect(
+        dsn,
+        autocommit=True,
+        prepare_threshold=0,
+        row_factory=dict_row,
+        connect_timeout=_CONNECT_TIMEOUT_SECONDS,
+    ) as conn:
+        yield conn
+
+
+class _AsyncStore(Protocol):
+    """aget/aput 这一对接口 Sqlite / Postgres 异步 store 都满足，单测才能不连库"""
+
+    async def aget(self, namespace: tuple[str, ...], key: str) -> Any: ...
+
+    async def aput(self, namespace: tuple[str, ...], key: str, value: dict[str, Any]) -> None: ...
+
+
+class _AsyncCheckpointer(Protocol):
+    """aget_tuple 是 LangGraph 检查点的最小读接口"""
+
+    async def aget_tuple(self, config: dict[str, Any]) -> Any: ...
 
 
 class ChunkPayload(TypedDict, total=False):
@@ -151,9 +194,38 @@ class ChunkProgress:
     done: int
 
 
-async def read_progress(thread_id: str, checkpoint_path: str | None = None) -> ChunkProgress | None:
+def derive_pg_dsn(database_url: str) -> str:
     """
-    从检查点读分块进度。读不到就返回 None，让前端不显示进度，而不是显示骗人的 0/0。
+    把 SQLAlchemy 的 `postgresql+psycopg2://...` 串改成 psycopg3 用的 `postgresql://...`
+
+    SQLAlchemy 写 dialect+driver、psycopg3 看裸 dialect。只剥这一层前缀，剩下的
+    user / password / host / port / dbname / sslmode 等都通用。
+    """
+    if database_url.startswith("postgresql+psycopg2://"):
+        return "postgresql://" + database_url[len("postgresql+psycopg2://") :]
+    if database_url.startswith("postgresql+psycopg://"):
+        return "postgresql://" + database_url[len("postgresql+psycopg://") :]
+    return database_url
+
+
+async def _read_progress_with(
+    checkpointer: _AsyncCheckpointer, thread_id: str
+) -> ChunkProgress | None:
+    """共用读路径：单测和真库都走这一份实现，差别只在传进来的 saver"""
+    snapshot = await checkpointer.aget_tuple({"configurable": {"thread_id": thread_id}})
+    if snapshot is None:
+        return None
+    values = (snapshot.checkpoint or {}).get("channel_values") or {}
+    plan = values.get("plan") or []
+    if not plan:
+        return None
+    return ChunkProgress(total=len(plan), done=len(values.get("results") or []))
+
+
+async def read_progress(thread_id: str) -> ChunkProgress | None:
+    """
+    生产入口：开一条短连接的 AsyncPostgresSaver 读分块进度。读不到就返回 None，让前端不显示
+    骗人的 0/0。
 
     两个如实的限制：
     - `plan` 节点跑完之前没有块数，前端这段时间只能看到"处理中"；
@@ -161,24 +233,15 @@ async def read_progress(thread_id: str, checkpoint_path: str | None = None) -> C
       `done` 可能回落到 0。这不是丢数据（按块缓存在 store 里，钱不会重复烧），
       但数字确实会跳，别在这里编一个更好看的版本。
     """
-    settings = get_settings()
-    path = _resolve_dir_file(checkpoint_path or settings.checkpoint_path)
-
+    dsn = derive_pg_dsn(get_settings().database_url)
     try:
-        async with AsyncSqliteSaver.from_conn_string(path) as saver:
-            snapshot = await saver.aget_tuple({"configurable": {"thread_id": thread_id}})
-    except Exception as e:  # 文件还没建、被清掉了、或格式不认识
+        async with _open_pg_conn(dsn) as conn:
+            saver = AsyncPostgresSaver(conn)
+            await saver.setup()
+            return await _read_progress_with(saver, thread_id)
+    except Exception as e:  # 表还没建、连接断了、或 saver 抛任何底层异常
         logger.warning("读分块进度失败 thread_id=%s：%s", thread_id, str(e)[:200])
         return None
-
-    if snapshot is None:
-        return None
-
-    values = (snapshot.checkpoint or {}).get("channel_values") or {}
-    plan = values.get("plan") or []
-    if not plan:
-        return None
-    return ChunkProgress(total=len(plan), done=len(values.get("results") or []))
 
 
 @dataclass(frozen=True)
@@ -191,24 +254,6 @@ class LongdocResult:
     chunk_count: int
     cached_chunks: int
     calls: tuple[ChunkCall, ...]
-
-
-def _resolve_dir_file(path: str) -> str:
-    """相对路径按 server/ 解析并确保父目录存在（sqlite 不会自己建目录）"""
-    full = path if os.path.isabs(path) else os.path.join(BASE_DIR, path)
-    full = os.path.normpath(full)
-    os.makedirs(os.path.dirname(full), exist_ok=True)
-    return full
-
-
-def _chunk_cache_path(checkpoint_path: str) -> str:
-    """
-    按块结果缓存用同目录的另一个 sqlite 文件
-
-    两个连接写同一个文件会撞库锁，除非我确定两边都开了 WAL——分文件比调 WAL 便宜且可控。
-    """
-    root, ext = os.path.splitext(checkpoint_path)
-    return f"{root}.chunks{ext}"
 
 
 def _fingerprint(text: str, instruction: str, model_name: str) -> str:
@@ -229,7 +274,7 @@ def _build_graph(
     provider: ModelProvider,
     instruction: str,
     max_parallel: int,
-    store: SqliteStore,
+    store: _AsyncStore,
     thread_id: str,
 ):
     """
@@ -253,9 +298,9 @@ def _build_graph(
     def fan_out(state: GradingState) -> list[Send]:
         return [Send("grade_chunk", payload) for payload in state["plan"]]
 
-    def _cached_result(payload: ChunkPayload) -> ChunkResult | None:
+    async def _cached_result(payload: ChunkPayload) -> ChunkResult | None:
         fp = _fingerprint(payload["text"], instruction, provider.model_name)
-        item = store.get(namespace, str(payload["index"]))
+        item = await store.aget(namespace, str(payload["index"]))
         if item is None or item.value.get("fingerprint") != fp:
             return None
         stored = item.value.get("result") or {}
@@ -264,7 +309,7 @@ def _build_graph(
         return {**stored, "index": payload["index"], "cached": True}
 
     async def grade_chunk(payload: ChunkPayload) -> dict[str, Any]:
-        hit = _cached_result(payload)
+        hit = await _cached_result(payload)
         if hit is not None:
             # 命中缓存的块本轮没外呼，调用方据此跳过 llm_calls，别重复计成本
             return {"results": [hit]}
@@ -300,7 +345,7 @@ def _build_graph(
             "finish_reason": result.finish_reason,
             "cached": False,
         }
-        store.put(
+        await store.aput(
             namespace,
             str(payload["index"]),
             {
@@ -340,37 +385,29 @@ def _to_global(local: int | None, base: int) -> int | None:
     return None if local is None else local + base
 
 
-async def grade_long_document(
+async def _grade_with_backend(
     source: str,
     provider: ModelProvider,
     instruction: str,
     *,
     thread_id: str,
-    checkpoint_path: str | None = None,
+    checkpointer: Any,
+    store: _AsyncStore,
 ) -> LongdocResult:
     """
-    分块批改一篇长文档，返回可直接铺进 operation_log 的结果。
+    共用图执行路径：把已经构造好的 checkpointer / store 传进来跑图
 
-    `thread_id` 用 `log-{log_id}`：同一日志重跑会命中同一条时间线，
-    已成功的外呼直接读缓存返回，不再花钱。真要从头再批一次，换个 thread_id
-    （或者删掉这两个 sqlite 文件）。
+    单测走这条传 AsyncSqliteSaver + AsyncSqliteStore；生产走 `grade_long_document`，
+    它先用 Postgres 版本建好再调到这里。
     """
     settings = get_settings()
     max_parallel = min(_MAX_INFLIGHT_HINT, max(1, int(settings.llm_max_concurrency)))
-    ckpt = _resolve_dir_file(checkpoint_path or settings.checkpoint_path)
-    cache = _resolve_dir_file(_chunk_cache_path(ckpt))
-
-    # from_conn_string 是同步上下文管理器；SqliteStore 的构造函数要的是 Connection 对象，
-    # 传路径进去会一路走到 create_function 才炸，第一次撞的人都栽在这
-    with SqliteStore.from_conn_string(cache) as store:
-        store.setup()
-        builder = _build_graph(provider, instruction, max_parallel, store, thread_id)
-        async with AsyncSqliteSaver.from_conn_string(ckpt) as saver:
-            graph = builder.compile(checkpointer=saver)
-            final = await graph.ainvoke(
-                {"source": source},
-                config={"configurable": {"thread_id": thread_id}, "recursion_limit": 100},
-            )
+    builder = _build_graph(provider, instruction, max_parallel, store, thread_id)
+    graph = builder.compile(checkpointer=checkpointer)
+    final = await graph.ainvoke(
+        {"source": source},
+        config={"configurable": {"thread_id": thread_id}, "recursion_limit": 100},
+    )
 
     results = sorted(final.get("results", []), key=lambda r: r["index"])
     if not results:
@@ -398,3 +435,35 @@ async def grade_long_document(
             for r in results
         ),
     )
+
+
+async def grade_long_document(
+    source: str,
+    provider: ModelProvider,
+    instruction: str,
+    *,
+    thread_id: str,
+) -> LongdocResult:
+    """
+    生产入口：分块批改一篇长文档，检查点和按块缓存都落到 Postgres。
+
+    `thread_id` 用 `log-{log_id}`：同一日志重跑会命中同一条时间线，
+    已成功的外呼直接读缓存返回，不再花钱。真要从头再批一次，换个 thread_id。
+
+    两个 saver/store 各持一条 psycopg 连接（同一 DSN），互不打扰；
+    阶段 4 起不再用 SQLite 文件，checkpoints 和 store 表都在业务库的 `public` schema 里。
+    """
+    dsn = derive_pg_dsn(get_settings().database_url)
+    async with _open_pg_conn(dsn) as cp_conn, _open_pg_conn(dsn) as st_conn:
+        checkpointer = AsyncPostgresSaver(cp_conn)
+        store = AsyncPostgresStore(st_conn)
+        await checkpointer.setup()
+        await store.setup()
+        return await _grade_with_backend(
+            source,
+            provider,
+            instruction,
+            thread_id=thread_id,
+            checkpointer=checkpointer,
+            store=store,
+        )

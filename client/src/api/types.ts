@@ -56,6 +56,9 @@ export interface ProviderCreatePayload {
 export type ProviderUpdatePayload = Partial<ProviderCreatePayload & { is_active: boolean }>
 
 // ========== 任务 ==========
+// 与后端 schemas/task.py 的 OUTPUT_FORMATS 同步：加值时两处一起改
+export type OutputFormat = 'docx' | 'pptx'
+
 export interface Task {
   id: number
   user_id: number
@@ -64,6 +67,7 @@ export interface Task {
   description: string | null
   prompt_template: string
   is_grading: boolean
+  output_format: OutputFormat
   created_at: string
   updated_at: string
 }
@@ -74,6 +78,7 @@ export interface TaskCreatePayload {
   prompt_template: string
   is_grading: boolean
   provider_id?: number | null
+  output_format?: OutputFormat
 }
 
 export type TaskUpdatePayload = Partial<TaskCreatePayload>

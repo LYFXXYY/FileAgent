@@ -38,7 +38,7 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
 
     # DATETIME DEFAULT CURRENT_TIMESTAMP
-    # server_default=func.now() → 由 MySQL 的 DEFAULT NOW() 生成，不依赖应用层时钟
+    # server_default=func.now() → 由数据库的 DEFAULT NOW() 生成，不依赖应用层时钟
     created_at: Mapped[datetime] = mapped_column(
         server_default=func.now(),
         nullable=False,

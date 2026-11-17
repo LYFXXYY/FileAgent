@@ -54,6 +54,12 @@ class Task(Base):
     # 是否为批改类任务 —— True 时下载会做 diff 标红
     is_grading: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
+    # 处理结果的载体格式：'docx'（批改/摘要/翻译/润色等沿用阶段 0–3 全链路）
+    # 或 'pptx'（阶段 5 PDF→PPT 走新批图）。默认 docx 与历史数据兼容。
+    # ⚠ 这个字段是阶段 5 §9.12.2 "留口子"硬约束的一部分：下载路由按它派发，
+    # 阶段 6 加 image_refs / OCR fallback 时不改这个列名也不改取值集合。
+    output_format: Mapped[str] = mapped_column(String(10), default="docx", nullable=False)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), nullable=False
     )

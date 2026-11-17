@@ -7,9 +7,17 @@ FileAgent 后端入口 —— FastAPI 应用 + 中间件 + 生命周期管理
 - 路由 @app.get("/path")    ≈  @GetMapping + @RequestMapping
 """
 
+import asyncio
 import logging  # 结构化日志（替代 print，避免 Windows GBK 控制台中文乱码）
 import sys  # 日志输出到 stdout
 from contextlib import asynccontextmanager  # 管理 startup/shutdown 的上下文管理器
+
+# Windows + psycopg3 异步模式硬冲突：默认 ProactorEventLoop 不支持 socket 异步读写，
+# AsyncPostgresSaver / AsyncPostgresStore 一调用就炸 "Psycopg cannot use the
+# 'ProactorEventLoop' to run in async mode"。必须在任何异步对象创建之前切到
+# SelectorEventLoop。httpx / FastAPI / LangGraph 全兼容，性能差异可忽略。
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -63,7 +71,10 @@ async def lifespan(app: FastAPI):
     # 类比 Hibernate 的 spring.jpa.hibernate.ddl-auto=update
     # ⚠ 仅适合开发阶段！生产环境用 Alembic 做 schema 迁移
     database.Base.metadata.create_all(bind=database.engine)
-    logger.info("MySQL 连接成功，表已创建/验证")
+    logger.info("数据库连接成功，表已创建/验证")
+    # 启动期把 event_loop 类型打出来：psycopg3 异步模式只认 Selector，Proactor 直接卡死。
+    # 看到 Proactor 就意味着用了 `uvicorn main:app` 而非 run_backend.py——长文档分块会炸。
+    logger.info("event_loop=%s", type(asyncio.get_running_loop()).__name__)
 
     # 僵尸状态清理：上次进程崩溃/重启时，正在后台处理的日志会永远卡在 processing
     # （BackgroundTasks 不持久化，进程一停就丢）。启动时把它们重置为 failed，
@@ -133,17 +144,17 @@ app.add_middleware(
 
 
 # ---------- 健康检查 ----------
-# 验证：后端服务是否存活 + MySQL 是否连接
+# 验证：后端服务是否存活 + 数据库是否连接
 # 注意 async def —— FastAPI 推荐所有 handler 用 async，即使当前没有 await
 @app.get("/api/health")
 async def health():
     """健康检查 —— 返回服务状态和数据库连通性"""
     from sqlalchemy import text  # 局部导入：只在需要时引入，减少启动时间
 
-    # 执行一条简单 SQL 验证 MySQL 是否可达
+    # 执行一条简单 SQL 验证数据库是否可达
     # 类比 JdbcTemplate.queryForObject("SELECT 1", Integer.class)
     with database.engine.connect() as conn:
-        conn.execute(text("SELECT 1"))  # 如果 MySQL 挂了这里会抛异常
+        conn.execute(text("SELECT 1"))  # 如果数据库挂了这里会抛异常
     return {"status": "ok", "database": "connected"}
 
 

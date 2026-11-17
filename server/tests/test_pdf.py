@@ -1,7 +1,7 @@
 """
 PDF 提取单测 —— 段落拼接、噪声剔除、错误路径
 
-纯函数 + 内存里的合成 PDF（pymupdf 自己造），不连 MySQL、不出网。
+纯函数 + 内存里的合成 PDF（pymupdf 自己造），不连 Postgres、不出网。
 """
 
 import pymupdf

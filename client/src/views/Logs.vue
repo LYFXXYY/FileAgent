@@ -241,7 +241,7 @@ async function retryProcess(row: LogEntry) {
               v-if="canDownload(row.status)"
               type="primary"
               size="small"
-              @click="downloadLog(row)"
+              @click="downloadLog(row as LogEntry)"
             >
               下载
             </el-button>
@@ -250,7 +250,7 @@ async function retryProcess(row: LogEntry) {
               type="warning"
               size="small"
               :loading="retryingId === row.id"
-              @click="retryProcess(row)"
+              @click="retryProcess(row as LogEntry)"
             >
               重试
             </el-button>

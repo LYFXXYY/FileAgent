@@ -61,7 +61,7 @@ class ModelProvider(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), nullable=False
     )
-    # ON UPDATE CURRENT_TIMESTAMP：MySQL 原生行为，ORM 层不做额外处理
+    # onupdate=func.now() 由 SQLAlchemy 在每次 UPDATE 时拼上 updated_at = NOW()，跨方言都生效
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
         server_default=func.now(),

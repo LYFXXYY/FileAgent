@@ -20,14 +20,14 @@ settings = get_settings()
 # ---------- 引擎（连接池） ----------
 # echo=False → 不打印 SQL；开发时改 True 可以看到所有执行的 SQL 语句
 # pool_size / max_overflow → 对应 HikariCP 的 maximumPoolSize / additionalPools
-# pool_pre_ping → 借出连接前先 ping 一下，防止 MySQL 关闭闲置连接（wait_timeout 默认 8 小时）
+# pool_pre_ping → 借出连接前先 ping 一下，防止服务端关闭闲置连接
 engine = create_engine(
     settings.database_url,
     echo=False,
     pool_size=10,
     max_overflow=20,
     pool_pre_ping=True,
-    pool_recycle=3600,  # 连接回收时间（秒），比 MySQL wait_timeout 短即可
+    pool_recycle=3600,  # 连接回收时间（秒）
 )
 
 # ---------- 会话工厂 ----------

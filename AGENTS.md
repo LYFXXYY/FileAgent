@@ -8,13 +8,15 @@
 文档 AI 处理平台：上传文档 → 按用户自定义 Prompt 调 LLM → 下载结果。**当前输入支持 `.docx` 与文字型 `.pdf`**（派发表 `api/v1/process.py:TEXT_EXTRACTORS`，白名单由它派生），批改类任务输出红字 diff 标注 + 可定位的问题清单；**结果永远是 `.docx`**。
 平台定位已不止 Word，但扫描件（无文字层）不做 OCR、表格不进正文——改文案前先认清这一点，别把 UI 写成"任意文档全能处理"。
 **批改类长文档**（> `LONGDOC_CHUNK_CHARS`，默认 6000 字）走 LangGraph 分块图扇出批改，见 §3.10；非批改类任务不分块。
-前后端分离单体，当前阶段无消息队列、无 Redis、无 Docker。
+前后端分离单体，当前阶段无消息队列、无 Redis；数据库走 Docker（`pgvector/pgvector:pg16` 容器）。
 
 | 层 | 位置 | 技术 |
 |---|---|---|
-| 后端 | `server/` | FastAPI + SQLAlchemy 2.0 + PyMySQL；Python 3.12（`.python-version`）；uv 管依赖 |
+| 后端 | `server/` | FastAPI + SQLAlchemy 2.0 + psycopg2；Python 3.12（`.python-version`）；uv 管依赖 |
 | 前端 | `client/` | Vue 3 `<script setup>` + TS + Vite + Element Plus + Pinia |
-| 数据库 | MySQL `localhost:3306/file_agent` | 5 表：`users` / `model_providers` / `tasks` / `operation_logs` / `llm_calls` |
+| 数据库 | Postgres `localhost:5434/file_agent`（Docker `pgvector/pgvector:pg16`） | 业务 5 表 + 规范库 2 表（`spec_docs` / `spec_chunks`）+ LangGraph 6 表，共 13 张 |
+
+⚠ **阶段 4 主体已落（2026-11-16）**：业务表 + LangGraph saver/store + `spec_docs`/`spec_chunks` 都已就位，MySQL 退役。剩下唯一项是 "在 Postgres 上跑 e2e 回归"，见 SPEC §9.10。Docker 容器名 `fileagent-postgres`，数据卷在 `D:\docker\fileagent-postgres`。LangGraph 表 6 张：`checkpoints` / `checkpoint_blobs` / `checkpoint_writes` / `checkpoint_migrations` / `store` / `store_migrations`，由 `setup()` 自动建。**Windows 硬约束**：psycopg3 异步模式 + 默认 ProactorEventLoop 直接卡死，`main.py` 顶部已切 `WindowsSelectorEventLoopPolicy`；任何独立脚本若用 `AsyncPostgresSaver/Store` 必须自己加这段。
 
 分层：`api/v1`（路由）→ `services`（业务）→ `models`（ORM）；`schemas` 是 Pydantic 出入参；`middleware/auth.py` 提供 `get_current_user` 依赖。
 核心链路三段分离：`POST /upload` → `POST /process/{log_id}` → `GET /download/{log_id}`，状态存在 `operation_logs`（`pending → processing → done / failed`）。
@@ -25,20 +27,23 @@
 
 ```bash
 uv sync                                        # 装依赖（含 dev 组）
-uv run uvicorn main:app --reload --port 8000    # 起后端，Swagger 在 /docs
-uv run pytest -q                               # 142 passed；纯函数 + 假 client + 内存 SQLite + 合成 PDF，不连 MySQL 不出网
+uv run python run_backend.py                   # 起后端（必须走这个入口，不能直接 uvicorn main:app，见下方 ⚠）
+uv run pytest -q                               # 178 passed；纯函数 + 假 client + 内存 SQLite + 合成 PDF，不连 Postgres 不出网
 uv run ruff check .                            # 全绿
 uv run ruff format --check .                   # 全部已格式化
 uv lock --check                                # 依赖锁一致性
-uv run python migrate_add_provider_capabilities.py         # 幂等：补 provider.capabilities
-uv run python migrate_add_log_structured_output.py         # 幂等：补 log.structured_output
-uv run python test_e2e.py                      # 端到端 33 项：需后端在 8000，会造数据，见 §7
-uv run uvicorn test_llm_server:app --port 19000            # 假 OpenAI 端点（另开终端）
+LONGDOC_CHUNK_CHARS=60 LLM_TRUST_ENV_PROXY=false uv run python run_backend.py    # 跑 test_e2e_structural 用这套环境
+uv run uvicorn test_llm_server:app --port 19000            # 假 OpenAI 文本端点（批改 + PPT 大纲共用同一进程，按 system prompt 路由）
+uv run uvicorn test_vlm_server:app --port 19001            # 假 VLM 视觉批评端点（PPT 批评循环 e2e 用）
+uv run python test_e2e.py                      # 端到端 31 项：需后端在 8000 已起 + 假 LLM 不用，见 §7
 uv run python test_e2e_structural.py           # 结构化批改 + PDF + 分块端到端 52 项，零真实 token
+uv run python test_e2e_ppt.py                  # PPT 流水线端到端 28 项：后端 + 假 LLM 19000 + 假 VLM 19001 三进程必起
 uv run python -m eval.runner --provider 5 --case clean   # 评测台冒烟：**会真花钱**，先单条再全量
 ```
 
-⚠ **`test_e2e_structural.py` 第 10 节要后端带 `LONGDOC_CHUNK_CHARS=60` 启动**才会真的切块；用默认 6000 时那节 12 项断言会失败（不是回归，是预算没到分块门槛）。跑完 `server/checkpoints/` 下会留两个 sqlite（图状态 + 按块缓存），已 gitignore，可随手删。
+⚠ **Windows 上不能直接 `uv run uvicorn main:app` 起后端**：uvicorn 在 win32 非子进程模式下硬编码 ProactorEventLoop，与 psycopg3 异步模式（AsyncPostgresSaver/Store）冲突，长文档分块批改跑到第 10 节必炸 "Psycopg cannot use the 'ProactorEventLoop' to run in async mode"。**必须走 `uv run python run_backend.py`**——它会先切 Selector policy 再 monkey-patch uvicorn 的 `asyncio_loop_factory`。`--reload` 与本启动器互斥（reload 走子进程入口，不会重跑 run_backend.py 的策略补丁），需要 reload 时只能接受分块路径不可用。
+
+⚠ **`test_e2e_structural.py` 第 10 节要后端带 `LONGDOC_CHUNK_CHARS=60` 启动**才会真的切块；用默认 6000 时那节 12 项断言会失败（不是回归，是预算没到分块门槛）。跑完 `server/checkpoints/` 会被脚本自动清理。
 
 ⚠ **8000 端口在本机可能"看不见地被占用"**：WSL 侧若有服务监听 8000，因 mirrored 网络，Windows `netstat` 查不到该监听，现象是 uvicorn 报 `[Errno 10048]` 而 `curl localhost:8000` 却能收到对方的 404。查证要跑 `wsl -e bash -lc "ss -ltnp | grep ':8000'"`。换端口时 `test_e2e_structural.py` 走 `FA_API` / `FA_MOCK_LLM` 环境变量，`test_e2e.py` 仍是硬编码 8000。
 
@@ -70,8 +75,8 @@ npm run build    # = vue-tsc -b && vite build，唯一的类型门禁（无 esli
 - 删 provider → 先 `Task.provider_id = None`（`providers.py:100`）
 - 删 task → 先 `OperationLog.task_id = None`（`tasks.py:92`）
 
-模型侧**声明**了 `ON DELETE SET NULL`（`task.provider_id` / `log.task_id`），但本机老库里实测是 **`NO ACTION`**——`create_all()` 从不 ALTER，s2 修复只动了 ORM（见 §5）。所以应用层那次置空**不是双保险，而是唯一防线**：新加删除路径必须照抄，漏了就 500。
-`llm_calls` 是新表，外键规则确实是 `SET NULL` / `CASCADE`（实测 `information_schema.REFERENTIAL_CONSTRAINTS`）。日志和计量靠 `task_name` / `provider_name` 快照在关联被删后仍可读。
+模型侧**声明**了 `ON DELETE SET NULL`（`task.provider_id` / `log.task_id`）。阶段 4 起 Postgres 是新建库，外键规则按 ORM 一次建齐（实测 `pg_constraint.confdeltype` 8 条全部匹配，不再有"MySQL 老库 vs ORM 声明"这档差异）。应用层那次置空**保留**——单测仍走内存 SQLite（不会真的级联），删 provider 走应用层置空让单测和真库行为一致；同时如果未来引入 Alembic，这条路径也不依赖具体方言。
+`llm_calls` 表的外键规则确实是 `SET NULL` / `CASCADE`。日志和计量靠 `task_name` / `provider_name` 快照在关联被删后仍可读。
 
 ### 3.3 处理必须后台化
 
@@ -93,10 +98,10 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 
 - 同步/异步约定：纯 DB 操作用 `def`（FastAPI 自动丢线程池），涉及外部 HTTP 才 `async def`。已知同步阻塞点用 `# noqa: ASYNC230` 并写明理由（`process.py:89`）。
 - 日志用 `logging.getLogger("fileagent...")`，**不要 print**（Windows GBK 控制台中文乱码）；独立脚本需 `sys.stdout.reconfigure(encoding="utf-8")`。root handler 已在 `main.py:46` 的 `_setup_logging()` 里配好，级别走 `LOG_LEVEL`。⚠ 那个 `basicConfig(force=True)` 不能省——`--reload` 会反复重导入模块，不清掉旧 handler 每行日志会打印两遍。
-- `LogStatus` 是 `enum.StrEnum`，配 `Enum(..., values_callable=...)` 存 **value**（`"pending"`）而非 name；MySQL 列类型为 `enum('pending','processing','done','failed')`。改枚举要连带回归后端状态流转与前端字符串比较。
-- 正文权威副本在 `operation_logs.original_content`，磁盘文件只是审计留存。两列声明已改为 `Text().with_variant(LONGTEXT, "mysql")`，与本机老库一致（MySQL `TEXT` 是 64KB **字节**上限，中文两万字就撞，长 PDF 是常态）；`structured_output` 仍是 `Text`，因为它只装问题清单。
+- `LogStatus` 是 `enum.StrEnum`，配 `Enum(..., values_callable=...)` 存 **value**（`"pending"`）而非 name；阶段 4 后 Postgres 用原生枚举类型 `logstatus`（`CREATE TYPE logstatus AS ENUM(...)`，由 `create_all()` 自动建）。改枚举要连带回归后端状态流转与前端字符串比较。
+- 正文权威副本在 `operation_logs.original_content`，磁盘文件只是审计留存。两列声明已是 `Text()`——Postgres 的 TEXT 没有大小上限，原 MySQL 时代的 `with_variant(LONGTEXT, "mysql")` 已撤。`structured_output` 同样是 `Text`。
 - 提取层两条硬边界：`extract_text_from_docx` **只读 `doc.paragraphs`**（不含表格/文本框），`extract_text_from_pdf` **不读表格、不做 OCR**——已知功能边界，不是 bug。细则见 §3.8。
-- 上传白名单 = `TEXT_EXTRACTORS.keys()`（`.docx` / `.pdf`），落盘名 `uuid4().hex + ext`。
+- 上传白名单 = `TEXT_EXTRACTORS.keys()`（`.docx` / `.pdf`），落盘名 `uuid4().hex + ext`。**阶段 4 起有两份 `TEXT_EXTRACTORS`**：`api/v1/process.py:63` 是批改/处理链路（落盘 + 处理），`services/spec_storage.py:` 是规范库入库链路（只切块存表，不落盘）。加格式时两处都要改，否则规范库会出现"上传得了，规范进不去"或反过来。
 - 认证：直接用 bcrypt，**不要引 passlib**（1.7.4 与 bcrypt 4.1+ 不兼容），密码截 72 字节；JWT HS256，`sub` 是字符串化 user_id；无 `/auth/me`、无刷新 token。
 - 下载中文文件名必须 RFC 5987：`filename*=UTF-8''{quote(...)}`（`process.py:324`）。
 - diff 用 `SequenceMatcher(autojunk=False)`——**关 autojunk 对中文是必须的**，否则"的/是/在"被当噪声导致结果不准（`server/services/diff.py:30`）。
@@ -166,6 +171,17 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - 假 client 在扇出下**必须按请求内容路由**（见 `tests/test_grading_graph.py` 的 `_RouteClient`）：按脚本顺序吐响应会把 A 块的答复发给 B 块，测试通过只是在测运气。
 - `checkpoints/` 已 gitignore、只增不自缩，属定期清理项；`interrupt` 人工确认分块方案还没做（要先有 UI）。
 
+### 3.11 PPT 流水线（阶段 5 · LangGraph 多节点 + 批评循环）
+
+- **`build_pptx(outline, *, image_refs=None, template_path=None)` 三参签名是 §9.12.2.C 硬约束**——图片轮启用时只换 image_refs 实参、不改外部接口。**不要"顺手"删 image_refs 形参**或者改成 Optional[List[Image]]，那样下次接图片提取又要重新拆 builder。
+- **`render_pptx_to_images(pptx_bytes, slide_count) -> list[bytes]` 是 s5.4 的双后端派发点**。`settings.ppt_render_backend`：`stub`（默认，1×1 占位 PNG）/ `soffice`（WSL LibreOffice 真渲染，本机 .env 已启用）。换实现只改 `_render_via_soffice` 函数体，graphs/ppt_graph.py 不动、单测的 stub client 不动。**Windows↔WSL 文件交换必须走 `/mnt/<盘>` NTFS 挂载，禁用 `\\wsl.localhost` UNC**（本机两个 WSL 视图互相看不见，见 SPEC §9.13 运行约定 2）。
+- **批评循环 `max_rounds` 默认 2、硬上限 5**。超过硬上限要 logger.warning 后钳到 5，绝不静悄悄改。语义是"批评 LLM 调用次数"，不是"修订次数"——pass 早停时实际只跑了 1 次。
+- **VLM 提供商通过 `resolve_provider(user, None, "vision")` 找**，**不接受 `provider_id` 直传**。这是 §3.3 的 capability 路由约束在 s5.6 的延伸：批评和大纲可能用不同厂商，硬绑 provider_id 会让"换 VLM 不换 LLM"做不出来。
+- **`llm_calls.purpose` 阶段 5 新增 4 个取值**：`outline` / `outline_degraded` / `critic` / `critic_degraded`。加新外呼点（比如未来 s5.4 加图像质量评估）要扩这张集合 + 评测台分组。
+- **critic 调用的 messages 文本里必须含 `[critic-thread:<id>]` 标记**，mock VLM 端按它计数（`test_vlm_server._calls_per_thread`）。真实 VLM 不看这串，但 e2e 退出条件全靠它。thread_id 用闭包传进 `_build_graph`，**不要塞 state**——state 进 checkpoint 后会因 round_count 一起涨，多一帧不变字段没意义。
+- **`parse_outline_output` / `parse_critique` 阶梯降级不许抛**。和 §3.7 批改结构化一样：用户的文档必须拿到一个结果。critic 解析失败一律归 needs_revision + degraded=True，**绝不返回 pass**——把"没听清"当"通过了"是交付污染。
+- **没有 checkpointer**：s5.4 stub 渲染阶段批评循环跑一次也就几毛；接真渲染（耗时秒级 + 多 VLM 往返）之后再考虑挂 `AsyncPostgresSaver`。`thread_id` 已预留，调用接口不变。
+
 ## 4. 前端不可违反的约定
 
 - **token 双写**：登录成功同时写 Pinia store 和 `localStorage`；axios 拦截器只读 `localStorage`（在 API 层拿不到 store）。key 常量集中在 `client/src/api/client.ts`（`fileagent_token` / `fileagent_username`），别处不要硬编码。- 401 处理要排除 `/auth/login`（那是密码错误），用 `window.location.replace` 带 `redirect` 参数（拦截器层拿不到 router 实例）。
@@ -185,19 +201,11 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 ## 5. 数据库变更
 
 **没有 Alembic**。启动跑 `Base.metadata.create_all()`，它**只建新表、绝不 ALTER 已有表**。
-改列/加约束要写一次性幂等迁移脚本，范例 `server/migrate_add_provider_user_id.py`、`server/migrate_add_provider_capabilities.py`（先 `SHOW COLUMNS` 判存在再动；前者回填目标用户名硬编码 `LYF`，已执行过）。
+改列/加约束要写一次性幂等迁移脚本（Postgres 方言：先查 `information_schema.columns` 判存在，再 `ALTER TABLE`）。
 新增 ORM 类必须在 `server/models/__init__.py` 里 import，否则 `create_all()` 发现不了这张表。
 
-⚠ **"新库"和"本机老库"的结构已经不一样了**（2026-11-14 实测 `SHOW COLUMNS` + `information_schema.REFERENTIAL_CONSTRAINTS`），排查外键类问题前先认清在哪套库上：
-
-| 项 | ORM / SPEC 声明 | 本机老库实际 |
-|---|---|---|
-| `tasks.provider_id` / `operation_logs.task_id` 删除规则 | `ON DELETE SET NULL` | **NO ACTION** |
-| `operation_logs.status` | `nullable=False` | **NULL 允许**，default `pending` |
-| `original_content` / `processed_content` | ~~`Text`~~ 已改 `with_variant(LONGTEXT, "mysql")` | **LONGTEXT**（与新声明一致） |
-| `model_providers.capabilities`、整张 `llm_calls` | — | 已按 ORM 建好，规则正确 |
-
-根因就是 `create_all()` 不 ALTER：这几张表早期按 SPEC §6 手工建，后来的修复只动了 ORM。**要对齐老库得单独写重建外键的迁移脚本，属改表结构操作，做前先问用户。**
+⚠ **历史包袱（已了结）**：MySQL 时代本机老库是早期手工建表，与 ORM 声明长期漂移（外键规则 NO ACTION vs SET NULL、status 允许 NULL、TEXT vs LONGTEXT 不一致），§3.2 和 s2 修复都按这套假设写过。阶段 4（2026-11-16）一次性把业务表全量迁到 Postgres，**新库 `create_all()` 一次建齐，外键规则与 ORM 声明逐字匹配**，老库 vs 新库差异消失。`server/migrate_add_provider_*.py` 等三个 MySQL 方言脚本已废弃（语法 `SHOW COLUMNS` 在 PG 上跑不了，新库也不需要——它们只是给老 MySQL 库做幂等 ALTER 用的）。
+**未来再要改列**：写 Postgres 方言的一次性脚本（先查 `information_schema.columns` 再 ALTER），或者直接重 `create_all()`（如果可丢数据）。
 
 ## 6. 注释与代码风格
 
@@ -213,26 +221,31 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 
 当前路线（阶段 0–5，含为什么这么排）在 SPEC §9.2；阶段 0 交付与验证明细在 SPEC §9.3，阶段 1 在 §9.4，阶段 1.5（PDF 输入 + 去 Word 化）在 §9.5，阶段 2 最小版（评测台 + 基线数字）在 §9.6，阶段 3（长文档分块批改图）在 §9.7，缺陷台账第五轮在 §10，改 bug 前先看这几张表。
 
-门禁基线（均已实测通过）：`uv run pytest -q` → **142 passed**；`uv run ruff check .` → 全绿；`ruff format --check .` → 54 files already formatted；`uv lock --check` → 一致（**75 包 / .venv 233M**，摘掉 pymupdf 的版面分析死重之前是 84 包 / 337M）；`npm run build` → 通过；`uv run python test_e2e.py` → 33/33；`uv run python test_e2e_structural.py` → **52/52**（第 10 节要 `LONGDOC_CHUNK_CHARS=60`）。
+门禁基线（均已实测通过，2026-11-17 阶段 5 s5.4 真渲染收尾后）：`uv run pytest -q` → **189 passed**（原 142，23 项合并 + 阶段 4 +8 + 阶段 5 s5.1 +5、s5.2 +13、s5.3 +11、s5.5 +14、s5.6 +8、s5.4 +10）；`uv run ruff check .` → 全绿；`ruff format --check .` → 77 files already formatted；`uv lock --check` → 一致（**83 包**）；`npm run build` → **通过**；`uv run python test_e2e.py` → **31/0**；`LONGDOC_CHUNK_CHARS=60 LLM_TRUST_ENV_PROXY=false uv run python run_backend.py` + 假 LLM 跑 `test_e2e_structural.py` → **52/0**；`LLM_TRUST_ENV_PROXY=false uv run python run_backend.py` + 假 LLM 19000 + 假 VLM 19001 跑 `test_e2e_ppt.py` → **28/0**（本机 .env 设了 `PPT_RENDER_BACKEND=soffice`，这 28 项是**真渲染**下跑过的）。**e2e 必须走 `run_backend.py`**，详见 §2 那条 ⚠。
 
 
-- **`server/test_e2e.py` 是仓库自带的端到端冒烟脚本，不是遗留物，别删**：需后端已在 8000 运行、连真实 MySQL。它会注册 `tester_*` / `other_*` 两个临时账号，造 1 条日志和 1 个上传文件；脚本自身只删 task/provider，**账号、日志、落盘文件、以及新增的 `llm_calls` 行要跑完手动清**。第 7 节现在真走重试路径（连不上假 provider → 重试 3 次 → failed），第 10 节直接改库把日志置为 done 来验证下载，都属预期行为。
-- **`server/test_e2e_structural.py` + `test_llm_server.py` 是阶段 1 新增的结构化端到端**，同样别删：需后端 + 假 LLM 两个进程都在跑，全程零真实 token。mock 端点**刻意不支持 `response_format`**（回 400）来如实模拟国产兼容端点并逼出 `chat_json` 的降级路径，所以 LLM 日志里出现的 `400 Bad Request`（每次 `chat_json` 两条：`json_schema` 和 `json_object` 各一档）是预期行为不是故障。第 8 节是阶段 1.5 加的 **PDF 输入链路**：用 pymupdf 现场合成"每视觉行一个 block"的中文 PDF，断言提取结果与 docx **逐字相等**、定位成功、下载名换成 `.docx`——改提取器必跑它。它注册 `e2e_s_*` 账号，跑完清理方式和上面一样。
-- 单测**不连 MySQL 也不出网**：HTTP 走假 client（替 `services.llm.get_client`），provider 路由走内存 SQLite。所以 `pytest` 绿不代表能连上数据库，端到端才是那一层的验证。加测试请保持这个边界，也别引入 `pytest-asyncio`——现有测试直接 `asyncio.run()` 就够。
+- **`server/test_e2e.py` 是仓库自带的端到端冒烟脚本，不是遗留物，别删**：需后端已在 8000 运行、连真实 Postgres。它会注册 `tester_*` / `other_*` 两个临时账号，造 1 条日志和 1 个上传文件；**跑完自动清理 DB 记录**（llm_calls → logs → tasks → providers → users），落盘文件因 UUID 存储名无法精确定位，偶尔手工清。第 7 节现在真走重试路径（连不上假 provider → 重试 3 次 → failed），第 10 节直接改库把日志置为 done 来验证下载，都属预期行为。
+- **`server/test_e2e_structural.py` + `test_llm_server.py` 是阶段 1 新增的结构化端到端**，同样别删：需后端 + 假 LLM 两个进程都在跑，全程零真实 token。mock 端点**刻意不支持 `response_format`**（回 400）来如实模拟国产兼容端点并逼出 `chat_json` 的降级路径，所以 LLM 日志里出现的 `400 Bad Request`（每次 `chat_json` 两条：`json_schema` 和 `json_object` 各一档）是预期行为不是故障。第 8 节是阶段 1.5 加的 **PDF 输入链路**：用 pymupdf 现场合成"每视觉行一个 block"的中文 PDF，断言提取结果与 docx **逐字相等**、定位成功、下载名换成 `.docx`——改提取器必跑它。它注册 `e2e_s_*` 账号，**跑完同样自动清理 DB + checkpoints/**。
+- **`server/test_e2e_ppt.py` + `test_vlm_server.py` 是阶段 5 新增的 PPT 端到端**：需后端 + 假 LLM 19000 + 假 VLM 19001 **三进程**都在跑，28 项断言覆盖 plan → assemble → render → critique(needs_revision) → revise → assemble → critique(pass) → 下载 .pptx → python-pptx 重读页数 + llm_calls 归因（outline 行归 text provider、critic 行归 vision provider）。假 VLM 按 prompt 里的 `[critic-thread:...]` 标记计数，`MOCK_VLM_STUB_ROUNDS` 环境变量控退出轮次（默认 1，所以 e2e 第一次挑刺第二次必 pass），`/v1/_mock/reset` 在脚本开头清空计数避免跨用例污染。它注册 `e2e_p_*` 账号，跑完自动清理 DB。
+- 单测**不连 Postgres 也不出网**：HTTP 走假 client（替 `services.llm.get_client`），provider 路由走内存 SQLite。所以 `pytest` 绿不代表能连上数据库，端到端才是那一层的验证。加测试请保持这个边界，也别引入 `pytest-asyncio`——现有测试直接 `asyncio.run()` 就够。
 - `uploads/`、`outputs/`、`.env`、各类缓存已 ignore；`.env.example` 靠 `.gitignore` 里的 `!.env.example` 例外入库。
 - SPEC §11 示例写 `JWT_EXPIRE_HOURS=2`，本机 `.env` 实际是 24；`.env` 不入库，以本机为准。
-- 未做：限流、api_key 字段级加密、Alembic、Docker / 多 worker、表格提取（docx 表格和 PDF 表格都不进正文）、扫描件 OCR、加密 PDF 解密、老库外键规则对齐、成本价格表（计量只存 token 不算钱）、问题清单写进交付 docx。阶段 3 未做：`interrupt` 人工确认分块方案（要先有 UI）、长文摘要的两段式（逐块摘要 + 整篇汇总）、`checkpoints/` 体积治理与 TTL、多 worker 下的 Postgres saver/store。评测台的下一步：真实文档夹具、第二厂商当裁判、同夹具跑重复轮次（单轮会漂）、把 `format_tier` 落进 `llm_calls`（改表结构，做前先问）。
+- 未做：限流、api_key 字段级加密、Alembic、Docker / 多 worker、表格提取（docx 表格和 PDF 表格都不进正文）、扫描件 OCR、加密 PDF 解密、成本价格表（计量只存 token 不算钱）、问题清单写进交付 docx。阶段 3 未做：`interrupt` 人工确认分块方案（要先有 UI）、长文摘要的两段式（逐块摘要 + 整篇汇总）、`checkpoints/` 体积治理与 TTL。评测台的下一步：真实文档夹具、第二厂商当裁判、同夹具跑重复轮次（单轮会漂）、把 `format_tier` 落进 `llm_calls`（改表结构，做前先问）。
+- **路线 2026-11-16 重排（见 SPEC §9.2 与 §9.10）**：阶段 4 = Postgres 基建迁移。**业务表已于 2026-11-16 当天迁完**（驱动、模型、配置全到位），剩余项 = LangGraph saver 从 SQLite 迁到 AsyncPostgresSaver、`spec_docs` / `spec_chunks` 两张新表，**不做检索**；阶段 5 = PDF→PPT；阶段 6 = 本地 embedding + pgvector 检索 + prompt 注入。**`老库外键规则对齐` 这一项随 MySQL 退役消失**——新库 `create_all()` 一次建齐，外键规则与 ORM 声明逐字一致（实测 `pg_constraint.confdeltype` 8 条全对）。
+- **管理员 + 默认模型授权**（部署给别人时新用户没 provider 的痛点）：方案已分析、工作量已估（约 720 行 / 1–2 天），**不排进阶段 4–6**，做完阶段 5 再回头评估。详见 SPEC §9.11。
+- **阶段 5 PDF→PPT**：6 项决策已敲定（VLM 走 mock 起步、OCR / 图片 / 真云端 VLM 是显式扩展口子）；`task.output_format` 列扩 + `services/pptx_builder.py` 接 `image_refs=None`、`services/pdf.py:extract_text_from_pdf(fallback_to_ocr=False)`——这两个签名是"留口子"的硬约束，未来切真实现不能改外部接口。完整计划见 SPEC §9.12。
 - 真机跑过的一手结论（2026-11-15，qwen3.7-flash + 合成中文 PDF）：结构化链路 OK（`degraded=False`、4 条 的/地/得 全部精确定位）。但该端点回来的 `revised_text` 与原文一字不差——意见对、修订没落地。这是 prompt 产出质量，不是提取或解析缺陷，正属阶段 2 评测台要量化的范围，别在提取层"顺手改 prompt"掩盖它。
 
-## 8. 两份副本，手动同步
+## 8. 两份副本（**2026-11-16 起不再同步**）
 
-`D:\Projects\demo\FileAgent` 是**仓库外的独立交付副本**（无 `.git`），给不熟 Python 的开发者部署用：
+`D:\Projects\demo\FileAgent` 是仓库外的独立交付副本（无 `.git`），原本给"不熟 Python 的开发者能直接部署"用，包含 `README.md` / `DEPLOY.md` / `deploy.ps1` / `requirements.txt`、注释按"去 AI 味"重写、剥掉 Java 对比块。
 
-- 它有 `README.md` / `DEPLOY.md` / `deploy.ps1` / `.env.example` / `requirements.txt`，**没有 SPEC.md**。
-- 它的注释已按"去 AI 味"重写，**剥掉了 Java 对比块**；主仓库保留。
-- 两边业务逻辑应保持一致，但**没有任何自动同步**：主仓库改了逻辑要手动同步过去（反之亦然），注释风格各自保留。
-- ⚠ **pip 侧表达不了这个 override**：主仓库靠 `pyproject.toml` 的 `[tool.uv] override-dependencies` 摘掉 pymupdf 的版面分析死重，demo 副本的 `requirements.txt` 用 pip 装 `pymupdf` 会把 onnxruntime + numpy 一起拖回来（多约 100M）。要在 demo 侧也省掉，只能写 `--no-deps` 的手工装法或者接受体积差异 —— 属交付决定，做前先问用户。
-- ⚠ **demo 副本目前落后主仓库四轮（阶段 0 + 1 + 1.5 + 3）**，实测确认它仍是老版：`services/llm.py` 只有 `call_llm`，没有 `models/llm_call.py`、没有 `capabilities`、没有 `structured_output`、没有 `services/pdf.py`、没有 `services/chunking.py` / `graphs/`。同步时要一并带过去：新版 `services/llm.py`、`services/grading.py`、`services/pdf.py`、`services/chunking.py`、`graphs/__init__.py` + `graphs/grading_graph.py`、`schemas/grading.py`、`models/llm_call.py`、两个 migrate 脚本、`test_llm_server.py` 与 `test_e2e_structural.py`、`.env.example` 的新配置项（6 个 LLM/日志 + 3 个分块），以及前端 provider 能力多选、Home.vue 问题清单卡片、上传区 `.pdf` 白名单与文案。demo 侧 `pyproject.toml` 已是 `fileagent-server`，**`requirements.txt` 必须补 `pymupdf` + `langgraph` + `langgraph-checkpoint-sqlite`**（阶段 1.5 与 3 的运行时依赖，漏 pymupdf 则 PDF 上传 500，漏 langgraph 则长文档批改 500）；`.gitignore` 里没有 `.env.example` 之外还要留 `checkpoints/`。注释仍按 demo 的去 AI 味风格重写（不带 Java 对比块）。要不要同步、同步到哪一轮，属于交付决定，先问用户。
+⚠ **用户 2026-11-16 决定不再投入精力同步 demo 副本**。现状：
+- demo 落后主仓库 ≥ 5 轮（阶段 0/1/1.5/3/4 全套）；
+- 已**不再以"补回逻辑"为目标**——下次有人问起 demo，回答"那是历史快照，最新代码看主仓库"；
+- demo 目录本身**不删**，作为学习项目早期交付形态的存档；如果哪天真要给外人用，重写比追同步便宜。
+
+这一段保留只为让下一个会话不被旧的"demo 落后四轮要不要同步"问题误导。
 
 ## 9. 提交
 

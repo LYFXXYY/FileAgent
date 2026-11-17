@@ -12,7 +12,7 @@ import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'elem
 import { extractErrorMessage } from '@/api/client'
 import { providerApi } from '@/api/providers'
 import { taskApi } from '@/api/tasks'
-import type { Provider, Task, TaskCreatePayload } from '@/api/types'
+import type { OutputFormat, Provider, Task, TaskCreatePayload } from '@/api/types'
 
 /**
  * 预置的常用任务模板（纯前端静态常量，不会写入数据库）
@@ -93,6 +93,7 @@ const form = reactive<TaskCreatePayload>({
   prompt_template: '',
   is_grading: false,
   provider_id: null,
+  output_format: 'docx',
 })
 
 const rules: FormRules = {
@@ -128,6 +129,7 @@ function openCreate() {
     prompt_template: '',
     is_grading: false,
     provider_id: null,
+    output_format: 'docx' as OutputFormat,
   })
   // 新建时清空「快速模板」选择，并让任务说明回到只读状态
   selectedTemplate.value = null
@@ -144,6 +146,7 @@ function openEdit(row: Task) {
     prompt_template: row.prompt_template,
     is_grading: row.is_grading,
     provider_id: row.provider_id,
+    output_format: row.output_format,
   })
   // 编辑时同样清空「快速模板」高亮，避免误触模板后覆盖已有内容
   selectedTemplate.value = null
@@ -272,6 +275,14 @@ function providerName(id: number | null): string {
             <span v-else class="text-muted">否</span>
           </template>
         </el-table-column>
+        <el-table-column label="结果格式" width="100" align="center">
+          <template #default="{ row }">
+            <el-tag v-if="row.output_format === 'pptx'" type="success" size="small" effect="plain">
+              .pptx
+            </el-tag>
+            <span v-else class="text-muted">.docx</span>
+          </template>
+        </el-table-column>
         <el-table-column label="使用模型" width="140">
           <template #default="{ row }">
             <span class="model-name">{{ providerName(row.provider_id) }}</span>
@@ -279,14 +290,14 @@ function providerName(id: number | null): string {
         </el-table-column>
         <el-table-column label="操作" width="140" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" class="action-btn" @click="openEdit(row)">
+            <el-button link type="primary" class="action-btn" @click="openEdit(row as Task)">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="margin-right: 2px;">
                 <path d="M11 4H4C3.46957 4 2.96086 4.21071 2.58579 4.58579C2.21071 4.96086 2 5.46957 2 6V20C2 20.5304 2.21071 21.0391 2.58579 21.4142C2.96086 21.7893 3.46957 22 4 22H18C18.5304 22 19.0391 21.7893 19.4142 21.4142C19.7893 21.0391 20 20.5304 20 20V13" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                 <path d="M18.5 2.50001C18.8978 2.10219 19.4374 1.87869 20 1.87869C20.5626 1.87869 21.1022 2.10219 21.5 2.50001C21.8978 2.89784 22.1213 3.43739 22.1213 4.00001C22.1213 4.56262 21.8978 5.10219 21.5 5.50001L12 15L8 16L9 12L18.5 2.50001Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
               </svg>
               编辑
             </el-button>
-            <el-button link type="danger" class="action-btn delete-btn" @click="remove(row)">
+            <el-button link type="danger" class="action-btn delete-btn" @click="remove(row as Task)">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="margin-right: 2px;">
                 <path d="M3 6H5H21" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                 <path d="M8 6V4C8 3.46957 8.21071 2.96086 8.58579 2.58579C8.96086 2.21071 9.46957 2 10 2H14C14.5304 2 15.0391 2.21071 15.4142 2.58579C15.7893 2.96086 16 3.46957 16 4V6M19 6V20C19 20.5304 18.7893 21.0391 18.4142 21.4142C18.0391 21.7893 17.5304 22 17 22H7C6.46957 22 5.96086 21.7893 5.58579 21.4142C5.21071 21.0391 5 20.5304 5 20V6H19Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -373,6 +384,15 @@ function providerName(id: number | null): string {
           <el-switch v-model="form.is_grading" />
           <span class="text-muted" style="margin-left: 8px">
             开启后下载结果会用红字标注 diff
+          </span>
+        </el-form-item>
+        <el-form-item label="结果格式">
+          <el-radio-group v-model="form.output_format">
+            <el-radio value="docx">Word (.docx)</el-radio>
+            <el-radio value="pptx">PPT (.pptx)</el-radio>
+          </el-radio-group>
+          <span class="text-muted" style="margin-left: 8px">
+            PPT 走阶段 5 的"大纲 → 拼装 → 视觉批评"图，目前仅文字型 PDF 输入
           </span>
         </el-form-item>
       </el-form>

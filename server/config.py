@@ -27,10 +27,10 @@ class Settings(BaseSettings):
     3. 缺失必填字段时启动直接报错（fail-fast 原则）
     """
 
-    # ---------- MySQL 连接 ----------
-    # SQLAlchemy + PyMySQL 的连接字符串格式：
-    #   mysql+pymysql://user:password@host:port/database
-    # 类似 JDBC 的 jdbc:mysql://user:pass@host:port/db
+    # ---------- Postgres 连接 ----------
+    # SQLAlchemy + psycopg2 的连接字符串格式：
+    #   postgresql+psycopg2://user:password@host:port/database
+    # 阶段 4 起库换成 Postgres（pgvector 镜像，宿主机端口 5434）
     database_url: str
 
     # ---------- JWT 认证 ----------
@@ -69,9 +69,24 @@ class Settings(BaseSettings):
     longdoc_chunk_chars: int = 6000
     # 总开关。关掉后长文档仍单发，用于和分块路径做效果对比（评测台 A/B）
     longdoc_enabled: bool = True
-    # LangGraph 检查点文件（相对 server/，也可写绝对路径）。
-    # 同一 log_id 重跑时已完成的块不再重复计费；文件会一直长，属运维清理项
-    checkpoint_path: str = "checkpoints/grading.sqlite3"
+    # ⚠ 阶段 4 起分块批改的检查点和按块缓存都落 Postgres（与业务表同库），不再有
+    # SQLite 文件配置项。原 `CHECKPOINT_PATH` 字段已撤；老 .env 里残留这行不影响。
+
+    # ---------- 规范文档入库（阶段 4）----------
+    # 规范库每块字符预算，与批改的 LONGDOC_CHUNK_CHARS 解耦：
+    # - 批改链路：块越大 LLM 上下文越完整、改得越准；
+    # - 检索链路（阶段 6）：块越小命中越精准，但 top-k 拼起来也更容易超过 prompt 上限。
+    # 默认 2000 字是个折中档位，等阶段 6 真做检索调参时再回来看。
+    spec_chunk_chars: int = 2000
+
+    # ---------- PPT 渲染（阶段 5 s5.4）----------
+    # 'stub'（默认）= 1×1 占位 PNG，便携、快、单测/e2e 用；
+    # 'soffice' = 经 WSL LibreOffice 真渲染（需 WSL2 + libreoffice-impress，见 pptx_renderer）
+    ppt_render_backend: str = "stub"
+    # 真渲染的出图 DPI。72 太糊、200 太大，100 是给 VLM 看图和留审计之间的折中
+    ppt_render_dpi: int = 100
+    # soffice 单次转换超时（秒）。冷启动 + 中文字体加载实测 3–8s/份，留足余量
+    ppt_render_timeout: float = 90.0
 
     # ---------- 日志 ----------
     # root logger 级别。排查重试/并发问题时调成 DEBUG

@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import io
 import logging
 import os
 import uuid
@@ -28,12 +29,14 @@ from sqlalchemy.orm import Session
 from config import get_settings
 from database import SessionLocal, get_db
 from graphs.grading_graph import grade_long_document, read_progress
+from graphs.ppt_graph import run_ppt_pipeline
 from middleware.auth import get_current_user
 from models.operation_log import LogStatus, OperationLog
 from models.provider import ModelProvider
 from models.task import Task
 from models.user import User
 from schemas.grading import GRADING_JSON_SCHEMA, GradingIssue, GradingResult
+from schemas.ppt_outline import PptOutline, deserialize_outline, serialize_outline
 from schemas.process import ChunkProgressResponse, ProcessResponse, UploadResponse
 from services.grading import (
     build_messages,
@@ -51,6 +54,7 @@ from services.llm import (
     resolve_provider,
 )
 from services.pdf import PdfError, extract_text_from_pdf
+from services.pptx_builder import PptxError, build_pptx
 from services.word import create_diff_docx, create_plain_docx, extract_text_from_docx
 
 logger = logging.getLogger("fileagent.process")
@@ -228,15 +232,31 @@ async def _run_processing(log_id: int) -> None:
         # 快照成普通值：计量写入要丢线程池，不能跨线程用这个 session 的 ORM 对象
         provider_ref = (provider.id, provider.name)
 
+        # PPT 任务的批评环节需要 vision 提供商。没配也不报错——s5.6 设计允许跳过
+        # 批评直接交付，至少大纲+PPTX 仍然可用
+        critic_provider = None
+        critic_provider_ref: tuple[int, str] | None = None
+        if task.output_format == "pptx":
+            try:
+                critic_provider = resolve_provider(db, log.user_id, None, "vision")
+                critic_provider_ref = (critic_provider.id, critic_provider.name)
+            except LLMError:
+                logger.info("用户 %s 没有 vision 提供商，PPT 批评循环跳过", log.user_id)
+
         try:
             output = await _run_model(
-                task, provider, task.prompt_template, log.original_content or "", log.id
+                task,
+                provider,
+                task.prompt_template,
+                log.original_content or "",
+                log.id,
+                critic_provider=critic_provider,
             )
         except LLMError as e:
             await _meter(
                 log,
                 provider_ref,
-                purpose="grading" if task.is_grading else "chat",
+                purpose=_error_purpose_for(task),
                 error=str(e),
                 attempts=e.attempts,
             )
@@ -244,7 +264,13 @@ async def _run_processing(log_id: int) -> None:
             return
 
         for call in output.calls:
-            await _meter(log, provider_ref, purpose=call.purpose, result=call.result)
+            # 批评外呼归 critic 提供商，其他归文本/大纲提供商
+            ref = (
+                critic_provider_ref
+                if critic_provider_ref and call.purpose.startswith("critic")
+                else provider_ref
+            )
+            await _meter(log, ref, purpose=call.purpose, result=call.result)
 
         log.processed_content = output.revised_text
         log.structured_output = output.structured
@@ -324,6 +350,13 @@ class _ModelOutput:
     calls: tuple[_MeteredCall, ...]
 
 
+def _error_purpose_for(task: Task) -> str:
+    """LLMError 也要按任务种类归类，否则评测台按 purpose 分组时分不清"""
+    if task.output_format == "pptx":
+        return "outline"
+    return "grading" if task.is_grading else "chat"
+
+
 def _should_chunk(original_text: str) -> bool:
     """
     只有批改类才分块（调用方已判过 is_grading），且长到超预算
@@ -335,19 +368,61 @@ def _should_chunk(original_text: str) -> bool:
     return bool(settings.longdoc_enabled) and len(original_text) > budget
 
 
+def _render_outline_as_text(outline: PptOutline) -> str:
+    """
+    s5.2 的过渡产物：把大纲渲染成可读纯文本塞进 processed_content
+
+    真实交付是 s5.3 的 PPTX 二进制。这条文本只是让下载路由在 s5.3 之前不至于空响应，
+    也方便单测断言"至少能看到大纲内容"。
+    """
+    if not outline.slides:
+        return "（大纲为空，未生成任何幻灯片页）"
+    parts = []
+    if outline.title:
+        parts.append(outline.title)
+        parts.append("")
+    for i, slide in enumerate(outline.slides, start=1):
+        parts.append(f"第 {i} 页：{slide.title}")
+        for b in slide.bullets:
+            parts.append(f"  - {b}")
+    if outline.degraded:
+        parts.append("")
+        parts.append("（注意：模型未按大纲契约输出，已退化为按行切页；可在评测台核查）")
+    return "\n".join(parts)
+
+
 async def _run_model(
     task: Task,
     provider: ModelProvider,
     prompt_template: str,
     original_text: str,
     log_id: int,
+    *,
+    critic_provider: ModelProvider | None = None,
 ) -> _ModelOutput:
     """
-    批改任务要结构化清单，普通任务只要一段修订文本
+    三条路径：pptx 走 PPT 流水线（含批评循环）、批改走结构化（含分块）、其他走纯 chat
 
-    结构化失败不改变任务结局：`parse_grading_output` 会退回自由文本，diff 下载照旧，
-    只是没有问题清单可点。把用户的文档判失败从来不是一个好选项。
+    结构化失败不改变任务结局：`parse_grading_output` / `parse_outline_output` 都会
+    退回自由文本，下载照旧，只是少了结构化清单 / 大纲契约。把用户的文档判失败从来不是
+    一个好选项。
+
+    `critic_provider=None` 时 PPT 流水线跳过批评，s5.2 行为保持不变；
+    PPT 调用方传了 critic_provider 才会进入 s5.6 的批评循环。
     """
+    if task.output_format == "pptx":
+        run = await run_ppt_pipeline(
+            original_text,
+            provider,
+            prompt_template,
+            thread_id=f"log-{log_id}",
+            critic_provider=critic_provider,
+        )
+        plain = _render_outline_as_text(run.outline)
+        # 每笔外呼转成 _MeteredCall；purpose 由 PptCall 自带（区分 critic / outline / 降级）
+        calls = tuple(_MeteredCall(c.result, c.purpose) for c in run.calls)
+        return _ModelOutput(plain, serialize_outline(run.outline), calls)
+
     if not task.is_grading:
         result = await chat(
             [{"role": "user", "content": prompt_template.replace("{{content}}", original_text)}],
@@ -456,27 +531,45 @@ async def download(
 
     task = db.query(Task).filter(Task.id == log.task_id).first()
     is_grading = bool(task and task.is_grading)
+    output_format = task.output_format if task and task.output_format else "docx"
 
-    # 结果永远是 .docx，所以文件名取原名去掉扩展再补 .docx——
-    # 直接拼 original_filename 会让 PDF 输出一份叫 "xxx.pdf" 的 docx，下载方打不开
     stem = os.path.splitext(log.original_filename or "文档")[0]
-    if is_grading:
-        buf = create_diff_docx(log.original_content or "", log.processed_content or "")
-        filename = f"批改_{stem}.docx"
+
+    # PPT 任务走 pptx 二进制；structured_output 必须是 ppt_outline 形态才能拼
+    if output_format == "pptx":
+        outline = deserialize_outline(log.structured_output)
+        if outline is None:
+            raise HTTPException(400, "PPT 大纲缺失或不是 ppt_outline 形态，无法拼装")
+        try:
+            buf = io.BytesIO(
+                build_pptx(
+                    outline,
+                    image_refs=None,  # s5.3 文字-only；图片轮启用时这里换成图字典
+                )
+            )
+        except PptxError as e:
+            raise HTTPException(400, f"PPTX 拼装失败：{e}") from e
+        filename = f"演示_{stem}.pptx"
+        media = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
     else:
-        buf = create_plain_docx(log.processed_content or "")
-        filename = f"结果_{stem}.docx"
+        # 结果永远是 .docx，所以文件名取原名去掉扩展再补 .docx——
+        # 直接拼 original_filename 会让 PDF 输出一份叫 "xxx.pdf" 的 docx，下载方打不开
+        if is_grading:
+            buf = create_diff_docx(log.original_content or "", log.processed_content or "")
+            filename = f"批改_{stem}.docx"
+        else:
+            buf = create_plain_docx(log.processed_content or "")
+            filename = f"结果_{stem}.docx"
+        media = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
     # StreamingResponse 直接把 BytesIO 流转发给客户端，不需要落盘
     # 类比 Java 的 ResponseEntity<InputStreamResource> + Content-Disposition
     # 中文文件名要 RFC 5987 编码；filename* 是新版浏览器识别的
     from urllib.parse import quote
 
-    disposition = f"attachment; filename=\"result.docx\"; filename*=UTF-8''{quote(filename)}"
+    disposition = (
+        f"attachment; filename=\"result.{output_format}\"; filename*=UTF-8''{quote(filename)}"
+    )
     headers = {"Content-Disposition": disposition}
 
-    return StreamingResponse(
-        buf,
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers=headers,
-    )
+    return StreamingResponse(buf, media_type=media, headers=headers)

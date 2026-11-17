@@ -727,20 +727,24 @@ Nginx 反代：前端静态文件直接 serve，`/api/` 代理到 `127.0.0.1:800
 18. ✅ **依赖与产物减肥**：pymupdf 死重摘除 + Element Plus 按需引入（见 9.8）
 19. ⬜ 联调 + Docker 部署（推迟到阶段 4 与 Postgres 一起做）
 
-### 9.2 Agent 化演进路线（阶段 0–5）
+### 9.2 Agent 化演进路线（阶段 0–6）
 
-学习目标是 LangGraph、RAG、Agent 调优。路线按**学习性价比**排，不按成就感排：PDF→PPT 是最重的一站，放最后当组装活。
+学习目标是 LangGraph、RAG、Agent 调优。路线按**学习性价比**排，不按成就感排：PDF→PPT 是最重的一站，放最后当组装活。**2026-11-16 用户重新拆分阶段 4/5/6**：原来一锅炖的 RAG 拆成"先建基建（Postgres + 文档入库）"和"后接向量"，中间夹进 PDF→PPT——避免被 embedding 选型卡住交付节奏，也让 LangGraph 图编排练手期紧接阶段 5 复用。
 
 | 阶段 | 内容 | 前置 | 状态 |
 |---|---|---|---|
 | **0** | LLM 传输层地基：多轮 messages、结构化输出三级降级、token/耗时/attempts 计量、分层超时 + 重试白名单、并发闸、provider 能力路由、logging handler | 无 | ✅ **已完成** 2026-11-14 |
 | **1** | 批改输出结构化：自由文本 → 问题清单 JSON（位置/类型/原文/建议/置信度），前端可点击定位标注 | 0 | ✅ **已完成** 2026-11-15 |
 | **1.5** | 输入格式扩到 PDF（提取层与 docx 同构）+ 项目去 Word 化改名。不在原路线里，是用户 2026-11-15 提的需求：后续真有 PDF 需求 | 1 | ✅ **已完成** 2026-11-15 |
-| **2** | 评测台：golden set + rubric + LLM-as-judge + prompt 版本管理 + 回归对比 | 1.5 | 🟡 **最小版已完成** 2026-11-15（合成夹具 + 确定性指标 + `--prompt-file` A/B + 同源自判）。缺：真实文档夹具、第二厂商当裁判、档位落库 |
-| **2.5** | Postgres 迁移：独立 `pgvector/pgvector:pg16` 容器，业务 + LangGraph 检查点 + 向量统一一库 | 2 | ⏭ **并入阶段 4**（用户 2026-11-15 定：阶段 3 用 SQLite 检查点就够，等 RAG 真需要 pgvector 时一次性迁，避免建了又拆） |
-| **3** | LangGraph 首练**长文档分块批改**：fan-out/fan-in + 检查点 + 按块幂等续跑。顺带突破单次上下文上限 | 2 | 🟡 **主体已完成** 2026-11-16（用户改口径：检查点先用 SQLite，Postgres 推到阶段 4）。缺 `interrupt` 人工确认分块方案（要先做 UI） |
-| **4** | RAG 规范库：多文档上传、分块、pgvector 检索，把格式规范条款注入批改 prompt 并带引用溯源 | 3 | ⬜ |
-| **5** | PDF→PPT：把确定性 PDF 几何处理移植成 service，LLM 只接管大纲规划与视觉批评修订循环 | 4 + VLM | ⬜ |
+| **2** | 评测台：golden set + rubric + LLM-as-judge + prompt 版本管理 + 回归对比 | 1.5 | 🟡 **最小版已完成** 2026-11-15（合成夹具 + 确定性指标 + `--prompt-file` A/B + 同源自判）。缺：真实文档夹具、第二厂商当裁判、档位落库、重复轮次 |
+| **3** | LangGraph 首练**长文档分块批改**：fan-out/fan-in + 检查点 + 按块幂等续跑。顺带突破单次上下文上限 | 2 | 🟡 **主体已完成** 2026-11-16。缺 `interrupt` 人工确认分块方案（要先做 UI） |
+| **4** | **Postgres 基建 + 规范文档入库**：业务表全量迁 Postgres（pgvector 镜像，MySQL 退役）、LangGraph 检查点从 SQLite 迁到 Postgres、规范文档上传与分块存表。**不做检索**——把存储和图状态这一层做扎实。 | 3 | ✅ **2026-11-16 全部完成**：业务表 + LangGraph saver/store + spec_docs/spec_chunks + e2e 双跑（31/0 + 52/0） |
+| **5** | PDF→PPT：把确定性 PDF 几何处理移植成 service，LLM 只接管大纲规划与视觉批评修订循环 | 4 + VLM | ✅ **2026-11-17 全部 8 切片交付**：真渲染走 WSL LibreOffice（双后端 stub/soffice），e2e_ppt 28/0，详见 §9.13 |
+| **6** | **向量能力接入**：本地 embedding 模型（RTX 4060 跑 bge-m3 或 bge-large-zh）+ pgvector 检索 + 规范条款注入批改 prompt 并带引用溯源 | 5 | ⬜ |
+
+**为什么 2.5（Postgres）从"并入 4"变成"就是 4 的第一步"**：原计划"等 RAG 真需要 pgvector 时再迁"听起来节省，但把 Postgres 和 RAG 捆一起交付意味着 RAG 任何选型问题（embedding 来源、检索精度）都会拖着 Postgres 落地。拆开后 Postgres 是纯基建活、风险可控；RAG 的向量部分独立成阶段 6，可以慢慢挑模型。
+
+**为什么阶段 6 排在 PDF→PPT 后**：阶段 5 不依赖向量检索（PPT 大纲靠 LLM 自己规划、视觉批评靠 VLM），但**强依赖 LangGraph 图编排**——这正好是阶段 3 的主产出，趁热做。把向量这一层推到 5 之后还有个好处：可以拿阶段 5 真实产生的多文档需求来反推 embedding 选型，而不是空对空猜。
 
 **为什么是这个顺序**：没有结构化输出（阶段 1）就没法自动打分，没有打分（阶段 2）改 prompt 就是瞎调，没有度量就无从判断 LangGraph 到底帮了什么忙。地基先行的代价是前两个阶段"看不出大变化"。
 
@@ -957,7 +961,419 @@ Nginx 反代：前端静态文件直接 serve，`/api/` 代理到 `127.0.0.1:800
 
 **验证到什么程度**：`npm run build` 通过；把 `dist/assets/*.css` 拼起来逐个 grep 32 个用过的 `el-*` 类名，`.el-message*` / `.el-loading-*` / `.el-progress*` / `.el-tabs__*` / `.el-select-dropdown__item` 全部命中；`el-option` / `el-tab-pane` / `el-config-provider` 三个查不到是**类名对不上**（它们的 style 入口引的是父组件 CSS），不是缺样式。**真实浏览器交互仍未走查**（弹窗外观、loading 遮罩、分页中文文案），留给连接器或用户自查。
 
-**门禁**：pytest 142 passed；ruff check / format 全绿；`uv lock --check` 一致（75 包）；`npm run build` 通过。
+**门禁**：pytest 119 passed（原 142，23 项实现细节级断言已合并为行为级）；ruff check / format 全绿；`uv lock --check` 一致（75 包）；`npm run build` 通过。
+
+### 9.9 核心业务动作 → 测试映射
+
+九个核心动作各映射到哪些用例。删用例前先看这张表——覆盖不会消失，只会变成"上线后由用户发现"。
+
+| # | 动作 | 单元 `tests/` | e2e |
+|---|---|---|---|
+| 1 | **文本提取**（docx/PDF → 段落字符串） | `test_text_extract.py`、`test_pdf.py`（26 项） | e2e_structural §4/§8（docx+PDF 同构断言） |
+| 2 | **Prompt 拼装**（模板 + `{{content}}` 替换） | `test_process.py` | e2e §5（触发处理） |
+| 3 | **LLM 调用**（请求/响应/重试/降级/并发闸） | `test_llm.py`（27 项） | e2e §7（预期失败优雅退出）、e2e_structural §5/§6 |
+| 4 | **结构化解析**（JSON → 问题清单） | `test_grading.py`（28 项定位+解析） | e2e_structural §6（type/original/suggestion/confidence） |
+| 5 | **全局定位**（`start`/`end` 偏移映射） | `test_chunking.py`（11 项三条不变式） | e2e_structural §10（全局偏移逐字对得上） |
+| 6 | **落库**（状态流转 + 计量旁路） | `test_process.py`、`test_llm.py` 计量相关 | e2e §8（日志分页）、e2e_structural §9（llm_calls 行） |
+| 7 | **Diff 生成**（红字标注 + 纯净全文） | `test_diff.py`（12 项） | e2e §10（下载 docx 可解析）、e2e_structural §7（含修订+含原文） |
+| 8 | **下载**（RFC 5987 文件名、Content-Type） | `test_process.py` 下载相关 | e2e §10、e2e_structural §8（`批改_e2e.docx`） |
+| 9 | **数据隔离**（user_id 过滤、越权 404） | `test_llm.py` resolve 隔离（4 项） | e2e §5（跨用户 404）、e2e_structural §11（SET NULL 快照保留） |
+
+**明确不建议删的**：`test_chunking.py` 11 项 + `test_grading_graph.py` 10 项。它们锁的三条不变式（块能逐字拼回、偏移成对平移、重跑不重复计费）错了**没有任何用户可见信号**，只会让批注悄悄指到别的句子。
+
+**e2e 的运维摩擦**：两个脚本（85 项断言 / 606 行）需起两个进程 + 真 MySQL + 轮询等待，分钟级。现已加自清理（跑完删自己的账号/日志/计量/任务/提供商/checkpoints），落盘文件因 UUID 存储名无法精确定位，偶尔手工清。
+
+### 9.10 阶段 4 计划：Postgres 基建迁移（2026-11-16 定）
+
+**范围**：MySQL 退役、Postgres 顶上、LangGraph 状态从 SQLite 迁到 Postgres、规范文档入库与分块存表。**不做检索**——检索（向量、关键词、混合）推到阶段 6，等本地 embedding 模型上线一起落。
+
+**为什么不在阶段 4 顺手做检索**：阶段 4 的最大风险是迁库（驱动换、方言换、LangGraph saver 换），检索逻辑（chunker 调参、入库 pipeline、引用溯源）独立成阶段 6 可以让每一步都可单独验证、单独回滚。
+
+#### 9.10.1 决策与边界
+
+| 项 | 决定 |
+|---|---|
+| 镜像 | `pgvector/pgvector:pg16`（含 vector 扩展，阶段 6 直接 `CREATE EXTENSION`） |
+| 宿主机端口 | **5434**（避开 gas-postgres 用的 5432） |
+| 数据持久化 | bind mount 到 `D:\docker\fileagent-postgres`，不放 C 盘 |
+| 用户/库名 | `fileagent` / `file_agent`（与其他项目隔离） |
+| 现有 MySQL 数据 | **不迁**——用户口径：测试数据无所谓。新库起来后用 `reset_user_password.py` 重建账号，老 provider 手工重配 |
+| `migrate_*.py` 脚本 | 废弃。新库 `create_all()` 一次建齐，不再需要幂等迁移 |
+| 检查点存储 | 阶段 3 的 `SqliteSaver` + `SqliteStore` 换 `AsyncPostgresSaver` + `PostgresStore`，**两个都迁** |
+| 表结构对齐 | 老库 vs 新库的外键差异（AGENTS §5）一并消失，全部按 ORM 声明走 |
+
+#### 9.10.2 代码改动清单（按文件）
+
+| 文件 | 改动 | 状态 |
+|---|---|---|
+| `server/pyproject.toml` | 删 `pymysql`，加 `psycopg2-binary` + `langgraph-checkpoint-postgres` + `psycopg[binary,pool]` | ✅ 2026-11-16 |
+| `server/.env.example` | `DATABASE_URL` 串换 `postgresql+psycopg2://...@localhost:5434/file_agent`；`CHECKPOINT_PATH` 字段已撤 | ✅ 2026-11-16 |
+| `server/config.py` | 注释里 `mysql+pymysql://...` 改 Postgres；`checkpoint_path` 字段已撤 | ✅ 2026-11-16 |
+| `server/models/operation_log.py` | 删 `LONGTEXT` 与 `with_variant`，`DocumentText = Text()` | ✅ 2026-11-16 |
+| `server/migrate_*.py` 三个 | 老 MySQL 方言脚本，已从 §2 命令清单撤下；文件保留作历史记录 | ⚠ 留观察，阶段 4 收尾前再决定删否 |
+| `server/services/llm.py:record_llm_call` | 不需要改（SQLAlchemy 抽象掉方言） | ✅ 无改动 |
+| `server/main.py` 顶 | **加 Windows SelectorEventLoop 切换**——psycopg3 异步模式 + 默认 ProactorEventLoop 直接卡死 | ✅ 2026-11-16 |
+| `server/graphs/grading_graph.py` | `SqliteSaver` → `AsyncPostgresSaver`，`SqliteStore` → `AsyncPostgresStore`；构造走自定义 `_open_pg_conn`（psycopg.AsyncConnection + connect_timeout=5），绕开 `from_conn_string` 不带 timeout 的坑；`_build_graph` 内 store 调用全改 `await store.aget / aput`；生产入口 `grade_long_document(thread_id=...)`，不再有 `checkpoint_path` 参数；测试入口拆分出 `_grade_with_backend(checkpointer, store)` 让单测注入 SQLite | ✅ 2026-11-16 |
+| `server/checkpoints/` 老 SQLite 文件 | 阶段 3 留下的两个 .sqlite3 已无引用，目录可清空 | ✅ 2026-11-16（目录已空） |
+| `server/test_e2e_structural.py` docstring | MySQL → Postgres | ✅ 2026-11-16 |
+| `server/tests/test_grading_graph.py` | 改成注入 AsyncSqliteSaver + AsyncSqliteStore，走 `_grade_with_backend`；新增 `derive_pg_dsn` 单测一项 | ✅ 2026-11-16 |
+| `server/api/v1/process.py:grade_long_document` 调用点 | 不再传 `checkpoint_path`（生产 Postgres 自动） | ✅ 2026-11-16 |
+| `server/run_backend.py` **新增** | 后端启动入口。**Windows 硬约束**：uvicorn 在 win32 非子进程模式硬编码 ProactorEventLoop（`uvicorn/loops/asyncio.py:9`），完全无视 `asyncio.set_event_loop_policy`。本文件先切 policy 再 monkey-patch `uvicorn.loops.asyncio.asyncio_loop_factory`，确保起的是 Selector。`uv run uvicorn main:app` 在 Windows 上**不能直接用**——长文档分块第 10 节必炸 | ✅ 2026-11-16 |
+| `server/test_e2e.py` | httpx.Client 加 `trust_env=False`（与 structural 一致，避开 NO_PROXY 含 `[::1]` 让 httpx 解析端口炸的坑） | ✅ 2026-11-16 |
+
+**Postgres 库里 LangGraph 表实测**：`checkpoints` / `checkpoint_blobs` / `checkpoint_writes` / `checkpoint_migrations` / `store` / `store_migrations`，由 saver/store `setup()` 自动建。
+
+#### 9.10.3 新增表（阶段 4 唯一新增 schema，**已落 2026-11-16**）
+
+```python
+# server/models/spec_doc.py
+class SpecDoc(Base):
+    __tablename__ = "spec_docs"
+    id: Mapped[int]                    # PK
+    user_id: Mapped[int]               # FK users.id, ondelete CASCADE，数据隔离
+    title: Mapped[str]                 # 用户视角的标签，留空时回退到文件名去扩展名
+    source_format: Mapped[str]         # '.docx' | '.pdf'
+    char_count: Mapped[int]            # 列表页只读这个标量，不拉 chunks
+    chunk_count: Mapped[int]
+    uploaded_at                        # 时间戳
+
+class SpecChunk(Base):
+    __tablename__ = "spec_chunks"
+    id: Mapped[int]                    # PK
+    doc_id: Mapped[int]                # FK spec_docs.id, ON DELETE CASCADE（实测 pg_constraint 已建对）
+    seq: Mapped[int]                   # 文档内块序号，0 起
+    text: Mapped[str]                  # Postgres TEXT
+    start: Mapped[int]                 # 全局偏移（与 services/chunking.Chunk 一致）
+    end: Mapped[int]
+    # 阶段 6 再加 embedding: Mapped[list[float]] = mapped_column(Vector(1024))
+    # 阶段 6 同时给 text 加 tsvector 生成列 + GIN 索引（中文需 pg_jieba 或 zhparser）
+```
+
+切块复用 `services/chunking.split_document`，预算由新加配置项 `spec_chunk_chars`（默认 2000）控制，与批改链路的 `longdoc_chunk_chars=6000` 解耦——批改块大省钱、检索块小精度好，是两种不同的最优。
+
+#### 9.10.4 验证里程碑
+
+阶段 4 完成的标准不是"容器跑起来"，是下面全过：
+
+1. ✅ `docker exec fileagent-postgres psql ... -c "\dt"` 看到 13 张表（业务 5 + 4 checkpoint + 2 store + 2 spec）
+2. ✅ 后端起得来、`test_e2e.py` **31/0**（原 33 - 2 项 API DELETE 断言，被自清理接管）、`test_e2e_structural.py` **52/0**（含第 10 节长文档分块走通，证明 Postgres saver 接好了）
+3. ✅ `pytest` **127 passed**（原 119 + 7 项 spec_storage 单测 + 1 阶段 A 已含的 DSN 派生）；单测仍走内存 SQLite
+4. ✅ `checkpoints/` 目录已空——状态全在 Postgres 里
+5. ✅ AGENTS.md §1 表格 DB 列改 Postgres、§5 整段"没有 Alembic + create_all 不 ALTER"那套叙述重写
+
+**额外发现**：uvicorn 在 Windows 非子进程模式下硬编码 ProactorEventLoop（`uvicorn/loops/asyncio.py:9`），完全忽略 `asyncio.set_event_loop_policy`。所以**生产路径不能直接 `uv run uvicorn main:app`**——必须用 `server/run_backend.py` 入口（先切 policy 再 monkey-patch uvicorn 的 `asyncio_loop_factory`）。这条已写进 AGENTS §2。
+
+#### 9.10.5 阶段 4 显式不做的事
+
+- ❌ 任何检索（关键词、向量、混合都到阶段 6）
+- ❌ prompt 注入规范条款（依赖检索）
+- ❌ Alembic 引入（迁移仍按 §5 老约定：幂等脚本 + 先 SHOW COLUMNS 判存在）
+- ❌ 多 worker（reaper 那条单 worker 假设不变）
+- ❌ 老 MySQL 数据迁过来
+
+### 9.11 管理员 + 默认模型授权（**规划中，未排进阶段 4–6**）
+
+2026-11-16 用户提出。场景：项目部署给别人注册时，新用户没配 provider → 看不到任何模型 → 处理功能直接禁用。要让 admin 控制谁能用"官方默认 provider"，其余人只能用私有 provider 或啥都用不了。
+
+**这条不阻塞阶段 5/6**，是产品形态从"自己用 / 同学之间小范围"升级到"对外的 SaaS 雏形"时才做的功能。做完阶段 5 再回头评估要不要做。
+
+#### 9.11.1 设计选择
+
+**简单版（推荐起点）**：users 加 1 列 `role` + 1 列 `can_use_default`。所有公开 provider 视为一组，授权是"整组开关"。
+
+```sql
+ALTER TABLE users ADD COLUMN role VARCHAR(10) NOT NULL DEFAULT 'user';        -- 'user' | 'admin'
+ALTER TABLE users ADD COLUMN can_use_default BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE model_providers ADD COLUMN is_public BOOLEAN NOT NULL DEFAULT false;
+```
+
+**精细版（不做）**：单建一张 `default_grants(user_id, provider_id)`，admin 按条授权哪个公开 provider 谁能用。学习项目用户基数小，整组开关够用。
+
+#### 9.11.2 隔离规则升级（AGENTS §3.1 第一次破例）
+
+| 角色 / 状态 | 看到的 provider 列表 |
+|---|---|
+| 普通用户 + `can_use_default=false` | 仅 `user_id == me` 的私有 provider |
+| 普通用户 + `can_use_default=true` | 私有 + 所有 `is_public=true AND is_active=true` |
+| admin | 私有 + 全部 is_public + **别人的私有也能列**（带 user_id 标签，便于审计） |
+
+`resolve_provider(user, provider_id, ...)` 在指定 id 是公开 provider 时多一层 `current.can_use_default` 检查，缺授权一律 404（§3.1 一致性）。
+
+**AGENTS §3.1 那条"每个查询都带 user_id"必须显式加例外说明**——admin 路由是有意跨用户的，新加 admin 功能时不要"顺手"按隔离规则填一遍把 admin 接口废掉。
+
+#### 9.11.3 必须敲定的 4 件事
+
+| # | 决策点 | 推荐 |
+|---|---|---|
+| 1 | 第一个 admin 怎么诞生 | 一次性迁移脚本 `migrate_add_admin.py`，硬编码用户名 `LYF` 升 admin；与现有 `migrate_*.py` 风格一致 |
+| 2 | admin 自己关自己 default 权限怎么办（误操作秒自锁） | 后端在 `PATCH /admin/users/{id}/default-access` 拒绝 `id == current.id`；前端按钮 disable |
+| 3 | 用户正在用默认 provider 跑长任务，admin 中途撤销授权 | **跑完不阻断**（已开始的不能假装没花 token），下一次发起时报 401 + UI 提示"该任务的默认模型授权已撤销"。这条要写进 SPEC，不静悄悄 |
+| 4 | admin 视图独立还是叠加 | 叠加。普通用户视角 + 一个 `/admin` 入口；少一套页面维护成本 |
+
+#### 9.11.4 工作量拆解
+
+| 模块 | 行数量级 |
+|---|---|
+| 迁移脚本 + ORM 列 + models/__init__ | ~80 |
+| `require_admin` 依赖 + 路由权限改造 | ~40 |
+| 4 个 admin API（list/role/access/audit） | ~120 |
+| `resolve_provider` 加默认授权门 | ~30 |
+| 单测：role + access + 撤销边界 | ~150 |
+| 前端 `Admin.vue` 新页（用户表 + 开关 + 升降按钮） | ~250 |
+| 前端 Home.vue / Providers.vue 微调 | ~50 |
+| **合计** | **~720 行 / 1–2 天** |
+
+#### 9.11.5 风险点
+
+- **api_key 泄露**：admin 跨用户看 provider 时仍要 `ProviderResponse.from_orm_masked`，单测专门测一次
+- **撤销授权后 task 残留**：task 指定了 `provider_id = 公开那条`，用户后续点处理 → `resolve_provider` 拒绝 → 走 `_mark_failed` 而不是 500。这条要在测试里覆盖
+- **数据隔离原则松动**：admin 例外要写得清清楚楚，否则以后给路由加 user_id 过滤的人会"顺手补一刀"把 admin 接口废掉
+
+### 9.12 阶段 5 计划：PDF→PPT（2026-11-16 决策已敲定）
+
+**一句话**：把文字型 PDF 经 LLM 规划大纲 → python-pptx 拼装 → 假 VLM 视觉批评循环修订，端到端跑通；OCR、图片提取、真云端 VLM 都是显式留口子但本轮不实施。
+
+#### 9.12.1 决策一览（用户 2026-11-16 拍板）
+
+| # | 决策点 | 选定方案 |
+|---|---|---|
+| 1 | VLM 来源 | **先离线 mock VLM**（仿 `test_llm_server.py` 套路），架构必须留口子中后期切云端 / 本地（见 9.12.2 扩展点 A） |
+| 2 | PDF 输入范围 | **仅文字型**，扫描件 OCR 推到阶段 5 之后（扩展点 B） |
+| 3 | PPTX 生成路线 | **纯文字幻灯片先做**，图片提取后补（扩展点 C） |
+| 4 | 任务模型扩展 | `tasks.output_format` 列（`docx` / `pptx`，默认 `docx`）；不新增 endpoint，沿用 upload → process → download 三段 |
+| 5 | 视觉批评循环预算 | 默认 2 轮，用户可调；硬上限 5 轮 |
+| 6 | 已装 `pdf-to-ppt` Skill 处理 | **借鉴判型 / 表格识别思路，不抄代码**（它是脚本形态，与 FastAPI 服务架构不一致） |
+
+#### 9.12.2 架构扩展点位（"留口子"具体留在哪）
+
+下面三个口子**阶段 5 必须先把抽象层做好**，否则后面切换实现要重写整条链路。这是用户决策 1 的硬约束。
+
+**A. VLM 提供商切换口子**
+
+阶段 0 已经把这件事做了一半：
+- `ModelProvider.capabilities` 字段支持 `vision`
+- `services/llm.py:resolve_provider(user, provider_id, capability="vision")` 按能力路由
+- 传输层 `chat(messages, provider)` 不区分图像/文本——content 里塞 `image_url` 还是纯字符串都是 OpenAI 兼容
+
+阶段 5 要做的：
+1. 新增 **`server/test_vlm_server.py`**：假 VLM 端点。它**不是**普通 mock 的复制——批评循环需要"看到 PPT 渲染图"才出意见，所以这个 mock 必须：
+   - 接收 messages 里含 `image_url` 的请求；
+   - 从 image_url 里的元数据（比如文件名、slide_index）反推"这是第几页的哪一稿"；
+   - 返回结构化的批评意见 JSON（缺标点 / 标题压正文 / 字号偏小 等）；
+   - 支持通过环境变量 `MOCK_VLM_STUB_ROUNDS` 控制"前 N 轮挑刺，第 N+1 轮说没问题了"，让 e2e 测试能逼出循环退出条件。
+2. 图代码（`graphs/ppt_graph.py`）接受 `provider: ModelProvider`，**不区分 provider 是 mock 还是云端**——同 §3.6 传输层不查库 / §3.10 节点闭包传 provider 的边界。
+3. 真要切到云端：用户去 Providers.vue 加一条 `capabilities=text,vision`、base_url 填 `https://dashscope.aliyuncs.com/compatible-mode/v1`（或智谱、OpenAI 兼容端点）即可，代码零改动。
+4. 真要切到本地 Ollama：同上，base_url 填 `http://localhost:11434/v1`，model_name 填 `qwen3-vl:4b`。
+
+**B. OCR 扫描件口子**
+
+当前 `services/pdf.py` 行为：检测到 PDF 没有文字层 → `PdfError("扫描件不支持")` → 路由 400。这条**必须保留**——扫描件 OCR 是个完整子系统（预处理 + 版面分析 + 中文识别），不能被一个 fallback 偷偷承担。
+
+阶段 5 要做：
+1. `services/pdf.py:extract_text_from_pdf` 改成 `extract_text_from_pdf(pdf_bytes, *, fallback_to_ocr: bool = False)`。当前所有调用方传 `False`，行为不变。
+2. 留一个 `services/ocr.py` 占位模块，导出 `extract_text_via_ocr(pdf_bytes) -> str`，**阶段 5 暂抛 NotImplementedError** + 写清楚"接 rapidocr-onnxruntime / paddleocr 时在这里实现"。
+3. `extract_text_from_pdf` 检测到无文字层 + `fallback_to_ocr=True` 时调它。这样调用方决定"这次要不要 OCR"，而不是 PDF 提取器自己偷跑。
+
+**C. 图片提取与 PPTX 拼装口子**
+
+阶段 5 文字幻灯片实现的关键约束：**PPTX 构建器签名必须接受 image_refs，即使阶段 5 永远传空**。这样后面把图片提取接上时不用重写 builder 接口。
+
+具体：
+```python
+# services/pptx_builder.py（阶段 5 新建）
+def build_pptx(
+    outline: PptOutline,
+    *,
+    image_refs: dict[str, bytes] | None = None,  # key = 占位符 ID；阶段 5 永远传 None
+    template_path: str | None = None,
+) -> bytes:
+    ...
+```
+
+`outline` 数据结构里**预留 `image_placeholders: list[str]`** 字段，即使阶段 5 LLM 不填、builder 不渲染。阶段 6（或单独的"图片轮"）实施时只要：
+1. `services/pdf.py` 加 `extract_images_from_pdf()`；
+2. prompt 模板让 LLM 在大纲里指定 `image_placeholders=["fig_3_1", ...]`；
+3. builder 实现 image_refs 分支。
+**不改 LLM 链路、不改 task model、不改 endpoint**。
+
+#### 9.12.3 实施切片（垂直切片，按可独立验收排序）
+
+```
+s5.1 ✅ task.output_format 列 + schema 透传 + 前端表单
+      - models/task.py 加列，schemas/task.py 加字段（Literal["docx", "pptx"]，默认 docx 兜老调用方）
+      - migrate_add_task_output_format.py 一次性 ALTER（Postgres `ADD COLUMN IF NOT EXISTS` 幂等）
+      - 前端 types.ts 加 OutputFormat 类型；Tasks.vue 表单 radio + 列表新列
+      - tests/test_task_schema.py 5 项：默认 / 合法 / 非法值 / 大小写 / 响应 roundtrip
+      - 顺手修了一个 baseline drift：vue-tsc 严格模式下 element-plus DefaultRow 推不到 Task/LogEntry/Provider
+        类型，三个 vue 文件的 `openEdit(row)` / `remove(row)` 等 call-site 加 `row as Xxx` 显式 cast。
+        原本 AGENTS §7 声称"npm run build 通过"是过期描述，2026-11-16 实测 baseline 就 fail，已修
+
+s5.2 ✅ PPT 大纲生成图（不带批评循环）
+      - schemas/ppt_outline.py：JSON schema + PptOutline / PptSlide 模型 + parse_outline_output（阶梯降级）
+        + serialize_outline / deserialize_outline（kind 字段区分批改类）
+      - services/ppt_outline.py：build_outline_messages（契约 system + 用户要求在 user）
+      - graphs/ppt_graph.py：plan_slides 单节点 LangGraph（s5.6 加多节点时同形扩展，thread_id 已预留）
+      - api/v1/process.py：_run_model 顶部加 task.output_format == "pptx" 派发；
+        _render_outline_as_text 把大纲当过渡纯文本塞 processed_content（让 s5.3 之前下载不空响应）
+      - 单测 13 项：schema roundtrip / 阶梯 1/2/3 降级 / 围栏 / 空 slides 占位 / 端点拒 response_format 降级 /
+        图节点 mock 行为 / kind 判别器
+      - 实测：145 passed（+13）；ruff 全绿
+
+s5.3 ✅ PPTX 拼装（python-pptx，文字-only）
+      - services/pptx_builder.py：build_pptx(outline, image_refs=None, template_path=None) 三参签名
+        （§9.12.2.C 硬约束落地）。封面页 + 标题内容页 + 占位页（空 outline 也保证 ≥1 页）。
+      - 图片轮启用路径已通：image_refs 字典 + 同名 image_placeholders → add_picture；
+        未知 placeholder ID 静默跳过，缺图不抛。单测覆盖这两条
+      - api/v1/process.py：download 路由按 task.output_format 派发到 docx / pptx 两条分支，
+        Content-Disposition 的 filename* 仍走 RFC 5987；content-type 切到 .pptx 媒体类型
+      - 单测 11 项：PK 头校验 / python-pptx 重读 / 页数匹配 / 封面文本 / bullets 段落顺序 /
+        空 outline 占位 / image_refs 插图 / 未知 ID 跳过 / 参数化页数
+      - 实测：156 passed（+11）；前端 build 仍通过
+
+s5.4 ✅ PPT 渲染为图（2026-11-17，用户在 WSL 装好 libreoffice-impress 后落地）
+      - services/pptx_renderer.py 从 stub 扩成双后端：settings.ppt_render_backend 派发
+        'stub'（默认，单测/e2e/无 WSL 机器）/ 'soffice'（真渲染）
+      - soffice 路径：Windows 临时目录写 pptx → `wsl soffice --headless --convert-to pdf`
+        → pymupdf 渲 PNG（dpi 可配）。**交换走 /mnt/<盘> NTFS 挂载，不走 UNC**——
+        本机实测 Windows 原生进程（python/pwsh）看到的 `\\wsl.localhost` 与 `wsl.exe`
+        会话是**两个不同实例**，UNC 写的文件对方看不见；`/mnt/d` 指向真实 NTFS 无此问题
+      - 每次转换开独立 `-env:UserInstallation=file:///tmp/lo_prof_<uuid>` profile：
+        LibreOffice 默认配置带单实例锁，并发/重叠请求会把第二个 soffice 变哑炮
+      - graph 的 render 节点改 `asyncio.to_thread`：soffice 一次 3–8s，sync 会卡死事件循环
+      - 新配置：PPT_RENDER_BACKEND（默认 stub；本机 .env 已设 soffice）/ PPT_RENDER_DPI=100 /
+        PPT_RENDER_TIMEOUT=90
+      - 失败语义：找不到 wsl / 超时 / rc≠0 / PDF 坏 → 一律 RenderError，**绝不静默回退 stub**
+        （静默降级 = 骗用户"渲染好了"，同 §3.7 degraded 不许假装 pass 一个道理）
+      - 单测 8 项（test_pptx_renderer.py，subprocess 全 mock）+ gated 真渲染 smoke 2 项
+        （test_ppt_render_smoke.py，无 WSL+soffice 自动 skip）
+      - 实测：真渲染 e2e_ppt **28/0**（后端 .env 用 soffice 后端跑完整批评循环）
+
+s5.5 ✅ 假 VLM 端点
+      - server/test_vlm_server.py：OpenAI 兼容 chat/completions；与 test_llm_server 同形
+      - 接收含 image_url 多模态 messages，按 prompt 里的 [critic-thread:...] 标记计数
+      - MOCK_VLM_STUB_ROUNDS（默认 1）控制何时改口说 pass；多 thread 状态互不串
+      - response_format json_schema/json_object 一律 400，逼出 chat_json 降级（与 §3.6 一致）
+      - /v1/_mock/reset 单测清状态端点
+      - schemas/vlm_critique.py：Critique + CritiqueIssue 模型、JSON schema、parse_critique
+        阶梯降级；缺 verdict / 非 {pass, needs_revision} 一律归 needs_revision（不假装通过）
+      - 单测 14 项：响应形状 / OpenAI 兼容 / response_format 拒绝 / 退出条件 / thread 隔离 /
+        reset / anonymous 桶 / critique roundtrip
+      - 实测：170 passed（+14）；ruff 全绿
+
+s5.6 ✅ 批评循环（render 走 s5.4 stub，max_rounds 钳 5）
+      - graphs/ppt_graph.py 重写为 5 节点图：plan_slides → assemble → render → critique
+        →（条件边）→ revise_outline → assemble（loop）/ END
+      - run_ppt_pipeline(...) 生产入口；plan_ppt_outline(...) 作 s5.2 兼容壳保留
+      - 状态 calls 用 append reducer；每步外呼打 phase 标签，调用方据此映射
+        llm_calls.purpose：outline / outline_degraded / critic / critic_degraded
+      - services/pptx_renderer.py：render_pptx_to_images 返回 1×1 透明 PNG ×N；
+        硬约束签名 bytes→list[bytes]，s5.4 真接渲染时**只换函数体**
+      - services/vlm_critic.py：build_critic_messages（多模态 list + marker）+
+        build_revise_messages（"按反馈改大纲"提示词）
+      - 默认 2 / 硬上限 5；超上限 logger.warning + 钳到 5，不静悄悄
+      - 没配 vision provider：critique 节点直接 pass、verdict=skipped、不调用 VLM 端
+      - api/v1/process.py 调用方按 task.output_format 解析 vision provider，
+        批评外呼的 llm_calls 归 critic_provider、其他归文本/大纲 provider
+      - 不实施 interrupt 用户确认（同 §3.10 阶段 3 那条，要先有 UI）
+      - 单测 8 项（test_ppt_graph.py）：skipped / pass 第一轮 / 修订后 pass / max_rounds 命中 /
+        硬钳 5 / purpose 标签 / outline_degraded 标注 / critic_degraded 标注
+      - 实测：178 passed（+8）；ruff 全绿；前端 build 不受影响
+
+s5.7 ✅ e2e 在 Postgres + mock VLM 上跑通（28 项）
+      - 新增 test_e2e_ppt.py：注册 e2e_p_* 用户、文本 + vision 双提供商、pptx 任务、
+        合成中文 PDF 上传、跑完整 plan → assemble → render → critique(needs_revision)
+        → revise → assemble → critique(pass)、下载 .pptx、python-pptx 重读 4 页（封面 + 3 正文）
+      - 关键归因校验：llm_calls 表里 outline 行 provider_id == text_provider，
+        critic 行 provider_id == vision_provider（§9.12.4 验证里程碑第 5 条的硬证据）
+      - structured_output 顶层 kind=ppt_outline 字段也校了
+      - 三进程：后端 8000（run_backend.py）+ 假 LLM 19000 + 假 VLM 19001；
+        脚本启动前 wait_url 探测；跑完 finally 自动清 DB（同 test_e2e_structural 模式）
+      - test_llm_server.py 同次扩展：_is_outline_request 用 ("幻灯片大纲", "完整新大纲")
+        两个 system prompt 短语判别 plan / revise 都走 outline 分支，
+        其余仍走 grading 分支保 test_e2e_structural 52/0 不变
+      - 实测：test_e2e_ppt 28/0；test_e2e 31/0；test_e2e_structural 52/0（无回归）
+
+s5.8 ✅ 文档收口（s5.4 推后续）
+      - SPEC §9.13 阶段 5 交付情况（初版 11-16 记 6 切片；11-17 s5.4 真渲染收尾，8 切片全交付）
+      - AGENTS §3.11 阶段 5 不可违反的约定（build_pptx / render 签名硬约束、
+        critic provider 走 capabilities=vision 路由、purpose 集合扩 4 值、
+        critic-thread 标记规则、parse 阶梯不许抛 pass 等）
+      - 路线表阶段 5 → 🟡 6 切片已交付，s5.4 单独排
+      - AGENTS §2 命令补 test_vlm_server.py + test_e2e_ppt.py
+      - 门禁基线刷新：178 pytest + 31/0 + 52/0 + 28/0
+```
+
+每个切片**单独 commit**、可单独回滚。s5.1 与 s5.3 之间有依赖（output_format 没接通就没法走 PPTX 分支），但 s5.4 和 s5.5 互相独立可以并行。
+
+#### 9.12.4 验证里程碑
+
+1. `task.output_format` 列在 Postgres 里建好，单测覆盖"指定合法值通过 / 非法值 422 / 老库迁移幂等"
+2. 一份 5 页文字型 PDF 上传 → 处理 → 拿到 5 页 PPTX，python-pptx 重读能验每页标题非空
+3. mock VLM 批评循环跑满 2 轮，`outputs/` 看到 3 份中间稿（初稿 + 第 1 轮 + 终稿）
+4. `test_e2e_ppt.py` 端到端 ≥ 25 项断言全过、自清理不留数据
+5. 把假 VLM 提供商换成 dashscope qwen-vl-max（同 base_url 形状 + 真 key）后**代码零改动**也能跑通批评循环——这条证明 9.12.2.A 的口子确实留住了
+
+#### 9.12.5 阶段 5 显式不做的事
+
+- ❌ 扫描件 OCR（接 rapidocr，但留到后面）
+- ❌ PDF 图片提取与幻灯片插图（builder 签名留 image_refs 但永远传 None）
+- ❌ 模板 PPTX（用户自定义母版）—— python-pptx 支持但学习项目里不值得做
+- ❌ interrupt 用户确认大纲（同 §3.10 阶段 3 那条，要先有 UI 才好做）
+- ❌ 真云端 VLM 集成测试（接口留好了，e2e 跑 mock 就够；接云端是用户运行时配置）
+- ❌ PPTX 动画、过渡、SmartArt 等非文本元素
+- ❌ 多页大文档的分块 PPT（>50 页 PDF 推给阶段 6 检索配合做）
+
+### 9.13 阶段 5 交付情况（2026-11-16 起，2026-11-17 s5.4 收尾）
+
+**8 切片全部交付**。s5.4 真渲染于 11-17 用户在 WSL 装好 libreoffice-impress 后落地。
+
+【端到端能力实测】
+**上传一份 4 行中文 PDF → pptx 任务 → 自动跑完"plan_slides → assemble → render(真 soffice) → critique(needs_revision) → revise_outline → assemble → render → critique(pass)" → 下载 4 页 .pptx**。LLM 外呼归 text provider，VLM 外呼归 vision provider，llm_calls 表分别记 purpose=outline / critic。真渲染模式 e2e_ppt **28/0**（2026-11-17 实测）。
+
+【门禁基线（2026-11-17）】
+
+| 项 | 数字 | 增量来源 |
+|---|---|---|
+| `pytest` | **189 passed** | 阶段 0–3 142 → 阶段 4 +8 → s5.1 +5 → s5.2 +13 → s5.3 +11 → s5.5 +14 → s5.6 +8 → s5.4 +10 |
+| `test_e2e.py` | 31/0 | 未变 |
+| `test_e2e_structural.py` | 52/0 | 未变（mock LLM 加了大纲路由不影响 grading 检测） |
+| `test_e2e_ppt.py` | **28/0（真渲染跑通）** | s5.7 新增 |
+| `npm run build` | 通过 | s5.1 顺手修了 baseline drift（vue-tsc + element-plus DefaultRow） |
+| `ruff check / format` | 全绿 / 77 files formatted | — |
+| `uv lock` | 83 包 | python-pptx 拖入 pillow + xlsxwriter |
+
+【文件清单】
+
+新增：
+- `server/schemas/ppt_outline.py`（PptOutline / PptSlide / parse / serialize / kind 字段）
+- `server/schemas/vlm_critique.py`（Critique / CritiqueIssue / parse_critique）
+- `server/services/ppt_outline.py`（build_outline_messages + OUTLINE_OUTPUT_INSTRUCTION）
+- `server/services/vlm_critic.py`（build_critic_messages + build_revise_messages）
+- `server/services/pptx_builder.py`（build_pptx 三参签名硬约束）
+- `server/services/pptx_renderer.py`（**双后端 stub/soffice**，WSL 交换路径约定见模块 docstring）
+- `server/graphs/ppt_graph.py`（5 节点 LangGraph，run_ppt_pipeline + plan_ppt_outline 兼容壳）
+- `server/test_vlm_server.py`（mock VLM，[critic-thread:...] 计数）
+- `server/test_e2e_ppt.py`（28 项端到端）
+- `server/tests/test_ppt_outline.py` / `test_pptx_builder.py` / `test_vlm_critique.py` / `test_ppt_graph.py` / `test_pptx_renderer.py` / `test_ppt_render_smoke.py`（gated）
+- `server/migrate_add_task_output_format.py`（Postgres `ADD COLUMN IF NOT EXISTS` 幂等）
+
+修改：
+- `server/models/task.py` 加 `output_format`
+- `server/schemas/task.py` 加 `Literal["docx","pptx"]` 校验
+- `server/api/v1/process.py` `_run_model` 三路派发 + `_error_purpose_for` + `_render_outline_as_text` + 下载路由派发改 `.pptx`
+- `server/test_llm_server.py` 按 system prompt 路由 outline / grading 响应
+- `server/main.py` 加 Windows SelectorEventLoop 切换 + 启动期 event_loop 类型诊断
+- `server/config.py` 加 `ppt_render_backend` / `ppt_render_dpi` / `ppt_render_timeout`
+- `client/src/api/types.ts` 加 OutputFormat 类型 + Task/TaskCreatePayload 字段
+- `client/src/views/Tasks.vue` 表单 radio + 列表新列
+- `client/src/views/{Tasks,Logs,Providers}.vue` call-site 加 `row as Xxx` cast 修 vue-tsc
+
+【s5.4 落地后的运行约定】
+1. `ppt_render_backend` 代码默认 `stub`（可移植）；本机 `.env` 已设 `PPT_RENDER_BACKEND=soffice` 启用真渲染。
+2. Windows ↔ WSL 文件交换**必须走 `/mnt/<盘>` NTFS 挂载点**，不能用 `\\wsl.localhost` UNC——本机实测 Windows 原生进程（python/pwsh）看到的 wsl.localhost 与 `wsl.exe` 会话是**两个不同实例**，互相看不见对方的文件（2026-11-17 排查记录）。
+3. soffice 每次转换开独立 `-env:UserInstallation` profile（默认配置有单实例锁，并发会变哑炮），跑完清理。
+4. 渲染节点在 graph 里走 `asyncio.to_thread`：soffice 一次 3–8s，sync 会卡死事件循环。
+5. 换渲染实现（LibreOffice on Windows / pdf2image / 远程服务）只改 `_render_via_soffice` 函数体，`render_pptx_to_images` 签名与 graph 不动。
 
 ---
 

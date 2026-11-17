@@ -11,9 +11,18 @@ ORM 模型包 —— 导入所有模型，让 create_all() 能发现它们
 from models.llm_call import LlmCall
 from models.operation_log import OperationLog
 from models.provider import ModelProvider
+from models.spec_doc import SpecChunk, SpecDoc
 from models.task import Task
 from models.user import User
 
 # __all__ 声明：当外部 from models import * 时，只导出这些名字
 # 类似 Java 的 public 接口 vs 内部实现
-__all__ = ["LlmCall", "ModelProvider", "OperationLog", "Task", "User"]
+__all__ = [
+    "LlmCall",
+    "ModelProvider",
+    "OperationLog",
+    "SpecChunk",
+    "SpecDoc",
+    "Task",
+    "User",
+]
