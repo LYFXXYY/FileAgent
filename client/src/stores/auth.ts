@@ -63,6 +63,27 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
+  /**
+   * 启动时刷新身份快照：role/can_use_default 是登录时冻结在 localStorage 的，
+   * 管理员改动后旧登录态看不到。AppLayout 挂载时调一次，变更无需重登即生效。
+   * 失败静默（401 由 axios 拦截器统一踢登录页）；这里不能抛，否则启动被一个
+   * 可选刷新拖死。
+   */
+  async function refreshProfile(): Promise<void> {
+    if (!token.value) return
+    try {
+      const resp = await authApi.me()
+      role.value = resp.data.role
+      canUseDefault.value = resp.data.can_use_default
+      username.value = resp.data.username
+      localStorage.setItem(ROLE_KEY, resp.data.role)
+      localStorage.setItem(DEFAULT_KEY, String(resp.data.can_use_default))
+      localStorage.setItem('fileagent_username', resp.data.username)
+    } catch {
+      // 忽略：拦截器已处理 401，其余错误保持旧快照继续用
+    }
+  }
+
   function logout(): void {
     token.value = null
     username.value = null
@@ -74,5 +95,16 @@ export const useAuthStore = defineStore('auth', () => {
     localStorage.removeItem(DEFAULT_KEY)
   }
 
-  return { token, username, role, canUseDefault, isLoggedIn, isAdmin, login, register, logout }
+  return {
+    token,
+    username,
+    role,
+    canUseDefault,
+    isLoggedIn,
+    isAdmin,
+    login,
+    register,
+    logout,
+    refreshProfile,
+  }
 })

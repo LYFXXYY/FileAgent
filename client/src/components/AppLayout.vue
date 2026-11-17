@@ -11,7 +11,7 @@
  * 【Element Plus 布局组件】
  * - el-container 是 flex 容器，el-aside/el-main/el-header 自动摆放
  */
-import { computed } from 'vue'
+import { computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
 
@@ -20,6 +20,13 @@ import { useAuthStore } from '@/stores/auth'
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+
+// 挂载即刷新身份快照：role / can_use_default 是登录时冻结进 localStorage 的，
+// 管理员在 Admin 页改了授权，被改动者下次进入应用就能看到正确视图（无需重登）。
+// 内部已吞错，不阻塞启动。
+onMounted(() => {
+  auth.refreshProfile()
+})
 
 // 当前激活的菜单项 —— 用路径反推，保证刷新后仍能高亮
 const activeMenu = computed(() => route.path)

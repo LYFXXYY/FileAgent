@@ -13,11 +13,24 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from database import get_db
+from middleware.auth import get_current_user
 from models.user import User
 from schemas.auth import LoginRequest, RegisterRequest, TokenResponse, UserResponse
 from services.auth import create_access_token, hash_password, verify_password
 
 router = APIRouter()
+
+
+@router.get("/me", response_model=UserResponse)
+def me(current: User = Depends(get_current_user)):
+    """
+    当前登录用户信息
+
+    存在的唯一理由：role / can_use_default 是登录瞬间冻结进 localStorage 的快照，
+    admin 改了某人之后那人要重登才生效——体验上是"我明明被授权了界面没变"。
+    前端启动时调一次本接口刷新，管理员的变更下一屏就到位，不需要重登。
+    """
+    return current
 
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)

@@ -13,6 +13,8 @@
 export interface User {
   id: number
   username: string
+  role: UserRole
+  can_use_default: boolean
 }
 
 export type UserRole = 'user' | 'admin'

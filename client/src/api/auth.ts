@@ -15,4 +15,8 @@ export const authApi = {
   login(username: string, password: string) {
     return http.post<TokenResponse>('/auth/login', { username, password })
   },
+  /** 启动时刷新 role/can_use_default，管理员的变更无需用户重登 */
+  me() {
+    return http.get<User>('/auth/me')
+  },
 }

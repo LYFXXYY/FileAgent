@@ -102,7 +102,7 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - 正文权威副本在 `operation_logs.original_content`，磁盘文件只是审计留存。两列声明已是 `Text()`——Postgres 的 TEXT 没有大小上限，原 MySQL 时代的 `with_variant(LONGTEXT, "mysql")` 已撤。`structured_output` 同样是 `Text`。
 - 提取层两条硬边界：`extract_text_from_docx` **只读 `doc.paragraphs`**（不含表格/文本框），`extract_text_from_pdf` **不读表格、不做 OCR**——已知功能边界，不是 bug。细则见 §3.8。
 - 上传白名单 = `TEXT_EXTRACTORS.keys()`（`.docx` / `.pdf`），落盘名 `uuid4().hex + ext`。**阶段 4 起有两份 `TEXT_EXTRACTORS`**：`api/v1/process.py:63` 是批改/处理链路（落盘 + 处理），`services/spec_storage.py:` 是规范库入库链路（只切块存表，不落盘）。加格式时两处都要改，否则规范库会出现"上传得了，规范进不去"或反过来。
-- 认证：直接用 bcrypt，**不要引 passlib**（1.7.4 与 bcrypt 4.1+ 不兼容），密码截 72 字节；JWT HS256，`sub` 是字符串化 user_id；无 `/auth/me`、无刷新 token。
+- 认证：直接用 bcrypt，**不要引 passlib**（1.7.4 与 bcrypt 4.1+ 不兼容），密码截 72 字节；JWT HS256，`sub` 是字符串化 user_id；`/auth/me` 只做一件事——启动时刷新 role/can_use_default 快照（AppLayout 挂载调用，失败静默）；无刷新 token。
 - 下载中文文件名必须 RFC 5987：`filename*=UTF-8''{quote(...)}`（`process.py:324`）。
 - diff 用 `SequenceMatcher(autojunk=False)`——**关 autojunk 对中文是必须的**，否则"的/是/在"被当噪声导致结果不准（`server/services/diff.py:30`）。
 - `create_diff_docx` 先 `strip_markdown` 再 diff，按 `\n` 重组段落，末尾分页追加一份无标注纯净全文。
@@ -204,7 +204,7 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 改列/加约束要写一次性幂等迁移脚本（Postgres 方言：先查 `information_schema.columns` 判存在，再 `ALTER TABLE`）。
 新增 ORM 类必须在 `server/models/__init__.py` 里 import，否则 `create_all()` 发现不了这张表。
 
-⚠ **历史包袱（已了结）**：MySQL 时代本机老库是早期手工建表，与 ORM 声明长期漂移（外键规则 NO ACTION vs SET NULL、status 允许 NULL、TEXT vs LONGTEXT 不一致），§3.2 和 s2 修复都按这套假设写过。阶段 4（2026-11-16）一次性把业务表全量迁到 Postgres，**新库 `create_all()` 一次建齐，外键规则与 ORM 声明逐字匹配**，老库 vs 新库差异消失。`server/migrate_add_provider_*.py` 等三个 MySQL 方言脚本已废弃（语法 `SHOW COLUMNS` 在 PG 上跑不了，新库也不需要——它们只是给老 MySQL 库做幂等 ALTER 用的）。
+⚠ **历史包袱（已了结）**：MySQL 时代本机老库是早期手工建表，与 ORM 声明长期漂移（外键规则 NO ACTION vs SET NULL、status 允许 NULL、TEXT vs LONGTEXT 不一致），§3.2 和 s2 修复都按这套假设写过。阶段 4（2026-11-16）一次性把业务表全量迁到 Postgres，**新库 `create_all()` 一次建齐，外键规则与 ORM 声明逐字匹配**，老库 vs 新库差异消失。`server/migrate_add_provider_*.py` 等三个 MySQL 方言脚本已废弃并于 2026-11-17 `git rm`（语法 `SHOW COLUMNS` 在 PG 上跑不了，新库也不需要——它们只是给老 MySQL 库做幂等 ALTER 用的；历史可从 git 找回）。
 **未来再要改列**：写 Postgres 方言的一次性脚本（先查 `information_schema.columns` 再 ALTER），或者直接重 `create_all()`（如果可丢数据）。
 
 ## 6. 注释与代码风格
