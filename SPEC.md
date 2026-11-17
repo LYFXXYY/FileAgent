@@ -625,15 +625,7 @@ CREATE TABLE llm_calls (
 >
 > 根因：`create_all()` **只建新表、绝不 ALTER 已有表**。这几张表早期是按本节 DDL 手工建的，后来 s2 修复只在 ORM 侧加了 `ondelete`，数据库没跟上。新库从零启动会拿到 ORM 的正确规则，老库不会。
 >
-> **对齐老库需要单独写迁移**（重建外键约束），属删改表结构操作，未执行——要做前先确认。
->
-> **已有库迁移**：后加的列都要跑幂等脚本补，`create_all()` 不会 ALTER：
->
-> ```bash
-> python server/migrate_add_provider_user_id.py          # model_providers.user_id
-> python server/migrate_add_provider_capabilities.py     # model_providers.capabilities
-> python server/migrate_add_log_structured_output.py     # operation_logs.structured_output（阶段 1）
-> ```
+> **（MySQL 老库时代的说明，已随阶段 4 退役）** 当时"对齐老库"与"补列"靠三个幂等脚本（`migrate_add_provider_user_id.py` / `_capabilities.py` / `migrate_add_log_structured_output.py`）。Postgres 新库 `create_all()` 一次建齐、不需要它们，三件套已于 2026-11-17 `git rm`（历史可从 git 找回）。**今后再要改列**：写 Postgres 方言的一次性幂等脚本（先查 `information_schema.columns` 再 `ALTER TABLE`），范例 `migrate_add_task_output_format.py` / `migrate_add_admin_support.py`。
 >
 > `llm_calls` 是新表，启动时 `create_all()` 自动建，不需要脚本。新列一律允许 NULL 且无需回填：NULL 就表示"这条没有结构化清单"，前端据此不显示问题卡片。
 
