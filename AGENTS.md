@@ -221,7 +221,7 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 
 当前路线（阶段 0–5，含为什么这么排）在 SPEC §9.2；阶段 0 交付与验证明细在 SPEC §9.3，阶段 1 在 §9.4，阶段 1.5（PDF 输入 + 去 Word 化）在 §9.5，阶段 2 最小版（评测台 + 基线数字）在 §9.6，阶段 3（长文档分块批改图）在 §9.7，缺陷台账第五轮在 §10，改 bug 前先看这几张表。
 
-门禁基线（均已实测通过，2026-11-17 阶段 5 s5.4 真渲染收尾后）：`uv run pytest -q` → **189 passed**（原 142，23 项合并 + 阶段 4 +8 + 阶段 5 s5.1 +5、s5.2 +13、s5.3 +11、s5.5 +14、s5.6 +8、s5.4 +10）；`uv run ruff check .` → 全绿；`ruff format --check .` → 77 files already formatted；`uv lock --check` → 一致（**83 包**）；`npm run build` → **通过**；`uv run python test_e2e.py` → **31/0**；`LONGDOC_CHUNK_CHARS=60 LLM_TRUST_ENV_PROXY=false uv run python run_backend.py` + 假 LLM 跑 `test_e2e_structural.py` → **52/0**；`LLM_TRUST_ENV_PROXY=false uv run python run_backend.py` + 假 LLM 19000 + 假 VLM 19001 跑 `test_e2e_ppt.py` → **28/0**（本机 .env 设了 `PPT_RENDER_BACKEND=soffice`，这 28 项是**真渲染**下跑过的）。**e2e 必须走 `run_backend.py`**，详见 §2 那条 ⚠。
+门禁基线（均已实测通过，2026-11-17 任务 2 管理员落地后）：`uv run pytest -q` → **199 passed**（189 + 10 admin 测试）；`uv run ruff check .` → 全绿；`ruff format --check .` → 81 files already formatted；`uv lock --check` → 一致（**83 包**）；`npm run build` → **通过**；`test_e2e.py` **31/0**、`test_e2e_structural.py` **52/0**、`test_e2e_ppt.py` **28/0**（真渲染）。**e2e 必须走 `run_backend.py`**，详见 §2 那条 ⚠。
 
 
 - **`server/test_e2e.py` 是仓库自带的端到端冒烟脚本，不是遗留物，别删**：需后端已在 8000 运行、连真实 Postgres。它会注册 `tester_*` / `other_*` 两个临时账号，造 1 条日志和 1 个上传文件；**跑完自动清理 DB 记录**（llm_calls → logs → tasks → providers → users），落盘文件因 UUID 存储名无法精确定位，偶尔手工清。第 7 节现在真走重试路径（连不上假 provider → 重试 3 次 → failed），第 10 节直接改库把日志置为 done 来验证下载，都属预期行为。
@@ -231,8 +231,8 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - `uploads/`、`outputs/`、`.env`、各类缓存已 ignore；`.env.example` 靠 `.gitignore` 里的 `!.env.example` 例外入库。
 - SPEC §11 示例写 `JWT_EXPIRE_HOURS=2`，本机 `.env` 实际是 24；`.env` 不入库，以本机为准。
 - 未做：限流、api_key 字段级加密、Alembic、Docker / 多 worker、表格提取（docx 表格和 PDF 表格都不进正文）、扫描件 OCR、加密 PDF 解密、成本价格表（计量只存 token 不算钱）、问题清单写进交付 docx。阶段 3 未做：`interrupt` 人工确认分块方案（要先有 UI）、长文摘要的两段式（逐块摘要 + 整篇汇总）、`checkpoints/` 体积治理与 TTL。评测台的下一步：真实文档夹具、第二厂商当裁判、同夹具跑重复轮次（单轮会漂）、把 `format_tier` 落进 `llm_calls`（改表结构，做前先问）。
-- **路线 2026-11-16 重排（见 SPEC §9.2 与 §9.10）**：阶段 4 = Postgres 基建迁移。**业务表已于 2026-11-16 当天迁完**（驱动、模型、配置全到位），剩余项 = LangGraph saver 从 SQLite 迁到 AsyncPostgresSaver、`spec_docs` / `spec_chunks` 两张新表，**不做检索**；阶段 5 = PDF→PPT；阶段 6 = 本地 embedding + pgvector 检索 + prompt 注入。**`老库外键规则对齐` 这一项随 MySQL 退役消失**——新库 `create_all()` 一次建齐，外键规则与 ORM 声明逐字一致（实测 `pg_constraint.confdeltype` 8 条全对）。
-- **管理员 + 默认模型授权**（部署给别人时新用户没 provider 的痛点）：方案已分析、工作量已估（约 720 行 / 1–2 天），**不排进阶段 4–6**，做完阶段 5 再回头评估。详见 SPEC §9.11。
+- **路线 2026-11-16/17（见 SPEC §9.2）**：阶段 4（Postgres 基建，11-16 当天迁完）、阶段 5（PDF→PPT 全链路，11-17 八切片收齐，含 WSL LibreOffice 真渲染）、任务 2（管理员 + 默认模型授权，11-17）均已完成。**下一站 = 阶段 6**：本地 embedding + pgvector 检索 + 规范条款注入批改 prompt（SPEC §9.2 阶段 6；`spec_chunks` 加 embedding 列是改表，做前先问）。剩余待办按用户定的顺序：浏览器 UI 走查 → 阶段 6。
+- **管理员 + 默认模型授权（已于 2026-11-17 实施，简单版）**：`users.role` / `users.can_use_default` / `model_providers.is_public` 三列 + `require_admin` + `/admin/*` 三端点 + 前端 Admin 页。不做 audit / 跨用户 provider 管理（用户拍板）。授权判据集中在 `services/llm.py:provider_usable_by`，改任何 provider 可见性逻辑先看 SPEC §9.11 的实施清单。**admin 路由是 §3.1 隔离铁律的声明式例外**——新加管理端点挂 `require_admin` 即可，不要"顺手"补 user_id 过滤把 admin 视图废掉。
 - **阶段 5 PDF→PPT**：6 项决策已敲定（VLM 走 mock 起步、OCR / 图片 / 真云端 VLM 是显式扩展口子）；`task.output_format` 列扩 + `services/pptx_builder.py` 接 `image_refs=None`、`services/pdf.py:extract_text_from_pdf(fallback_to_ocr=False)`——这两个签名是"留口子"的硬约束，未来切真实现不能改外部接口。完整计划见 SPEC §9.12。
 - 真机跑过的一手结论（2026-11-15，qwen3.7-flash + 合成中文 PDF）：结构化链路 OK（`degraded=False`、4 条 的/地/得 全部精确定位）。但该端点回来的 `revised_text` 与原文一字不差——意见对、修订没落地。这是 prompt 产出质量，不是提取或解析缺陷，正属阶段 2 评测台要量化的范围，别在提取层"顺手改 prompt"掩盖它。
 

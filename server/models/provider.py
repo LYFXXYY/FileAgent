@@ -58,6 +58,10 @@ class ModelProvider(Base):
     # 软启用/禁用 —— False 时不出现在任务下拉框里，但不删除记录（可恢复）
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
+    # 公共（官方默认）模型标记（SPEC §9.11）：仅 admin 能设，
+    # 被 users.can_use_default 授权的用户可见可用。api_key 仍走脱敏，绝不外泄。
+    is_public: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), nullable=False
     )

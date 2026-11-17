@@ -35,6 +35,7 @@ from config import get_settings
 from database import SessionLocal
 from models.llm_call import LlmCall
 from models.provider import ModelProvider
+from models.user import User
 
 logger = logging.getLogger("fileagent.llm")
 
@@ -140,6 +141,20 @@ def parse_capabilities(raw: str | None) -> set[str]:
     return items or {"text"}
 
 
+def provider_usable_by(provider: ModelProvider, user: User | None) -> bool:
+    """
+    单个提供商对某用户是否可用（SPEC §9.11 的授权判据，路由层共用）
+
+    - 自己的 → 永远可用；
+    - 公共（is_public）→ 仅 can_use_default=True 的用户可用；
+    - 别人的私有 → 永远不可用。
+    user 为 None（用户已被删）时只按"非公共即不可用"处理，调用方各自决定报错文案。
+    """
+    if user is not None and provider.user_id == user.id:
+        return True
+    return bool(provider.is_public and user is not None and user.can_use_default)
+
+
 def resolve_provider(
     db: Session,
     user_id: int,
@@ -147,25 +162,54 @@ def resolve_provider(
     capability: str = "text",
 ) -> ModelProvider:
     """
-    选出本次要用的提供商：任务显式指定 > 当前用户名下默认 active（按 id 升序）
+    选出本次要用的提供商：任务显式指定 > 自己的默认 active > （被授权时）公共默认 active
 
-    两条硬规则：绝不跨用户取；指定的提供商不合用时**显式报错**，
-    不静默 fallback 到别的模型——换模型会改变输出，用户必须知道。
+    三条硬规则：
+    - 指定的提供商必须"对该用户可用"（自己的，或被授权的公共提供商），否则**显式报错**，
+      不静默换模型——换模型会改变输出，用户必须知道；
+    - 自动挑选只在自己的 active 里找，找不到且 `can_use_default=True` 才回落公共池；
+    - 用户没被授权时，公共提供商对他完全不存在（列表不展示、指定了也报错）。
     """
-    query = db.query(ModelProvider).filter(ModelProvider.user_id == user_id)
+    user = db.get(User, user_id)
 
     if provider_id is not None:
-        provider = query.filter(ModelProvider.id == provider_id).first()
-        if provider is None:
+        provider = db.get(ModelProvider, provider_id)
+        # 自己的提供商直接放行；公共的要看授权。users 行缺失时仍认"归属即合法"，
+        # 与单测内存库（只建 provider 不建 user）保持兼容
+        usable = provider is not None and (
+            provider.user_id == user_id or provider_usable_by(provider, user)
+        )
+        if not usable:
             raise LLMError("任务指定的模型提供商已被删除或不可用，请重新选择")
         if capability not in parse_capabilities(provider.capabilities):
             raise LLMError(f"任务指定的提供商 {provider.name} 不支持 {capability} 能力，请重新选择")
         return provider
 
-    active = query.filter(ModelProvider.is_active == True).order_by(ModelProvider.id)  # noqa: E712
+    active = (
+        db.query(ModelProvider)
+        .filter(
+            ModelProvider.user_id == user_id,
+            ModelProvider.is_active == True,  # noqa: E712
+        )
+        .order_by(ModelProvider.id)
+    )
     for provider in active:
         if capability in parse_capabilities(provider.capabilities):
             return provider
+
+    # 自己一个不合用 → 被授权的用户回落公共池（注册即可用的"官方默认"路径）
+    if user is not None and user.can_use_default:
+        public = (
+            db.query(ModelProvider)
+            .filter(
+                ModelProvider.is_public == True,  # noqa: E712
+                ModelProvider.is_active == True,  # noqa: E712
+            )
+            .order_by(ModelProvider.id)
+        )
+        for provider in public:
+            if capability in parse_capabilities(provider.capabilities):
+                return provider
 
     raise LLMError(f"当前账号下没有支持 {capability} 能力的可用模型提供商，请先添加")
 

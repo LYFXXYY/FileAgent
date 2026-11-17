@@ -101,6 +101,18 @@ async function handleLogout() {
           </el-icon>
           <span>操作日志</span>
         </el-menu-item>
+        <!-- 管理入口：仅 admin 可见（路由守卫 + 后端 require_admin 双重兜底） -->
+        <el-menu-item v-if="auth.isAdmin" index="/admin">
+          <el-icon>
+            <!-- 用户管理：人群图标 -->
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M17 21V19C17 16.79 14.76 15 12 15C9.24 15 7 16.79 7 19V21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+              <circle cx="12" cy="7" r="4" stroke="currentColor" stroke-width="2"/>
+              <path d="M20 21V19C20 17.5 19 16.2 17.5 15.4M4 21V19C4 17.5 5 16.2 6.5 15.4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            </svg>
+          </el-icon>
+          <span>用户管理</span>
+        </el-menu-item>
       </el-menu>
     </el-aside>
 

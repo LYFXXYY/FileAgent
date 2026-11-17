@@ -55,4 +55,12 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
         )
 
     token = create_access_token(user.id, user.username)
-    return TokenResponse(access_token=token)
+    # role / can_use_default 随登录下发：前端据此决定管理入口与"官方"条目的展示，
+    # 省一个 /auth/me 往返。这两个值改了要重新登录才生效——可接受，
+    # 因为变更授权本来就是低频管理操作。
+    return TokenResponse(
+        access_token=token,
+        username=user.username,
+        role=user.role,
+        can_use_default=user.can_use_default,
+    )

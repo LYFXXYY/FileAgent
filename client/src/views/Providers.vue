@@ -12,7 +12,9 @@ import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'elem
 import { extractErrorMessage } from '@/api/client'
 import { providerApi } from '@/api/providers'
 import type { Capability, Provider, ProviderCreatePayload } from '@/api/types'
+import { useAuthStore } from '@/stores/auth'
 
+const auth = useAuthStore()
 const providers = ref<Provider[]>([])
 const loading = ref(false)
 const submitting = ref(false) // 防止对话框「保存」按钮重复点击
@@ -36,7 +38,9 @@ function toCapabilityList(raw: string): Capability[] {
   return picked.length ? picked : ['text']
 }
 
-const form = reactive<ProviderCreatePayload & { api_key: string; capabilityList: Capability[] }>({
+const form = reactive<
+  ProviderCreatePayload & { api_key: string; capabilityList: Capability[]; is_public: boolean }
+>({
   name: '',
   base_url: '',
   api_key: '',
@@ -44,6 +48,7 @@ const form = reactive<ProviderCreatePayload & { api_key: string; capabilityList:
   capabilityList: ['text'],
   max_tokens: 4096,
   temperature: 0.7,
+  is_public: false,
 })
 
 const rules: FormRules = {
@@ -76,6 +81,8 @@ function buildPayload(): ProviderCreatePayload {
     capabilities: form.capabilityList.join(','),
     max_tokens: form.max_tokens,
     temperature: form.temperature,
+    // 公共标记只有 admin 能改；普通用户提交恒为 false（后端也会拒 true）
+    is_public: auth.isAdmin ? form.is_public : false,
   }
 }
 
@@ -105,6 +112,7 @@ function openCreate() {
     capabilityList: ['text'],
     max_tokens: 4096,
     temperature: 0.7,
+    is_public: false,
   })
   dialogVisible.value = true
 }
@@ -120,6 +128,7 @@ function openEdit(row: Provider) {
     capabilityList: toCapabilityList(row.capabilities),
     max_tokens: row.max_tokens,
     temperature: row.temperature,
+    is_public: row.is_public,
   })
   dialogVisible.value = true
 }
@@ -207,6 +216,9 @@ async function toggleActive(row: Provider) {
         <el-table-column prop="name" label="名称" min-width="120">
           <template #default="{ row }">
             <span class="provider-name">{{ row.name }}</span>
+            <el-tag v-if="row.is_public" type="danger" size="small" effect="plain" class="cap-tag">
+              官方
+            </el-tag>
           </template>
         </el-table-column>
         <el-table-column prop="base_url" label="API 地址" min-width="240" show-overflow-tooltip />
@@ -233,13 +245,21 @@ async function toggleActive(row: Provider) {
         </el-table-column>
         <el-table-column label="启用" width="80">
           <template #default="{ row }">
-            <el-switch v-model="row.is_active" @change="toggleActive(row as Provider)" />
+            <!-- 别人名下的公共提供商：只读展示，启用/编辑/删除归 owner（admin） -->
+            <el-switch
+              v-if="auth.isAdmin || !row.is_public"
+              v-model="row.is_active"
+              @change="toggleActive(row as Provider)"
+            />
+            <span v-else class="model-tag">由管理员维护</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="140" fixed="right">
+        <el-table-column v-if="auth.isAdmin || providers.some((p) => !p.is_public)" label="操作" width="140" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" @click="openEdit(row as Provider)">编辑</el-button>
-            <el-button link type="danger" @click="remove(row as Provider)">删除</el-button>
+            <template v-if="auth.isAdmin || !row.is_public">
+              <el-button link type="primary" @click="openEdit(row as Provider)">编辑</el-button>
+              <el-button link type="danger" @click="remove(row as Provider)">删除</el-button>
+            </template>
           </template>
         </el-table-column>
       </el-table>
@@ -291,6 +311,10 @@ async function toggleActive(row: Provider) {
         </el-form-item>
         <el-form-item label="Temperature">
           <el-slider v-model="form.temperature" :min="0" :max="2" :step="0.1" show-input />
+        </el-form-item>
+        <!-- 公共（官方默认）标记：仅 admin 可见可改，后端同样有守卫 -->
+        <el-form-item v-if="auth.isAdmin" label="官方默认">
+          <el-checkbox v-model="form.is_public">标记为公共默认模型（被授权用户可直接使用）</el-checkbox>
         </el-form-item>
       </el-form>
       <template #footer>

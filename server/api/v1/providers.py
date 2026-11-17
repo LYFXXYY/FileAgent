@@ -30,13 +30,28 @@ def list_providers(
     db: Session = Depends(get_db),
     current: User = Depends(get_current_user),
 ):
-    """列出当前用户的提供商（含未启用的，前端自行按 is_active 过滤展示）"""
+    """
+    自己的提供商（含未启用的）+ 被授权可见的公共提供商
+
+    未授权用户的世界里公共提供商不存在——列表不含、指定了也用不了（§9.11）。
+    """
     providers = (
         db.query(ModelProvider)
         .filter(ModelProvider.user_id == current.id)
         .order_by(ModelProvider.id)
         .all()
     )
+    if current.can_use_default:
+        public = (
+            db.query(ModelProvider)
+            .filter(
+                ModelProvider.is_public == True,  # noqa: E712
+                ModelProvider.user_id != current.id,
+            )
+            .order_by(ModelProvider.id)
+            .all()
+        )
+        providers = sorted([*providers, *public], key=lambda p: p.id)
     return [ProviderResponse.from_orm_masked(p) for p in providers]
 
 
@@ -46,6 +61,9 @@ def create_provider(
     db: Session = Depends(get_db),
     current: User = Depends(get_current_user),
 ):
+    # 公共标记只有 admin 能设——否则任何人都是"官方默认"的发布者了
+    if body.is_public and current.role != "admin":
+        raise HTTPException(400, "只有管理员可以标记公共提供商")
     # user_id 从登录态取，绝不接受请求体传入（防越权写他人名下）
     provider = ModelProvider(user_id=current.id, **body.model_dump())
     db.add(provider)
@@ -73,6 +91,9 @@ def update_provider(
     # exclude_unset=True → 只更新前端实际传了的字段，未传的保持原值
     # 类比 Java 的 BeanUtils.copyProperties(src, target, ignoreProps)
     updates = body.model_dump(exclude_unset=True)
+    # 公共标记的开关同样只属于 admin（能改自己提供商的非 admin 也改不了 is_public）
+    if updates.get("is_public") is not None and current.role != "admin":
+        raise HTTPException(400, "只有管理员可以变更公共标记")
     for key, value in updates.items():
         setattr(provider, key, value)
 

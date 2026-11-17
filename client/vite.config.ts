@@ -28,7 +28,7 @@ export default defineConfig({
   },
 
   server: {
-    port: 5173,
+    port: 5241,
     // 开发代理：/api 前缀的请求转发到后端 8000
     // 【为什么用 proxy？】浏览器直连 http://localhost:8000 会触发 CORS，
     // 虽然我们在后端加了 CORS 中间件解决，但用 proxy 更彻底：

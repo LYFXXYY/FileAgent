@@ -15,9 +15,27 @@ export interface User {
   username: string
 }
 
+export type UserRole = 'user' | 'admin'
+
 export interface TokenResponse {
   access_token: string
   token_type: string
+  username: string
+  /** 登录时一并下发；改了角色/授权要重新登录才生效（低频管理操作，可接受） */
+  role: UserRole
+  can_use_default: boolean
+}
+
+// ========== 管理端（/admin/*，仅 admin 可用） ==========
+export interface AdminUserRow {
+  id: number
+  username: string
+  role: UserRole
+  can_use_default: boolean
+  created_at: string
+  task_count: number
+  log_count: number
+  total_tokens: number
 }
 
 // ========== 提供商 ==========
@@ -39,6 +57,8 @@ export interface Provider {
   max_tokens: number
   temperature: number
   is_active: boolean
+  /** 公共（官方默认）标记：仅 admin 能设置；被授权用户的列表里会出现它 */
+  is_public: boolean
   created_at: string
   updated_at: string
 }
@@ -51,6 +71,8 @@ export interface ProviderCreatePayload {
   capabilities?: string
   max_tokens?: number
   temperature?: number
+  /** 仅 admin 可设为 true；非 admin 传 true 后端拒 400 */
+  is_public?: boolean
 }
 
 export type ProviderUpdatePayload = Partial<ProviderCreatePayload & { is_active: boolean }>

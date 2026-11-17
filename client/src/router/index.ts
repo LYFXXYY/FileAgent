@@ -21,6 +21,7 @@ const Login = () => import('@/views/Login.vue')
 const Tasks = () => import('@/views/Tasks.vue')
 const Providers = () => import('@/views/Providers.vue')
 const Logs = () => import('@/views/Logs.vue')
+const Admin = () => import('@/views/Admin.vue')
 
 const routes: RouteRecordRaw[] = [
   {
@@ -38,6 +39,8 @@ const routes: RouteRecordRaw[] = [
       { path: 'tasks', name: 'tasks', component: Tasks },
       { path: 'providers', name: 'providers', component: Providers },
       { path: 'logs', name: 'logs', component: Logs },
+      // 管理页：adminOnly 标记 + 守卫兜底；真正的权限把关在后端 require_admin
+      { path: 'admin', name: 'admin', component: Admin, meta: { adminOnly: true } },
     ],
   },
   // 未匹配的路径重定向到首页
@@ -59,6 +62,10 @@ router.beforeEach((to) => {
   }
   // 已登录 + 目标又是 login → 直接进首页，不用重复登录
   if (to.name === 'login' && auth.isLoggedIn) {
+    return { name: 'home' }
+  }
+  // 管理页：非 admin 直接回首页。这只是入口拦截，后端 require_admin 才是权限边界
+  if (to.meta.adminOnly && !auth.isAdmin) {
     return { name: 'home' }
   }
   return true

@@ -12,7 +12,7 @@ from __future__ import annotations  # 让类型注解延迟解析，避免循环
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import String, func
+from sqlalchemy import Boolean, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database import Base
@@ -36,6 +36,14 @@ class User(Base):
 
     # bcrypt 哈希后的密码，固定 60 字节但预留 255（不同算法长度不同）
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # ---------- 角色与默认模型授权（SPEC §9.11）----------
+    # 'user' | 'admin'。第一个 admin 由迁移脚本硬编码升级（bootstrap），
+    # 之后只有 admin 能改别人的角色；任何人（含 admin）不能改自己的角色——防自锁
+    role: Mapped[str] = mapped_column(String(10), default="user", nullable=False)
+    # 能否使用公共（官方默认）提供商。admin 逐个开关；
+    # 吊销后正在跑的任务不打断，下一次发起才在 resolve_provider 处失败
+    can_use_default: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     # DATETIME DEFAULT CURRENT_TIMESTAMP
     # server_default=func.now() → 由数据库的 DEFAULT NOW() 生成，不依赖应用层时钟

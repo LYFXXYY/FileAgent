@@ -44,6 +44,8 @@ class ProviderCreate(BaseModel):
     )
     max_tokens: int = Field(default=4096, ge=1, le=200000)
     temperature: float = Field(default=0.7, ge=0, le=2)
+    # 只有 admin 能建公共提供商；非 admin 传 true 会被路由层拒（400）
+    is_public: bool = False
 
     @field_validator("capabilities")
     @classmethod
@@ -63,6 +65,8 @@ class ProviderUpdate(BaseModel):
     max_tokens: int | None = Field(default=None, ge=1, le=200000)
     temperature: float | None = Field(default=None, ge=0, le=2)
     is_active: bool | None = None
+    # 公共标记：非 admin 传了会被路由层拒（400）；这里只声明字段形态
+    is_public: bool | None = None
 
     @field_validator("capabilities")
     @classmethod
@@ -83,6 +87,8 @@ class ProviderResponse(BaseModel):
     max_tokens: int
     temperature: float
     is_active: bool
+    # 公共（官方默认）标记，仅 admin 可改；被授权用户列表里可见（SPEC §9.11）
+    is_public: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -101,6 +107,7 @@ class ProviderResponse(BaseModel):
             max_tokens=obj.max_tokens,
             temperature=obj.temperature,
             is_active=obj.is_active,
+            is_public=obj.is_public,
             created_at=obj.created_at,
             updated_at=obj.updated_at,
         )

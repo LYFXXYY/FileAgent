@@ -62,3 +62,18 @@ def get_current_user(
         # token 有效但用户已被删除
         raise unauthorized
     return user
+
+
+def require_admin(current: User = Depends(get_current_user)) -> User:
+    """
+    管理端点专用依赖：非 admin 一律 403
+
+    与 §3.1 的关系：数据隔离约束管的是普通用户路由；admin 路由**有意**跨用户查数据，
+    新加管理功能时不要再"顺手"给查询补 user_id 过滤，否则 admin 视图直接失效。
+    """
+    if current.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="需要管理员权限",
+        )
+    return current

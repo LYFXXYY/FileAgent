@@ -18,6 +18,7 @@ from models.provider import ModelProvider
 from models.task import Task
 from models.user import User
 from schemas.task import TaskCreate, TaskResponse, TaskUpdate
+from services.llm import provider_usable_by
 
 router = APIRouter()
 
@@ -37,11 +38,11 @@ def create_task(
     db: Session = Depends(get_db),
     current: User = Depends(get_current_user),
 ):
-    # 如果指定了 provider_id，验证其存在且属于当前用户（防越权引用他人提供商）
+    # 如果指定了 provider_id，验证存在且对该用户可用（自己的或被授权的公共提供商）
     if body.provider_id is not None:
         provider = db.get(ModelProvider, body.provider_id)
-        if provider is None or provider.user_id != current.id:
-            raise HTTPException(400, "指定的模型提供商不存在")
+        if provider is None or not provider_usable_by(provider, current):
+            raise HTTPException(400, "指定的模型提供商不存在或不可用")
 
     task = Task(user_id=current.id, **body.model_dump())
     db.add(task)
@@ -63,12 +64,12 @@ def update_task(
         raise HTTPException(404, "任务不存在")
 
     updates = body.model_dump(exclude_unset=True)
-    # 若改动 provider_id，同样校验归属
+    # 若改动 provider_id，同样校验可用性（含公共提供商授权）
     new_provider_id = updates.get("provider_id")
     if new_provider_id is not None:
         provider = db.get(ModelProvider, new_provider_id)
-        if provider is None or provider.user_id != current.id:
-            raise HTTPException(400, "指定的模型提供商不存在")
+        if provider is None or not provider_usable_by(provider, current):
+            raise HTTPException(400, "指定的模型提供商不存在或不可用")
 
     for key, value in updates.items():
         setattr(task, key, value)

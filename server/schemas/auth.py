@@ -26,10 +26,17 @@ class LoginRequest(BaseModel):
 
 
 class TokenResponse(BaseModel):
-    """登录成功返回的 JWT"""
+    """登录成功返回的 JWT + 身份标记
+
+    role / can_use_default 随登录一起下发：前端靠 role 决定要不要显示管理入口，
+    靠 can_use_default 决定 Providers 页是否展示"官方"条目——不用再开 /auth/me。
+    """
 
     access_token: str
     token_type: str = "bearer"
+    username: str
+    role: str = "user"
+    can_use_default: bool = False
 
 
 class UserResponse(BaseModel):
@@ -37,6 +44,8 @@ class UserResponse(BaseModel):
 
     id: int
     username: str
+    role: str = "user"
+    can_use_default: bool = False
 
     # Pydantic v2 语法：允许从 ORM 对象直接构造响应
     # 类比 Java 的 ModelMapper.map(entity, UserResponse.class)

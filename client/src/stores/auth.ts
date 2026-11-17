@@ -16,25 +16,38 @@ import { computed, ref } from 'vue'
 
 import { extractErrorMessage, tokenStorage } from '@/api/client'
 import { authApi } from '@/api/auth'
+import type { UserRole } from '@/api/types'
+
+const ROLE_KEY = 'fileagent_role'
+const DEFAULT_KEY = 'fileagent_can_use_default'
 
 export const useAuthStore = defineStore('auth', () => {
   // ---------- State ----------
   // ref() 声明一个响应式数据 —— 改了自动触发依赖它的组件重渲染
   const token = ref<string | null>(tokenStorage.get())
   const username = ref<string | null>(localStorage.getItem('fileagent_username'))
+  // 角色与默认模型授权随登录下发（后端 TokenResponse）。localStorage 双写与 token 同套路：
+  // 拦截器/路由守卫拿不到 store，只能读 localStorage
+  const role = ref<UserRole>((localStorage.getItem(ROLE_KEY) as UserRole) || 'user')
+  const canUseDefault = ref(localStorage.getItem(DEFAULT_KEY) === 'true')
 
   // ---------- Getter ----------
   // computed() 相当于 Java 的 @Cached getter —— 依赖变了才重算
   const isLoggedIn = computed(() => !!token.value)
+  const isAdmin = computed(() => role.value === 'admin')
 
   // ---------- Actions ----------
   async function login(user: string, password: string): Promise<void> {
     try {
       const resp = await authApi.login(user, password)
       token.value = resp.data.access_token
-      username.value = user
+      username.value = resp.data.username || user
+      role.value = resp.data.role
+      canUseDefault.value = resp.data.can_use_default
       tokenStorage.set(resp.data.access_token)
-      localStorage.setItem('fileagent_username', user)
+      localStorage.setItem('fileagent_username', username.value || user)
+      localStorage.setItem(ROLE_KEY, resp.data.role)
+      localStorage.setItem(DEFAULT_KEY, String(resp.data.can_use_default))
     } catch (err) {
       throw new Error(extractErrorMessage(err))
     }
@@ -53,9 +66,13 @@ export const useAuthStore = defineStore('auth', () => {
   function logout(): void {
     token.value = null
     username.value = null
+    role.value = 'user'
+    canUseDefault.value = false
     tokenStorage.clear()
     localStorage.removeItem('fileagent_username')
+    localStorage.removeItem(ROLE_KEY)
+    localStorage.removeItem(DEFAULT_KEY)
   }
 
-  return { token, username, isLoggedIn, login, register, logout }
+  return { token, username, role, canUseDefault, isLoggedIn, isAdmin, login, register, logout }
 })

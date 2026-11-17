@@ -1071,11 +1071,32 @@ class SpecChunk(Base):
 - ❌ 多 worker（reaper 那条单 worker 假设不变）
 - ❌ 老 MySQL 数据迁过来
 
-### 9.11 管理员 + 默认模型授权（**规划中，未排进阶段 4–6**）
+### 9.11 管理员 + 默认模型授权（**2026-11-17 已实施，简单版**）
 
-2026-11-16 用户提出。场景：项目部署给别人注册时，新用户没配 provider → 看不到任何模型 → 处理功能直接禁用。要让 admin 控制谁能用"官方默认 provider"，其余人只能用私有 provider 或啥都用不了。
+用户提出的场景：项目部署给别人注册时，新用户没配 provider → 看不到任何模型 → 处理功能直接禁用。**admin 控制谁能用"官方默认 provider"**，其余人只能用私有 provider。
 
-**这条不阻塞阶段 5/6**，是产品形态从"自己用 / 同学之间小范围"升级到"对外的 SaaS 雏形"时才做的功能。做完阶段 5 再回头评估要不要做。
+**已按 §9.11.1 简单版落地**（三列：`users.role` / `users.can_use_default` / `model_providers.is_public`）。两条实施期确认：
+- ❌ **不做 audit 端点**（用户 2026-11-17 拍板）——`GET /admin/users` 行内直接带任务数/处理次数/token 累计，够管人用；变更历史等真需要时再建表。
+- **Admin 页范围 = 三件事**：用户列表 + 角色升降 + 默认模型授权开关。admin 的"配置默认模型"动作发生在 Providers 页（勾"官方默认"），**没有**跨用户 provider 管理视图。
+
+【实际实现清单】
+
+| 层 | 内容 |
+|---|---|
+| 模型 | `User.role`（'user'/'admin'）、`User.can_use_default`、`ModelProvider.is_public`，全默认值兼容老行 |
+| 迁移 | `migrate_add_admin_support.py`：三列 `ADD COLUMN IF NOT EXISTS` + `UPDATE users SET role='admin' WHERE username=:u`（默认 LYF，argv 可换）；**只提升不降级**，重复跑安全 |
+| 依赖 | `middleware/auth.py:require_admin` —— 非 admin 一律 403；§3.1 隔离铁律的**声明式例外**（admin 路由有意跨用户） |
+| 授权判据 | `services/llm.py:provider_usable_by(provider, user)` —— 自己的永远可用；公共的看 `can_use_default`；别人私有永不可用。providers 列表、tasks 校验、resolve_provider 三处共用 |
+| resolve | 指定 provider → 必须 usable 否则显式报错；自动挑选 → 自己的 active 优先，找不到且被授权才回落公共池 |
+| 路由 | `GET /admin/users`、`PATCH /admin/users/{id}/role`、`PATCH /admin/users/{id}/default-access`；两道防自锁：**不能改自己角色**、**不能降掉最后一个 admin** |
+| 提供商 | 列表 = 自己的 +（被授权时）公共的；`is_public` 只有 admin 能创建/变更（路由层 400） |
+| 登录 | `TokenResponse` 带 `username/role/can_use_default`，前端据此控制管理入口与"官方"条目；**改角色/授权后需重新登录生效**（低频操作，可接受） |
+| 前端 | `Admin.vue`（角色下拉 + 授权开关，自己那行角色禁用）；路由 `meta.adminOnly` + 守卫；侧栏"用户管理"仅 admin 可见；Providers 页"官方"徽标 + admin 才见"官方默认"复选框，别人名下公共条目只读 |
+| 测试 | `tests/test_admin.py` 10 项：授权矩阵 / 公共回落 / 未授权不可见 / 显式指定需授权 / 自己的优先 / 两道防自锁 / 授权开关即时生效 |
+
+【§9.11.3 四个决策点的最终答案】①bootstrap=迁移脚本（比计划多了 argv 可传用户名）；②防自锁=前后端双保险（下拉禁用 + 后端 400）；③处理中任务不打断，下一次发起在 `resolve_provider` 显式报错；④admin 视图=叠加（普通用户视角 + `/admin` 入口）。
+
+【遗留（有意不做）】角色变更实时生效（现在要重登录）、admin 审计日志、跨用户 provider 管理、`is_public` 的字段级加密仍按 §7 未做清单。
 
 #### 9.11.1 设计选择
 
