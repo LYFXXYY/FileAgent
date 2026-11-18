@@ -28,7 +28,7 @@
 ```bash
 uv sync                                        # 装依赖（含 dev 组）
 uv run python run_backend.py                   # 起后端（必须走这个入口，不能直接 uvicorn main:app，见下方 ⚠）
-uv run pytest -q                               # 178 passed；纯函数 + 假 client + 内存 SQLite + 合成 PDF，不连 Postgres 不出网
+uv run pytest -q                               # 202 passed；纯函数 + 假 client + 内存 SQLite + 合成 PDF，不连 Postgres 不出网
 uv run ruff check .                            # 全绿
 uv run ruff format --check .                   # 全部已格式化
 uv lock --check                                # 依赖锁一致性
@@ -36,7 +36,7 @@ LONGDOC_CHUNK_CHARS=60 LLM_TRUST_ENV_PROXY=false uv run python run_backend.py   
 uv run uvicorn test_llm_server:app --port 19000            # 假 OpenAI 文本端点（批改 + PPT 大纲共用同一进程，按 system prompt 路由）
 uv run uvicorn test_vlm_server:app --port 19001            # 假 VLM 视觉批评端点（PPT 批评循环 e2e 用）
 uv run python test_e2e.py                      # 端到端 31 项：需后端在 8000 已起 + 假 LLM 不用，见 §7
-uv run python test_e2e_structural.py           # 结构化批改 + PDF + 分块端到端 52 项，零真实 token
+uv run python test_e2e_structural.py           # 结构化批改 + PDF + 分块端到端 60 项，零真实 token
 uv run python test_e2e_ppt.py                  # PPT 流水线端到端 28 项：后端 + 假 LLM 19000 + 假 VLM 19001 三进程必起
 uv run python -m eval.runner --provider 5 --case clean   # 评测台冒烟：**会真花钱**，先单条再全量
 ```
@@ -46,6 +46,8 @@ uv run python -m eval.runner --provider 5 --case clean   # 评测台冒烟：**�
 ⚠ **`test_e2e_structural.py` 第 10 节要后端带 `LONGDOC_CHUNK_CHARS=60` 启动**才会真的切块；用默认 6000 时那节 12 项断言会失败（不是回归，是预算没到分块门槛）。跑完 `server/checkpoints/` 会被脚本自动清理。
 
 ⚠ **8000 端口在本机可能"看不见地被占用"**：WSL 侧若有服务监听 8000，因 mirrored 网络，Windows `netstat` 查不到该监听，现象是 uvicorn 报 `[Errno 10048]` 而 `curl localhost:8000` 却能收到对方的 404。查证要跑 `wsl -e bash -lc "ss -ltnp | grep ':8000'"`。换端口时 `test_e2e_structural.py` 走 `FA_API` / `FA_MOCK_LLM` 环境变量，`test_e2e.py` 仍是硬编码 8000。
+
+⚠ **`run_backend.py` 的 host 必须是 `["127.0.0.1", "::1"]` 双栈绑定**：只绑 `127.0.0.1` 时，浏览器和 Vite 代理解析 `localhost` 会先试 IPv6 `::1` 吃一次连接拒绝再回退，本机实测**每个请求凭空多 ~220ms**（health 端点 0.004s → 0.23s），这就是"前端界面加载慢"的真正根因——诊断法：同一端点分别用 `localhost` 和 `127.0.0.1` 计时，差值大就是这个坑。
 
 前端 `cd client`：
 
@@ -120,6 +122,9 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - **共享 httpx client 由 lifespan 管生命周期**：`main.py` 启动时预热 `get_client()`，让"代理环境变量非法导致构造失败"提前进启动日志，而不是等用户点处理才炸。`LLM_TRUST_ENV_PROXY=false` 是绕开 `NO_PROXY` 含裸 `[::1]` 时报 `InvalidURL: Invalid port` 的开关；**需要走系统代理访问境外端点时不要关它**。
 - `chat()` 里 `except LLMError` 会重新包装以带上 attempts——新增 `LLMError` 抛出点时要确认 attempts 没被抹成默认 1。
 - `capabilities` 是逗号分隔串，合法取值在 `schemas/provider.py` 的 `KNOWN_CAPABILITIES`。加新能力要同时改那里、前端 `Providers.vue` 的 `capabilityOptions`、以及新增的调用点。
+- **思考开关只有一个入口**：`config.llm_enable_thinking`（`bool | None`）。**默认 None = 请求体里不带 `enable_thinking` 字段**——各家 OpenAI 兼容端点对未知参数的容忍度不一，默认发出去是风险；只有显式配置才注入。实测代价差极大：1117 字中文 PDF 走批改，qwen3.8-max 开着思考单轮 **240s / 10990 completion token**，关掉思考 **21s / 901 token**（约 7 倍便宜）。但同一份文档三次分别报出 13 / 6 / 11 条问题，**"关掉思考会不会漏检"目前无证据可判**，要结论得靠评测台同夹具跑重复轮次。
+- **`provider.max_tokens` 对某些端点是死配置**：实测 qwen3.8-max 在 `max_tokens=4096` 下仍返回 10990 completion token（`finish_reason=stop`）。别把它当成本闸门用，成本只能从 `llm_calls.total_tokens` 事后看。
+- **超时异常文案不要直接插值**：httpx 在 asyncio 门下抛出的 `ReadTimeout` 常常 `str()` 为空，`f"LLM 请求超时：{e}"` 会产出"LLM 请求超时：（共尝试 3 次）"这种冒号后空着的病句。统一走 `services/llm.py:_exc_text()`，空详情时退到异常类名。
 
 ### 3.7 结构化批改（阶段 1）
 
@@ -129,7 +134,7 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - **`revised_text` 是结构化清单的前提**：缺它就降级，不去猜一份修订文。批改任务仍把修订文写进 `processed_content`，所以 `create_diff_docx` 一行都不用改。
 - 问题类型是**开放输入 + 后端归一化**：`normalize_type()` 中英别名收进 8 个 canonical 值，认不出归 `other`。加枚举要同时改 `schemas/grading.py` 的 `_TYPE_ALIASES` 和前端 `TYPE_COLOR` / `TYPE_LABEL`。硬枚举会让换模型时整片报错。
 - 单条意见不合契约只丢那一条，不连累整份清单。
-- `structured_output` 为 NULL 表示非批改任务或历史数据；有值但 `degraded=true` 表示模型没守格式。**两者语义不同，`grading_degraded` 必须单独透给前端**，否则"没发现问题"和"没结构化"都显示 0 条，等于撒谎。
+- `structured_output` 为 NULL 表示非批改任务或历史数据；有值但 `degraded=true` 表示模型没守格式。**两者语义不同，`grading_degraded` 必须单独透给前端**，否则"没发现问题"和"没结构化"都显示 0 条，等于撒谎。**状态接口同样不能把 NULL 压成 `[]`**——`deserialize_issues(None)` 返回 `[]`，所以 `process.py` 的 status 响应必须写 `if done and log.structured_output`，否则非批改任务的工作台会冒出一句"批改完成，未发现问题"（2026-11-17 普通用户真机走查实拍）。
 - 日志列表只带 `issue_count`，不带整份清单（`api/v1/logs.py:_to_response` 解析 JSON 取条数）。
 - 计量 `purpose` 现在分 `chat` / `grading` / `grading_degraded`，评测台按它分组。新增调用点要传对的 purpose。
 - 结构化只在 `task.is_grading == True` 生效，普通任务走 `chat` 不走 `chat_json`。
@@ -141,7 +146,9 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - **拼接规则里 CJK 不加空格**是必须的：加了空格 `original` 片段与 `original_content` 就对不上，整条定位链路失效。
 - **页码判据必须带位置条件**：纯数字/罗马数字 + 落在上 8% 或下 20% 留白带。只按内容判会把正文里的年份、条款号、表格序号当页码删掉（`2024` 恰好是四位数）。
 - **跨页高频装饰用频次判，不硬编码字符串**，且三条护栏：文档 ≥3 页、文本 ≤20 字符、**带句末标点的一律放过**。丢内容的代价远大于留噪声。
-- 失败一律 `PdfError` → 路由转 400（打不开 / 有打开密码 / 没有文字层）。**扫描件绝不回空文本**——那会让用户以为文档本来就是空的。
+- 失败一律 `PdfError` → 路由转 400（打不开 / 有打开密码 / 没有文字层 / 文字层过薄）。
+  最后一种是扫描件判据的补集：整页是图片、只被 OCR 出一层图注水印的文档（实测一份 8 页护理指南只有 64 字符，却带着 16 张图），旧判据"有没有文字层"对它形同虚设，会被当正常文档送去付费模型。新判据三条同时成立才拦：页数 ≥2、每页平均字符 < `_MIN_CHARS_PER_PAGE`(80)、图片数 ≥ 页数——**带图这个条件不能省**，否则确实只有一两页短文的正常文档会被误杀。
+- **扫描件绝不回空文本**——那会让用户以为文档本来就是空的。
 - 依赖：`pymupdf` 2.x 把版面分析（`pymupdf-layout` → onnxruntime + numpy）和 Markdown 导出（`pymupdf4llm` → networkx + tabulate）做成了**硬依赖**。`services/pdf.py` 只用 `get_text("blocks")`，对这些零引用，所以 `pyproject.toml` 的 `[tool.uv] override-dependencies` 用"永不成立的 marker"把它们摘掉了：锁 **75 包**、`.venv` **233M**（摘之前是 84 包 / 337M）。**阶段 5 真要用版面分析时，删掉那几行 override 就能装回来**，别把它当成已经付过的成本。`import pymupdf`，**不要用 `fitz`**（2.x 里已弃用，会打 FutureWarning）。
 
 ### 3.9 评测台（阶段 2 最小版）
@@ -184,14 +191,20 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 
 ## 4. 前端不可违反的约定
 
+- **前端测试是 `npm test`（vitest + happy-dom），配置在 `vitest.config.ts` 不在 `vite.config.ts`**：构建入口 `vue-tsc -b && vite build` 是唯一的类型门禁，不要为了跑测试去改它。测试文件放 `src/**/*.test.ts`，会被 `tsconfig.app.json` 的 include 一起类型检查，所以 `noUnusedLocals` 之类在测试里同样生效。当前只测 SFC 之外的纯逻辑（`extractErrorMessage`、`tokenStorage`、两个 Pinia store），**没装 @vue/test-utils**——要测组件渲染再说。加新配置项时记得：测试里用 `SimpleNamespace` 造假 Settings，字段缺一个就是一堆 AttributeError（本轮加 `llm_enable_thinking` 时 29 个测试连带失败就是这个原因）。
 - **token 双写**：登录成功同时写 Pinia store 和 `localStorage`；axios 拦截器只读 `localStorage`（在 API 层拿不到 store）。key 常量集中在 `client/src/api/client.ts`（`fileagent_token` / `fileagent_username`），别处不要硬编码。- 401 处理要排除 `/auth/login`（那是密码错误），用 `window.location.replace` 带 `redirect` 参数（拦截器层拿不到 router 实例）。
 - 自动重试**只针对无响应的 GET**，1 次 / 800ms；写操作绝不重试。
 - 处理结果**一律靠轮询 `status` 拿**，不要依赖 `POST /process` 的响应体（它只返回 processing）。`POLL_INTERVAL=5000`、`MAX_POLL_COUNT=120`（10 分钟上限）。
-- `AppLayout.vue:119` 用 `<keep-alive>` 包住 router-view，工作台切页不销毁 → 必须成对处理 `onActivated`（恢复状态 + 重启轮询）/ `onDeactivated`（停轮询）。
+- `AppLayout.vue` 的 `<keep-alive>` 包住 router-view，工作台切页不销毁 → 必须成对处理 `onActivated`（恢复状态 + 重启轮询）/ `onDeactivated`（停轮询）。
 - **Pinia setup store 只用 `ref` + `watch`**，不要用对象字面量 getter/setter 代理闭包变量：Pinia 会把访问器转成普通数据属性，导致 `restore()` 后 UI 拿不到值、setter 不触发保存（`client/src/stores/home.ts:16`）。
 - 持久化用 `sessionStorage`（key `fileagent_home_state`），**不存 File 对象**，恢复时 `pickedFile` 置 null。
 - 路径别名 `@` → `src`，`vite.config.ts` 与 `tsconfig.app.json` 两处都要配。
 - Element Plus 是**按需引入**（`vite.config.ts` 的 `unplugin-vue-components` + `ElementPlusResolver`），首屏 JS 从 893kB 降到 ~436kB，构建的体积告警随之消失。三件插件管不到的东西必须在 `main.ts` 手工接上，漏了就是"构建通过、界面上裸样式"：**ElMessage / ElMessageBox / v-loading**（函数式与指令，不是标签，扫不到）以及它们各自的样式、还有中文 locale（改成 App.vue 里的 `el-config-provider`，不要再 `app.use(ElementPlus)`）。`src/components.d.ts` 是构建生成的，已 ignore，删掉也能重新生成。
+- **主题层是唯一定制入口**：`client/src/assets/theme.css`（`main.ts` 里在 `style.css` 之后 import）覆盖 Element Plus 的 CSS 变量——暖白底 / 墨黑前景 / 近黑主色 / 暖橙高亮笔点缀，另有漂移光斑 + 噪点背景。新增视觉定制优先改这个文件，**不要在页面里硬编码色值**（历史遗留的蓝紫渐变已在 2026-11-17 全部清掉，回归检查：`grep -rn "409eff|66b1ff|6366f1" src --include=*.vue` 应为空）。覆盖层用 `html:root` 选择器压过 base.css 的 `:root`/`html` 双声明；整体回滚只需删 `main.ts` 一行 import。动效/圆角/色彩锚点令牌都定义在 theme.css 顶部 `--fa-*`，页面里引用令牌不引用字面值。
+- **给 `el-button--primary` 这类组件级规则加外观（渐变/圆角）时必须 `:not(.is-link):not(.is-text)`**——link 按钮也带 `el-button--primary` 类，否则"退出"这种文字链接会被刷成实心色块（2026-11-17 浏览器走查实拍）。同理 `el-step__head` 是容器，染背景要落到 `.el-step__icon.is-text` 上。
+- **页面头部结构是全局的**：`.page` / `.page-header` / `.page-header-content` / `.page-icon` 都在 `style.css`，五个业务页共用（原先 Tasks/Providers/Logs 各抄一份 `.page-icon`，已去重）。新页面直接套这套类名 + `page-header-content > (page-icon + div)`，不要再在 scoped 里另写头部样式。
+- **色彩分工**：`success/warning/danger/info` 只用于**状态**（日志状态、删除按钮）；属性标记（批改=是、`.pptx`、官方）一律 `type="primary"`。主色已是近黑，所以"处理中"用 `warning` 而不是 `primary`——否则与 `pending` 的灰阶糊在一起（UI-REFERENCE §4.5 预告的代价，实测踩到）。`Home.vue` 的 `TYPE_COLOR` 八色是**问题类型的数据编码**，不是装饰，不要为了统一色系而压成单色。
+- **状态值不给用户看英文枚举**：`Logs.vue` 的 `statusLabel` 从 `statusOptions` 派生，筛选下拉与表格列共用一份中文文案；新增枚举时改这一处。
 - 改了样式装载方式，验证不能只看 `npm run build` 过了：把 `dist/assets/*.css` 拼起来 grep 每个用过的 `el-*` 类名，才能确认样式真的进了产物（`el-option` / `el-tab-pane` / `el-config-provider` 三个是名字对不上，不是缺样式——它们的 style 入口引的是父组件 CSS）。真实交互（弹窗样式、loading 遮罩、分页中文文案）仍未在浏览器里跑过。
 - provider 的 `capabilities` 后端存逗号分隔**字符串**、表单要的是**数组**，转换只认 `KNOWN_CAPABILITIES` 里的已知值（`client/src/views/Providers.vue` 的 `toCapabilityList()` / `buildPayload()`）——顺带做了顺序归一化和脏值丢弃，未知标记不会把表单卡死也不会吃 422。提交**必须走 `buildPayload()`**，别把带 `capabilityList` 临时字段的 form 整个发出去。
 - 上传格式只在两处声明：`Home.vue` 的 `accept=".docx,.pdf"` 和上传区文案。**前端不做扩展名校验**，`accept` 只管文件选择对话框，拖拽照样能拖进 `.txt`——真校验在后端白名单，400 文案已是给用户看的。加格式时要同时改这两处 + 后端派发表。
@@ -221,7 +234,7 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 
 当前路线（阶段 0–5，含为什么这么排）在 SPEC §9.2；阶段 0 交付与验证明细在 SPEC §9.3，阶段 1 在 §9.4，阶段 1.5（PDF 输入 + 去 Word 化）在 §9.5，阶段 2 最小版（评测台 + 基线数字）在 §9.6，阶段 3（长文档分块批改图）在 §9.7，缺陷台账第五轮在 §10，改 bug 前先看这几张表。
 
-门禁基线（均已实测通过，2026-11-17 任务 2 管理员落地后）：`uv run pytest -q` → **199 passed**（189 + 10 admin 测试）；`uv run ruff check .` → 全绿；`ruff format --check .` → 81 files already formatted；`uv lock --check` → 一致（**83 包**）；`npm run build` → **通过**；`test_e2e.py` **31/0**、`test_e2e_structural.py` **52/0**、`test_e2e_ppt.py` **28/0**（真渲染）。**e2e 必须走 `run_backend.py`**，详见 §2 那条 ⚠。
+门禁基线（均已实测通过，2026-11-18 真实模型轮之后）：`uv run pytest -q` → **204 passed**（199 + 3 条薄文字层扫描件判据 + 2 条传输层超时文案/思考开关）；`uv run ruff check .` → 全绿；`ruff format --check .` → 78 files formatted；`uv lock --check` → 一致（**83 包**）；`npm run build` → **通过**；`npm test` → **24 passed**（前端 vitest，见 §4）；`test_e2e.py` **31/0**、`test_e2e_structural.py` **60/0**（含第 11 节"非批改 issues=None + 时间列同源"8 项，已实跑）、`test_e2e_ppt.py` **28/0**（真渲染）。**e2e 必须走 `run_backend.py`**，详见 §2 那条 ⚠。
 
 
 - **`server/test_e2e.py` 是仓库自带的端到端冒烟脚本，不是遗留物，别删**：需后端已在 8000 运行、连真实 Postgres。它会注册 `tester_*` / `other_*` 两个临时账号，造 1 条日志和 1 个上传文件；**跑完自动清理 DB 记录**（llm_calls → logs → tasks → providers → users），落盘文件因 UUID 存储名无法精确定位，偶尔手工清。第 7 节现在真走重试路径（连不上假 provider → 重试 3 次 → failed），第 10 节直接改库把日志置为 done 来验证下载，都属预期行为。
@@ -231,6 +244,13 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - `uploads/`、`outputs/`、`.env`、各类缓存已 ignore；`.env.example` 靠 `.gitignore` 里的 `!.env.example` 例外入库。
 - SPEC §11 示例写 `JWT_EXPIRE_HOURS=2`，本机 `.env` 实际是 24；`.env` 不入库，以本机为准。
 - 未做：限流、api_key 字段级加密、Alembic、Docker / 多 worker、表格提取（docx 表格和 PDF 表格都不进正文）、扫描件 OCR、加密 PDF 解密、成本价格表（计量只存 token 不算钱）、问题清单写进交付 docx。阶段 3 未做：`interrupt` 人工确认分块方案（要先有 UI）、长文摘要的两段式（逐块摘要 + 整篇汇总）、`checkpoints/` 体积治理与 TTL。评测台的下一步：真实文档夹具、第二厂商当裁判、同夹具跑重复轮次（单轮会漂）、把 `format_tier` 落进 `llm_calls`（改表结构，做前先问）。
+- **时间列只用 DB 时钟（2026-11-17 修）**：全站 13 张表的 timestamp 列都由 `func.now()` 生成，唯独 `operation_logs.processed_at` 曾用应用侧 `datetime.now(UTC)` 写入。容器钟比宿主机快 3–4s，于是出现 `processed_at < uploaded_at` 的倒挂、"处理耗时"相减得负数。现在两处写入（成功路径 + `_mark_failed`）都走 `func.now()`，且 commit 后必须 `db.refresh(log)` 才能把 SQL 表达式读成真实 datetime；启动期 reaper 把僵尸 processing 重置为 failed 时同样要写 `processed_at`（模型约定"每个状态变更都记录 processed_at"）。**新增时间列时不要再引入第二个时钟源**；`services/auth.py` 的 JWT `exp` 属于应用域时间，不走 DB，保持用 `datetime.now(UTC)`。诊断法：`SELECT (processed_at < uploaded_at), count(*) FROM operation_logs WHERE processed_at IS NOT NULL GROUP BY 1;`——修复前留下的 2 条历史行仍是倒挂，属正常。
+- 同一次普通用户走查还确认：`/admin/*` 对普通用户是 403、公共 provider 对其不可见、越权引用公共 provider 是 400、无可用模型时后台落 `failed` 且文案可行动、失败后下载 400——这几条没问题。
+- **真实模型轮一手结论（2026-11-18，qwen3.8-max-0902 + 用户真实文档 6 份）**：
+  - 4 份可处理文档全部 `done`、`degraded=False`、问题清单**定位率 100%**（11/11、10/10、8/8、0/0），修订文长度≈原文且**确实不同**——2026-11-15 那条"意见对但修订没落地"的旧缺陷在这条链路上没有复现。
+  - **图文混排的宣教类 PDF 报 0 条问题**（1282 字符散在 9 页、92 张图）。`degraded=False` 说明模型守了格式、真的认为没问题。此时界面显示"批改完成，未发现问题"对用户是误导——文档有内容，只是这类内容不该走文字批改。要不要加"提取密度异常/图文混排"提示是产品决策，未做。
+  - PDF→PPT 走真视觉模型跑通：批评循环实际外呼 4 次（outline→critic→outline→critic），产出 12 页 pptx 可被 python-pptx 重读，单份 22,571 token（≈批改一份的 6 倍）。
+  - 本轮 6 份合计 35,181 token。成本只能事后从 `llm_calls` 看，`provider.max_tokens` 拦不住（见 §3.6）。
 - **路线 2026-11-16/17（见 SPEC §9.2）**：阶段 4（Postgres 基建，11-16 当天迁完）、阶段 5（PDF→PPT 全链路，11-17 八切片收齐，含 WSL LibreOffice 真渲染）、任务 2（管理员 + 默认模型授权，11-17）均已完成。**下一站 = 阶段 6**：本地 embedding + pgvector 检索 + 规范条款注入批改 prompt（SPEC §9.2 阶段 6；`spec_chunks` 加 embedding 列是改表，做前先问）。剩余待办按用户定的顺序：浏览器 UI 走查 → 阶段 6。
 - **管理员 + 默认模型授权（已于 2026-11-17 实施，简单版）**：`users.role` / `users.can_use_default` / `model_providers.is_public` 三列 + `require_admin` + `/admin/*` 三端点 + 前端 Admin 页。不做 audit / 跨用户 provider 管理（用户拍板）。授权判据集中在 `services/llm.py:provider_usable_by`，改任何 provider 可见性逻辑先看 SPEC §9.11 的实施清单。**admin 路由是 §3.1 隔离铁律的声明式例外**——新加管理端点挂 `require_admin` 即可，不要"顺手"补 user_id 过滤把 admin 视图废掉。
 - **阶段 5 PDF→PPT**：6 项决策已敲定（VLM 走 mock 起步、OCR / 图片 / 真云端 VLM 是显式扩展口子）；`task.output_format` 列扩 + `services/pptx_builder.py` 接 `image_refs=None`、`services/pdf.py:extract_text_from_pdf(fallback_to_ocr=False)`——这两个签名是"留口子"的硬约束，未来切真实现不能改外部接口。完整计划见 SPEC §9.12。

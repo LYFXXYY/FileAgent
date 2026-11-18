@@ -22,6 +22,7 @@ import 'element-plus/es/components/message-box/style/css'
 import 'element-plus/es/components/loading/style/css'
 
 import './style.css' // 项目自定义全局样式（在 Element Plus 之后引入以覆盖）
+import './assets/theme.css' // 主题层：覆盖 Element Plus CSS 变量（回滚只需删这一行）
 
 import App from './App.vue'
 import { router } from './router'

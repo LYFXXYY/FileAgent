@@ -10,6 +10,7 @@
  * 首屏只加载 Login + Layout，其他页面按需加载，类似 Java 的 SPI
  */
 
+import { ElMessage } from 'element-plus'
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 
 import { useAuthStore } from '@/stores/auth'
@@ -65,7 +66,9 @@ router.beforeEach((to) => {
     return { name: 'home' }
   }
   // 管理页：非 admin 直接回首页。这只是入口拦截，后端 require_admin 才是权限边界
+  // 给一句提示而不是静默跳转——否则用户分不清是被拦了还是页面坏了
   if (to.meta.adminOnly && !auth.isAdmin) {
+    ElMessage.warning('你没有管理权限，已返回工作台')
     return { name: 'home' }
   }
   return true

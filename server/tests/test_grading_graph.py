@@ -53,6 +53,7 @@ def _settings(**overrides):
         "llm_max_retries": 0,
         "llm_max_concurrency": 4,
         "llm_trust_env_proxy": True,
+        "llm_enable_thinking": None,
         "longdoc_chunk_chars": 30,
         "longdoc_enabled": True,
         "database_url": "postgresql+psycopg2://x:y@localhost:5434/file_agent",

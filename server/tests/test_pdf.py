@@ -154,6 +154,44 @@ def test_extract_rejects_pdf_without_text_layer():
         extract_text_from_pdf(data)
 
 
+def _thin_pdf(pages_count: int, with_images: bool) -> bytes:
+    """
+    薄文字层夹具：每页只有一行各不相同的短图注 + 一张图。
+
+    图注逐页不同，是为了躲开"跨页高频装饰"判据——否则正文被当噪声删光，
+    测到的是空文本那条老规则，而不是这次新加的密度规则。
+    """
+    doc = pymupdf.open()
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 24, 24))
+    pix.set_rect(pix.irect, (200, 120, 60))
+    for i in range(pages_count):
+        page = doc.new_page()
+        page.insert_text((72, 300), f"图{i + 1}说明", fontname="china-s", fontsize=11)
+        if with_images:
+            page.insert_image(pymupdf.Rect(72, 320, 96, 344), pixmap=pix)
+    data = doc.tobytes()
+    doc.close()
+    return data
+
+
+def test_extract_rejects_thin_text_layer_scanned_pdf():
+    """整页是图片、只被 OCR 出一层图注的扫描件：有文字层也不等于能处理"""
+    with pytest.raises(PdfError, match="过薄"):
+        extract_text_from_pdf(_thin_pdf(3, with_images=True))
+
+
+def test_thin_text_without_images_is_not_rejected():
+    """同样薄的文字但没有图，说明正文本来就这么点，不该当扫描件误杀"""
+    text = extract_text_from_pdf(_thin_pdf(3, with_images=False))
+    assert "图1说明" in text
+
+
+def test_single_page_short_document_is_not_rejected():
+    """单页短文躲开页数门槛：一页的说明书不该被当成扫描件"""
+    text = extract_text_from_pdf(_thin_pdf(1, with_images=True))
+    assert "图1说明" in text
+
+
 # ---------- 端到端（合成 PDF） ----------
 def test_extract_merges_per_line_blocks_into_paragraphs():
     text = extract_text_from_pdf(

@@ -32,17 +32,16 @@ body {
     sans-serif;
   font-size: 14px;
   line-height: 1.6;
-  color: #303133;
-  background: #f5f7fa;
+  color: var(--fa-ink);
+  background: var(--fa-bg);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
 /* ============== 项目级 CSS 变量（Design Tokens） ============== */
+/* 色彩/圆角/动效令牌在 assets/theme.css，这里只留布局与间距刻度 */
 :root {
   /* 布局尺寸 */
-  --app-sidebar-width: 200px;
-  --app-header-height: 56px;
   --app-content-max-width: 1200px;
 
   /* 间距刻度（Element Plus 内部也是这套） */
@@ -51,42 +50,74 @@ body {
   --space-md: 16px;
   --space-lg: 24px;
   --space-xl: 32px;
-
-  /* 项目专属色（不动 Element Plus 的 primary，只补充） */
-  --sidebar-bg: #ffffff;
-  --sidebar-border: #e4e7ed;
-  --content-bg: #ffffff;
 }
 
 /* ============== 通用页面结构（.page-*） ============== */
 /* 每个业务页面都用同一套外层结构，保证标题/间距一致 */
 .page {
-  background: var(--content-bg);
-  border-radius: 4px;
+  background: var(--fa-surface);
+  border-radius: var(--fa-radius-box);
+  border: 1px solid color-mix(in oklab, var(--fa-ink) 7%, transparent);
+  box-shadow: var(--fa-shadow-lg);
   padding: var(--space-lg);
-  min-height: calc(100vh - var(--app-header-height) - 40px);
+  /* 120px = 悬浮导航避让 88px + 主区内边距上下 32px+24px 的余量，让卡片刚好铺满一屏 */
+  min-height: calc(100vh - 120px);
 }
 
 .page-header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
   margin-bottom: var(--space-lg);
   padding-bottom: var(--space-md);
-  border-bottom: 1px solid var(--sidebar-border);
+  border-bottom: 1px solid color-mix(in oklab, var(--fa-ink) 8%, transparent);
+}
+
+/* 头部内容区：图标 + 标题横排。五个业务页共用，不再各自抄一份 scoped 副本 */
+.page-header-content {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+}
+
+/* 页面图标容器：墨→暖橙渐变，与主按钮同一签名 */
+.page-icon {
+  width: 48px;
+  height: 48px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 14px;
+  background: linear-gradient(120deg, var(--fa-ink) 55%, oklch(38% 0.06 60) 100%);
+  color: #ffffff;
+  box-shadow: var(--fa-shadow-lg);
+}
+
+/* 窄屏：图标移到标题上方并缩小（原先三个页面各写一份，现在一处生效） */
+@media (max-width: 768px) {
+  .page-header-content {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .page-icon {
+    width: 40px;
+    height: 40px;
+  }
 }
 
 .page-title {
   font-size: 20px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
   margin: 0;
   letter-spacing: -0.2px;
 }
 
 .page-subtitle {
   font-size: 13px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   margin: 4px 0 0;
 }
 
@@ -95,26 +126,28 @@ body {
 }
 
 /* ============== 表单/列表通用间距 ============== */
+/* 正文里的裸链接（如 Home 引导去任务/提供商）：不显式给色就是浏览器默认蓝，会和新色系打架 */
+.page a {
+  color: var(--fa-accent);
+  font-weight: 500;
+  text-decoration: none;
+  border-bottom: 1px solid color-mix(in oklab, var(--fa-accent) 35%, transparent);
+  transition:
+    color var(--fa-duration-fast) ease-out,
+    border-color var(--fa-duration-fast) ease-out;
+}
+
+.page a:hover {
+  color: var(--fa-accent-pop);
+  border-bottom-color: var(--fa-accent-pop);
+}
+
 .el-form .el-form-item:last-child {
   margin-bottom: 0;
 }
 
 .el-table {
   font-size: 14px;
-}
-
-/* 状态标签统一样式（列表页用） */
-.status-pending {
-  color: #909399;
-}
-.status-processing {
-  color: #409eff;
-}
-.status-done {
-  color: #67c23a;
-}
-.status-failed {
-  color: #f56c6c;
 }
 
 /* ============== 通用淡入动画 ============== */
@@ -131,5 +164,5 @@ body {
 }
 
 .fade-in {
-  animation: fadeInUp 0.4s ease-out;
+  animation: fadeInUp 0.25s ease-out both;
 }

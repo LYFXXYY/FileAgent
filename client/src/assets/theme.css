@@ -1,0 +1,261 @@
+/**
+ * 主题层 —— 覆盖 Element Plus 的 CSS 变量，不改任何组件结构
+ *
+ * 色彩体系来自 UI-REFERENCE.md §2/§10（参考站实测，等价于 daisyUI cupcake 主题）：
+ * 暖白底 + 墨黑前景 + 近黑主色 + 一点暖橙，中性色全部由两个锚点 color-mix 派生。
+ *
+ * ⚠ 装载顺序：必须晚于 element-plus 的 base.css。按需引入时各组件样式把 base.css
+ *   作为依赖，会先于本文件进入产物；本文件用 html:root（特异性 0,1,1）同时压过
+ *   base.css 的 :root 与 html 两种声明。
+ * ⚠ 回滚方式：删掉 main.ts 里对 theme.css 的 import 即整体还原，无结构耦合。
+ */
+
+html:root {
+  /* ============ 色彩锚点 ============ */
+  --fa-ink: oklch(23.574% 0.066 313.189); /* 墨黑前景（带紫调近黑） */
+  --fa-bg: oklch(97.788% 0.004 56.375); /* 暖米白页面底 */
+  --fa-surface: oklch(99.2% 0.003 65); /* 卡片面（比页面底略亮） */
+  --fa-accent: oklch(72% 0.15 70.697); /* 暖橙点缀（深档，用于链接/强调文字） */
+  --fa-accent-soft: oklch(90% 0.076 70.697); /* 暖橙浅档（用于光斑背景） */
+  --fa-accent-pop: oklch(78% 0.17 65); /* 暖橙鲜档（高亮笔/渐变终点） */
+
+  /* ============ 缓动 ============ */
+  /* spring 用于悬停/入场，比 ease-out 多一点回弹，交互不死板 */
+  --fa-ease-spring: linear(0, 0.35, 0.7 18%, 1 38%, 0.92 55%, 1 72%, 0.985 85%, 1);
+
+  /* ============ 动效三档（UI-REFERENCE §2） ============ */
+  --fa-duration-fast: 0.2s; /* 交互反馈 */
+  --fa-duration-pulse: 1.8s; /* 骨架屏 */
+  --fa-duration-progress: 5s; /* 长进度 */
+
+  /* ============ 圆角分层（容器 24 / 控件 6 / 胶囊全圆） ============ */
+  --fa-radius-box: 24px;
+  --fa-radius-field: 6px;
+  --fa-radius-pill: 9999px;
+
+  /* ============ 墨色着色阴影（不用纯黑） ============ */
+  --fa-shadow-lg: 0 10px 28px color-mix(in oklab, var(--fa-ink) 6%, transparent);
+  --fa-shadow-xl: 0 18px 44px color-mix(in oklab, var(--fa-ink) 10%, transparent);
+
+  /* ============ Element Plus 变量覆盖 ============ */
+  /* 主色取近黑：primary-light-* 是“掺白变浅”（hover），dark-* 是“掺黑变深”（active） */
+  --el-color-primary: var(--fa-ink);
+  --el-color-primary-light-3: color-mix(in oklab, var(--fa-ink) 72%, white);
+  --el-color-primary-light-5: color-mix(in oklab, var(--fa-ink) 55%, white);
+  --el-color-primary-light-7: color-mix(in oklab, var(--fa-ink) 30%, white);
+  --el-color-primary-light-8: color-mix(in oklab, var(--fa-ink) 18%, white);
+  --el-color-primary-light-9: color-mix(in oklab, var(--fa-ink) 8%, white);
+  --el-color-primary-dark-2: color-mix(in oklab, var(--fa-ink) 85%, black);
+
+  /* 暖中性阶梯 */
+  --el-bg-color: var(--fa-surface);
+  --el-bg-color-page: var(--fa-bg);
+  --el-bg-color-overlay: var(--fa-surface);
+  --el-text-color-primary: var(--fa-ink);
+  --el-text-color-regular: color-mix(in oklab, var(--fa-ink) 72%, var(--fa-bg));
+  --el-text-color-secondary: color-mix(in oklab, var(--fa-ink) 52%, var(--fa-bg));
+  --el-text-color-placeholder: color-mix(in oklab, var(--fa-ink) 38%, var(--fa-bg));
+  --el-text-color-disabled: color-mix(in oklab, var(--fa-ink) 26%, var(--fa-bg));
+
+  /* hairline 边框：1px @ 10% 前景透明度 */
+  --el-border-color: color-mix(in oklab, var(--fa-ink) 10%, transparent);
+  --el-border-color-light: color-mix(in oklab, var(--fa-ink) 8%, transparent);
+  --el-border-color-lighter: color-mix(in oklab, var(--fa-ink) 6%, transparent);
+  --el-border-color-extra-light: color-mix(in oklab, var(--fa-ink) 4%, transparent);
+  --el-border-color-hover: color-mix(in oklab, var(--fa-ink) 24%, transparent);
+
+  /* 填充与遮罩 */
+  --el-fill-color: color-mix(in oklab, var(--fa-ink) 5%, var(--fa-bg));
+  --el-fill-color-light: color-mix(in oklab, var(--fa-ink) 3%, var(--fa-bg));
+  --el-fill-color-lighter: color-mix(in oklab, var(--fa-ink) 2%, var(--fa-bg));
+  --el-fill-color-blank: var(--fa-surface);
+  --el-mask-color: color-mix(in oklab, var(--fa-bg) 72%, transparent);
+
+  /* 阴影换成墨色着色 */
+  --el-box-shadow: var(--fa-shadow-lg);
+  --el-box-shadow-light: var(--fa-shadow-lg);
+  --el-box-shadow-lighter: 0 6px 18px color-mix(in oklab, var(--fa-ink) 5%, transparent);
+
+  /* 圆角令牌 */
+  --el-border-radius-base: var(--fa-radius-field);
+  --el-border-radius-small: 4px;
+}
+
+/* ============ 页面底：暖白 + 漂移光斑 + 噪点 ============ */
+/* 光斑用 fixed 伪元素层缓慢漂移（文档堆旁的暖色台灯光感），噪点用 feTurbulence data URI */
+@keyframes faDriftA {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  50% {
+    transform: translate(3rem, 2rem) scale(1.08);
+  }
+}
+
+@keyframes faDriftB {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  50% {
+    transform: translate(-2.5rem, 3rem) scale(1.05);
+  }
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: -10%;
+  z-index: -2;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      48rem 32rem at 12% 8%,
+      color-mix(in oklab, var(--fa-accent-pop) 26%, transparent),
+      transparent 68%
+    ),
+    radial-gradient(
+      40rem 28rem at 88% 18%,
+      color-mix(in oklab, var(--fa-ink) 6%, transparent),
+      transparent 68%
+    ),
+    radial-gradient(
+      36rem 26rem at 70% 92%,
+      color-mix(in oklab, var(--fa-accent-soft) 30%, transparent),
+      transparent 70%
+    );
+  animation: faDriftA 26s ease-in-out infinite alternate;
+}
+
+/* 第二层光斑反向漂移，两层错拍才有“活着”的感觉 */
+#app::before {
+  content: '';
+  position: fixed;
+  inset: -10%;
+  z-index: -2;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      30rem 24rem at 30% 70%,
+      color-mix(in oklab, var(--fa-accent-pop) 16%, transparent),
+      transparent 66%
+    ),
+    radial-gradient(
+      34rem 22rem at 60% 6%,
+      color-mix(in oklab, var(--fa-ink) 4%, transparent),
+      transparent 66%
+    );
+  animation: faDriftB 32s ease-in-out infinite alternate;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body::before,
+  #app::before {
+    animation: none;
+  }
+}
+
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0.2;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='1.34' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E");
+}
+
+/* ============ 组件级微调（只挑收益大的，不动结构） ============ */
+
+/* 卡片：容器级圆角 + lg 阴影，hover 加深（参考站手法） */
+html:root .el-card {
+  --el-card-border-radius: var(--fa-radius-box);
+  --el-card-padding: 20px;
+  border-color: color-mix(in oklab, var(--fa-ink) 7%, transparent);
+  box-shadow: var(--fa-shadow-lg);
+  transition:
+    box-shadow var(--fa-duration-fast) ease-out,
+    transform var(--fa-duration-fast) ease-out;
+}
+html:root .el-card:hover {
+  box-shadow: var(--fa-shadow-xl);
+}
+
+/* 主按钮：全圆胶囊 + 墨→暖橙渐变（项目签名：笔尖划过纸面的一下）
+   ⚠ 必须排除 link/text 变体，否则“文字链接”也会被刷成渐变底 */
+html:root .el-button--primary:not(.is-link):not(.is-text) {
+  border-radius: var(--fa-radius-pill);
+  background: linear-gradient(120deg, var(--fa-ink) 55%, oklch(38% 0.06 60) 100%);
+  border-color: transparent;
+  transition:
+    box-shadow var(--fa-duration-fast) var(--fa-ease-spring),
+    transform var(--fa-duration-fast) var(--fa-ease-spring);
+}
+
+html:root .el-button--primary:not(.is-link):not(.is-text):not(.is-disabled):hover {
+  background: linear-gradient(120deg, var(--fa-ink) 38%, var(--fa-accent-pop) 100%);
+  box-shadow: 0 6px 18px color-mix(in oklab, var(--fa-accent) 30%, transparent);
+  transform: translateY(-1px);
+}
+
+html:root .el-button--primary:not(.is-link):not(.is-text):not(.is-disabled):active {
+  transform: translateY(0) scale(0.98);
+}
+
+/* 卡片 hover 带回弹缓动 */
+html:root .el-card {
+  transition:
+    box-shadow var(--fa-duration-fast) var(--fa-ease-spring),
+    transform var(--fa-duration-fast) var(--fa-ease-spring);
+}
+
+/* 输入框保持 6px 小圆角，与全圆按钮形成有意识的对比 */
+html:root .el-input__wrapper,
+html:root .el-textarea__inner,
+html:root .el-select__wrapper {
+  border-radius: var(--fa-radius-field);
+}
+
+/* 表格：去外框感，表头用暖填充 */
+html:root .el-table {
+  --el-table-header-bg-color: color-mix(in oklab, var(--fa-ink) 3%, var(--fa-bg));
+  --el-table-border-color: color-mix(in oklab, var(--fa-ink) 7%, transparent);
+}
+
+/* 弹窗/抽屉圆角分层 */
+html:root .el-dialog {
+  border-radius: var(--fa-radius-box);
+}
+
+/* ============ 语义色的越界用法（同"官方徽章用 danger"一类问题） ============ */
+
+/* 步骤条已完成项：EP 默认把标题染成 success 绿，但这里表达的是"进度走到了"，
+   不是"状态成功"。圆圈已经是墨底对勾，标题再绿就成了外来色，统一收进墨色 */
+html:root .el-step__title.is-success {
+  color: var(--fa-ink);
+}
+
+html:root .el-step__head.is-success {
+  color: var(--fa-ink);
+  border-color: var(--fa-ink);
+}
+
+/* 上传拖拽区：EP 默认用 placeholder 灰，在暖色系里发灰发脏，提到墨色 + 暖橙 hover */
+html:root .el-upload-dragger .el-icon {
+  color: var(--fa-ink);
+}
+
+html:root .el-upload__text {
+  color: var(--el-text-color-regular);
+}
+
+html:root .el-upload__text em {
+  color: var(--fa-accent);
+  font-style: normal;
+  font-weight: 600;
+}
+
+html:root .el-upload-dragger:hover .el-icon {
+  color: var(--fa-accent-pop);
+}

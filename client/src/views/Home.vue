@@ -470,9 +470,18 @@ function reset() {
 <template>
   <div class="page">
     <div class="page-header">
-      <div>
-        <h2 class="page-title">工作台</h2>
-        <p class="page-subtitle">选择任务 → 上传文档 → LLM 处理 → 下载结果</p>
+      <div class="page-header-content">
+        <div class="page-icon">
+          <!-- 工作台：房子图标，与导航入口一致 -->
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M3 9L12 2L21 9V20C21 21.1 20.1 22 19 22H5C3.9 22 3 21.1 3 20V9Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M9 22V12H15V22" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <div>
+          <h2 class="page-title">工作台</h2>
+          <p class="page-subtitle">选择任务 → 上传文档 → LLM 处理 → 下载结果</p>
+        </div>
       </div>
       <el-button v-if="currentStep > 0" @click="reset">重新开始</el-button>
     </div>
@@ -537,7 +546,7 @@ function reset() {
       <!-- Step 1: 上传文件 -->
       <template v-else-if="currentStep === 1">
         <div class="step-card fade-in">
-          <div class="card-icon upload-icon">
+          <div class="card-icon">
             <!-- SVG: 上传图标 -->
             <svg width="48" height="48" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
               <path d="M21 15V19C21 19.5304 20.7893 20.0391 20.4142 20.4142C20.0391 20.7893 19.5304 21 19 21H5C4.46957 21 3.96086 20.7893 3.58579 20.4142C3.21071 20.0391 3 19.5304 3 19V15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -569,8 +578,8 @@ function reset() {
           </el-upload>
           <div v-if="pickedFile" class="picked-file">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="vertical-align: middle; margin-right: 4px;">
-              <path d="M14 2H6C5.46957 2 4.96086 2.21071 4.58579 2.58579C4.21071 2.96086 4 3.46957 4 4V20C4 20.5304 4.21071 21.0391 4.58579 21.4142C4.96086 21.7893 5.46957 22 6 22H18C18.5304 22 19.0391 21.7893 19.4142 21.4142C19.7893 21.0391 20 20.5304 20 20V8L14 2Z" stroke="#409eff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M14 2V8H20" stroke="#409eff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M14 2H6C5.46957 2 4.96086 2.21071 4.58579 2.58579C4.21071 2.96086 4 3.46957 4 4V20C4 20.5304 4.21071 21.0391 4.58579 21.4142C4.96086 21.7893 5.46957 22 6 22H18C18.5304 22 19.0391 21.7893 19.4142 21.4142C19.7893 21.0391 20 20.5304 20 20V8L14 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M14 2V8H20" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
             已选择：<code>{{ pickedFile.name }}</code>
             <span class="file-size">（{{ (pickedFile.size / 1024).toFixed(1) }} KB）</span>
@@ -592,7 +601,7 @@ function reset() {
       <!-- Step 2: 处理 -->
       <template v-else-if="currentStep === 2">
         <div class="step-card fade-in">
-          <div class="card-icon process-icon">
+          <div class="card-icon">
             <!-- SVG: AI 处理图标 -->
             <svg width="48" height="48" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
               <path d="M12 2L2 7L12 12L22 7L12 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -736,7 +745,7 @@ function reset() {
           </el-collapse>
           <div class="step-actions">
             <el-button @click="processNewFile">处理新文件</el-button>
-            <el-button type="success" size="large" :loading="downloading" @click="doDownload">
+            <el-button type="primary" size="large" :loading="downloading" @click="doDownload">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="vertical-align: middle; margin-right: 4px;">
                 <path d="M21 15V19C21 19.5304 20.7893 20.0391 20.4142 20.4142C20.0391 20.7893 19.5304 21 19 21H5C4.46957 21 3.96086 20.7893 3.58579 20.4142C3.21071 20.0391 3 19.5304 3 19V15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                 <path d="M7 10L12 15L17 10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -756,9 +765,43 @@ function reset() {
 .steps-wrapper {
   margin-bottom: var(--space-xl);
   padding: var(--space-lg);
-  background: linear-gradient(135deg, #f5f7fa 0%, #ffffff 100%);
-  border-radius: 8px;
-  border: 1px solid var(--sidebar-border);
+  background: color-mix(in oklab, var(--fa-ink) 2%, var(--fa-bg));
+  border-radius: 16px;
+  border: 1px solid color-mix(in oklab, var(--fa-ink) 7%, transparent);
+}
+
+/* 步骤条：已完成=墨色对勾，进行中=暖橙呼吸圆圈（只染 icon 圆圈，head 是容器不能刷底） */
+.steps-wrapper :deep(.el-step__head.is-success .el-step__icon.is-text) {
+  background: var(--fa-ink);
+  border-color: var(--fa-ink);
+  color: #fff;
+}
+
+.steps-wrapper :deep(.el-step__head.is-process .el-step__icon.is-text) {
+  background: var(--fa-accent-pop);
+  border-color: var(--fa-accent-pop);
+  color: #fff;
+  animation: stepPulse 1.8s ease-in-out infinite;
+}
+
+.steps-wrapper :deep(.el-step__head.is-wait) {
+  color: var(--el-text-color-placeholder);
+  border-color: color-mix(in oklab, var(--fa-ink) 18%, transparent);
+}
+
+.steps-wrapper :deep(.el-step__title.is-process) {
+  color: var(--fa-ink);
+  font-weight: 600;
+}
+
+@keyframes stepPulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--fa-accent-pop) 45%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 7px transparent;
+  }
 }
 
 /* 步骤卡片主体 */
@@ -772,16 +815,18 @@ function reset() {
   width: 100%;
   max-width: 560px;
   padding: var(--space-xl);
-  background: #ffffff;
-  border-radius: 12px;
-  border: 1px solid var(--sidebar-border);
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
-  transition: all 0.3s ease;
+  background: var(--fa-surface);
+  border-radius: var(--fa-radius-box);
+  border: 1px solid color-mix(in oklab, var(--fa-ink) 7%, transparent);
+  box-shadow: var(--fa-shadow-lg);
+  transition:
+    box-shadow var(--fa-duration-fast) var(--fa-ease-spring),
+    transform var(--fa-duration-fast) var(--fa-ease-spring);
   text-align: center;
 }
 
 .step-card:hover {
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+  box-shadow: var(--fa-shadow-xl);
   transform: translateY(-2px);
 }
 
@@ -794,30 +839,47 @@ function reset() {
   align-items: center;
   justify-content: center;
   border-radius: 50%;
-  background: linear-gradient(135deg, #e6f4ff 0%, #f0f9ff 100%);
-  color: #409eff;
-  transition: all 0.3s ease;
+  background: color-mix(in oklab, var(--fa-ink) 5%, var(--fa-bg));
+  color: var(--fa-ink);
+  transition: transform var(--fa-duration-fast) ease-out;
 }
 
 .step-card:hover .card-icon {
-  transform: scale(1.05);
+  animation: iconBob 1.8s ease-in-out infinite;
 }
 
-.upload-icon {
-  background: linear-gradient(135deg, #e6f7ff 0%, #f0f9ff 100%);
-  color: #1890ff;
+/* 图标轻微浮动：处理中/悬停时卡片是“活”的，不是死面板 */
+@keyframes iconBob {
+  0%,
+  100% {
+    transform: translateY(0) scale(1.05);
+  }
+  50% {
+    transform: translateY(-5px) scale(1.05);
+  }
 }
 
-.process-icon {
-  background: linear-gradient(135deg, #fff7e6 0%, #fffbe6 100%);
-  color: #fa8c16;
+/* 成功态：像红笔盖下的一个章，弹一下 */
+@keyframes stampPop {
+  0% {
+    transform: scale(0.4);
+    opacity: 0;
+  }
+  60% {
+    transform: scale(1.12);
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
 }
 
 .success-icon {
-  background: linear-gradient(135deg, #f6ffed 0%, #fcffe6 100%);
-  color: #52c41a;
+  background: color-mix(in oklab, var(--el-color-success) 10%, var(--fa-bg));
+  color: var(--el-color-success);
   width: 96px;
   height: 96px;
+  animation: stampPop 0.45s var(--fa-ease-spring) both;
 }
 
 /* 卡片标题和描述 */
@@ -825,12 +887,12 @@ function reset() {
   margin: 0 0 var(--space-sm);
   font-size: 18px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 
 .card-desc {
   margin: 0 0 var(--space-lg);
-  color: #606266;
+  color: var(--el-text-color-regular);
   font-size: 14px;
   line-height: 1.6;
 }
@@ -842,52 +904,58 @@ function reset() {
 
 .upload-area :deep(.el-upload-dragger) {
   padding: var(--space-xl);
-  border-radius: 8px;
-  border: 2px dashed #dcdfe6;
-  transition: all 0.3s ease;
+  border-radius: var(--fa-radius-box);
+  border: 2px dashed color-mix(in oklab, var(--fa-ink) 16%, transparent);
+  transition:
+    border-color var(--fa-duration-fast) ease-out,
+    background var(--fa-duration-fast) ease-out;
 }
 
 .upload-area :deep(.el-upload-dragger:hover) {
-  border-color: #409eff;
-  background: #f5f9ff;
+  border-color: color-mix(in oklab, var(--fa-ink) 40%, transparent);
+  background: color-mix(in oklab, var(--fa-ink) 2%, var(--fa-bg));
 }
 
-/* 已选文件 */
+/* 已选文件：做成贴在纸上的标签，而不是一块灰底 */
 .picked-file {
   margin-top: var(--space-md);
   padding: var(--space-sm) var(--space-md);
-  background: #f5f7fa;
-  border-radius: 6px;
+  background: var(--fa-surface);
+  border: 1px solid color-mix(in oklab, var(--fa-ink) 10%, transparent);
+  border-left: 3px solid var(--fa-accent-pop);
+  border-radius: var(--fa-radius-field);
+  box-shadow: 0 2px 8px color-mix(in oklab, var(--fa-ink) 5%, transparent);
   font-size: 14px;
-  color: #606266;
+  color: var(--el-text-color-regular);
   display: inline-block;
+  text-align: left;
 }
 
 .picked-file code {
   font-family: 'Consolas', 'Courier New', monospace;
-  color: #409eff;
+  color: var(--el-text-color-primary);
   font-weight: 500;
 }
 
 .file-size {
-  color: #909399;
+  color: var(--el-text-color-secondary);
   font-size: 13px;
 }
 
 /* 提示信息 */
 .hint {
   margin: 0 0 var(--space-md);
-  color: #606266;
+  color: var(--el-text-color-regular);
   font-size: 14px;
   line-height: 1.6;
 }
 
 .hint.warning {
-  color: #e6a23c;
+  color: var(--el-color-warning);
   padding: var(--space-sm) var(--space-md);
-  background: #fffbe6;
-  border-radius: 6px;
-  border-left: 3px solid #faad14;
+  background: color-mix(in oklab, var(--el-color-warning) 8%, var(--fa-bg));
+  border-radius: var(--fa-radius-field);
+  border-left: 3px solid var(--el-color-warning);
   text-align: left;
 }
 
@@ -895,9 +963,9 @@ function reset() {
 .chunk-progress {
   margin: 0 0 var(--space-md);
   padding: var(--space-sm) var(--space-md);
-  background: #f5f7fa;
-  border-radius: 8px;
-  border-left: 3px solid #409eff;
+  background: color-mix(in oklab, var(--fa-ink) 3%, var(--fa-bg));
+  border-radius: var(--fa-radius-field);
+  border-left: 3px solid var(--fa-ink);
   text-align: left;
 }
 
@@ -905,18 +973,18 @@ function reset() {
   margin: 0 0 8px;
   font-size: 14px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 
 .chunk-progress .hint {
   margin: 8px 0 0;
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 
 .empty-hint {
   margin-top: var(--space-md);
-  color: #909399;
+  color: var(--el-text-color-secondary);
   font-size: 13px;
 }
 
@@ -925,11 +993,11 @@ function reset() {
   max-height: 240px;
   overflow-y: auto;
   padding: var(--space-md);
-  background: #f5f7fa;
-  border-radius: 6px;
+  background: color-mix(in oklab, var(--fa-ink) 3%, var(--fa-bg));
+  border-radius: var(--fa-radius-field);
   font-size: 13px;
   line-height: 1.7;
-  color: #303133;
+  color: var(--el-text-color-primary);
   white-space: pre-wrap;
   word-break: break-word;
   font-family: 'Consolas', 'Courier New', monospace;
@@ -943,20 +1011,14 @@ function reset() {
   gap: var(--space-md);
 }
 
-/* 成功卡片 */
+/* 成功卡片：面底色不变，靠语义绿图标与按钮表达状态 */
 .success-card {
-  background: linear-gradient(135deg, #f6ffed 0%, #fcffe6 100%);
-  border-color: #b7eb8f;
+  border-color: color-mix(in oklab, var(--el-color-success) 30%, transparent);
 }
 
-.success-card:hover {
-  background: linear-gradient(135deg, #f6ffed 0%, #fcffe6 100%);
-}
-
-/* 淡入动画 */
-/* fadeInUp 已提取到全局 style.css，此处保留占位注释以说明来源 */
+/* 淡入动画：带一点回弹的入场 */
 .fade-in {
-  animation: fadeInUp 0.4s ease-out;
+  animation: fadeInUp 0.35s var(--fa-ease-spring) both;
 }
 
 /* 响应式 */

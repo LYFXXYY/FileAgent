@@ -13,6 +13,7 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -32,6 +33,8 @@ def _settings(**overrides):
         "llm_max_retries": 2,
         "llm_max_concurrency": 4,
         "llm_trust_env_proxy": True,
+        # None = 请求体不带 enable_thinking，与线上默认一致
+        "llm_enable_thinking": None,
     }
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -441,3 +444,37 @@ def test_retry_delay_rejects_invalid_inputs():
     assert llm._parse_retry_after("Wed, 21 Oct 2026 07:28:00 GMT") is None
     assert llm._parse_retry_after("3600") is None
     assert llm._parse_retry_after(None) is None
+
+
+# ---------- 超时文案与思考开关 ----------
+def test_timeout_message_names_the_exception_when_detail_is_empty(reset_globals):
+    """
+    httpx 在 asyncio 门下抛出的超时异常 str() 常为空串。
+
+    早先直接 f"LLM 请求超时：{e}" 会产出"LLM 请求超时：（共尝试 3 次）"这种
+    冒号后面空着的病句，用户看不出是超时还是别的。真机跑思考模型时踩到过。
+    """
+    client = _ScriptClient([httpx.ReadTimeout(""), httpx.ReadTimeout(""), httpx.ReadTimeout("")])
+    reset_globals.setattr(llm, "get_client", lambda: client)
+
+    with pytest.raises(llm.LLMError) as exc:
+        asyncio.run(llm.chat([{"role": "user", "content": "x"}], _provider()))
+
+    msg = str(exc.value)
+    assert "ReadTimeout" in msg, msg
+    assert "超时" in msg, msg
+    assert "：（" not in msg, msg
+
+
+def test_enable_thinking_absent_unless_configured(reset_globals):
+    """默认不给端点塞未知参数；显式配置了才带 enable_thinking"""
+    client = _ScriptClient([_ok("ok")])
+    reset_globals.setattr(llm, "get_client", lambda: client)
+    asyncio.run(llm.chat([{"role": "user", "content": "x"}], _provider()))
+    assert "enable_thinking" not in client.bodies[0]
+
+    client2 = _ScriptClient([_ok("ok")])
+    reset_globals.setattr(llm, "get_client", lambda: client2)
+    reset_globals.setattr(llm, "get_settings", lambda: _settings(llm_enable_thinking=False))
+    asyncio.run(llm.chat([{"role": "user", "content": "x"}], _provider()))
+    assert client2.bodies[0].get("enable_thinking") is False

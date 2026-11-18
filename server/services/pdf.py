@@ -59,6 +59,8 @@ _FOOTER_BAND = 0.8
 _NOISE_MIN_PAGES = 3
 _NOISE_MIN_RATIO = 0.6
 _NOISE_MAX_LEN = 20
+# 薄文字层扫描件的密度门槛：正常排版每页至少几百字符，低于这个值基本只剩页眉页脚
+_MIN_CHARS_PER_PAGE = 80
 
 
 class PdfError(Exception):
@@ -199,6 +201,9 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
         if doc.needs_pass:
             raise PdfError("PDF 设置了打开密码，当前不支持加密文档")
 
+        page_count = doc.page_count
+        # 内嵌图片数：用来区分"正文本来就在图里"和"就是一页很短的纯文本文档"
+        image_count = sum(len(page.get_images(full=True)) for page in doc)
         pages = [_page_paragraphs(page) for page in doc]
         noise = _noise_texts(pages)
         paragraphs: list[str] = []
@@ -208,10 +213,26 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
     finally:
         doc.close()
 
-    if not any(p.strip() for p in paragraphs):
+    body_chars = sum(len(p.strip()) for p in paragraphs)
+    if not body_chars:
         raise PdfError(
             "PDF 里没有可提取的文字层（多半是扫描件或纯图片导出）。"
             "当前不支持图片型 PDF，请先转成带文字层的 PDF，或改用 .docx"
+        )
+
+    # 薄文字层扫描件：整页是图片，只被 OCR 过一层页眉页脚或水印，
+    # 于是"有文字层"这个判据形同虚设——67 字符 / 8 页的真实文档就是这么混进来的。
+    # 三条同时成立才判扫描件，避免把确实只有一两页短文的正常文档误杀：
+    # 页数 ≥2、每页平均字符数低于门槛、平均每页至少一张图
+    if (
+        page_count >= 2
+        and body_chars < _MIN_CHARS_PER_PAGE * page_count
+        and image_count >= page_count
+    ):
+        raise PdfError(
+            f"PDF 文字层过薄（{page_count} 页仅 {body_chars} 字符、{image_count} 张图），"
+            "正文应当都在图片里，属于扫描件。当前不支持 OCR，"
+            "请先转成带完整文字层的 PDF，或改用 .docx"
         )
 
     return "\n".join(paragraphs)

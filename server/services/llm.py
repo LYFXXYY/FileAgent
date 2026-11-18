@@ -236,6 +236,10 @@ async def chat(
     }
     if response_format is not None:
         body["response_format"] = response_format
+    # 思考开关：默认不带这个字段——各家 OpenAI 兼容端点对未知参数的容忍度不一，
+    # 只有显式配了 LLM_ENABLE_THINKING 才发出去
+    if s.llm_enable_thinking is not None:
+        body["enable_thinking"] = s.llm_enable_thinking
 
     url = provider.base_url.rstrip("/") + "/chat/completions"
     headers = {"Authorization": f"Bearer {provider.api_key}", "Content-Type": "application/json"}
@@ -266,6 +270,15 @@ async def chat(
     raise LLMError(f"{last_error}（共尝试 {max_attempts} 次）", attempts=max_attempts)
 
 
+def _exc_text(exc: BaseException) -> str:
+    """异常给用户的文字。
+
+    httpx 的超时异常在 asyncio 看门下 str() 常为空串，直接拼进消息会得到
+    "LLM 请求超时：（共尝试 3 次）" 这种冒号后面空着的病句，所以退到类名。
+    """
+    return str(exc).strip() or type(exc).__name__
+
+
 async def _post_once(
     url: str,
     headers: dict[str, str],
@@ -276,9 +289,9 @@ async def _post_once(
     try:
         resp = await get_client().post(url, headers=headers, json=body, timeout=timeouts)
     except httpx.TimeoutException as e:
-        raise _Retryable(f"LLM 请求超时：{e}") from e
+        raise _Retryable(f"LLM 请求超时：{_exc_text(e)}") from e
     except httpx.RequestError as e:
-        raise _Retryable(f"LLM 网络错误：{e}") from e
+        raise _Retryable(f"LLM 网络错误：{_exc_text(e)}") from e
 
     if resp.status_code != 200:
         # 响应体截断 500 字符，防止密钥等敏感信息整段进入错误消息

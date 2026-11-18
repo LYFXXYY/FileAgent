@@ -53,9 +53,12 @@ _force_selector_on_windows()
 import uvicorn  # noqa: E402  策略 + 工厂先就位，再让 uvicorn 起 loop
 
 if __name__ == "__main__":
+    # host 传列表：同时绑 IPv4 与 IPv6 环回。
+    # 只绑 127.0.0.1 时，浏览器/Vite 代理解析 localhost 会先试 ::1 吃一次连接拒绝再回退，
+    # 本机实测每个请求凭空多 ~220ms（health 端点 0.004s → 0.23s），这就是"界面加载慢"的主因。
     uvicorn.run(
         "main:app",
-        host="127.0.0.1",
+        host=["127.0.0.1", "::1"],
         port=8000,
         log_level="info",
     )

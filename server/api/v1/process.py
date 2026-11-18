@@ -19,11 +19,11 @@ import logging
 import os
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from config import get_settings
@@ -277,8 +277,10 @@ async def _run_processing(log_id: int) -> None:
         # 记实际选中的 provider 名，不再事后回查默认提供商（回查会记错）
         log.provider_name = provider_ref[1]
         log.status = LogStatus.DONE
-        log.processed_at = datetime.now(UTC)
+        log.processed_at = func.now()
         db.commit()
+        # 赋的是 SQL 表达式，commit 后 refresh 才能拿到 DB 时钟的真实值
+        db.refresh(log)
     except Exception as e:
         db.rollback()
         logger.exception("后台处理 log_id=%s 失败", log_id)
@@ -296,8 +298,11 @@ def _mark_failed(db: Session, log: OperationLog, message: str) -> None:
     """把日志标记为 failed 并写入错误信息（统一提交点）"""
     log.status = LogStatus.FAILED
     log.error_message = message[:2000]
-    log.processed_at = datetime.now(UTC)
+    # 时间列全站由 DB 时钟生成（uploaded_at 是 func.now()）。这里若用应用侧 now()，
+    # 容器与宿主机的钟差会让 processed_at 反而早于 uploaded_at，耗时算出负数
+    log.processed_at = func.now()
     db.commit()
+    db.refresh(log)
 
 
 async def _meter(
@@ -500,13 +505,17 @@ async def process_status(
         if snapshot is not None:
             progress = ChunkProgressResponse(total=snapshot.total, done=snapshot.done)
 
+    # structured_output 为 NULL = 非批改任务/历史数据，必须继续透 None。
+    # 若在这里退化成 []，前端会把"根本没批改"显示成"批改完成，未发现问题"（§3.7 的语义分界）
+    graded = bool(done and log.structured_output)
+
     return ProcessResponse(
         log_id=log.id,
         status=log.status,
         processed_at=log.processed_at,
         error_message=log.error_message,
         processed_content=log.processed_content if done else None,
-        issues=deserialize_issues(log.structured_output) if done else None,
+        issues=deserialize_issues(log.structured_output) if graded else None,
         grading_degraded=is_degraded(log.structured_output) if done else False,
         progress=progress,
     )

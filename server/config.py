@@ -53,12 +53,18 @@ class Settings(BaseSettings):
     # ---------- LLM 调用 ----------
     # 连接阶段超时（秒）：只管 TCP + TLS 建连，与模型生成快慢无关
     llm_timeout_connect: float = 10.0
-    # 读取阶段超时（秒）：等响应收完。长文档、批改类任务要放宽
-    llm_timeout_read: float = 120.0
+    # 读取阶段超时（秒）：等响应收完。长文档、批改类任务要放宽。
+    # 实测参考：1117 字的中文 PDF 走批改，思考模型单次要 240s（关掉思考 12s），
+    # 所以开着思考的端点必须把这里调到 300 左右，否则会重试到耗尽后失败
+    llm_timeout_read: float = 180.0
     # 重试次数（0 = 不重试）。只对网络错误 / 超时 / 429 / 5xx 生效，其他 4xx 不重试
     llm_max_retries: int = 2
     # 进程内并发闸：同时在飞的 LLM 请求数。多 worker 部署下每个进程各算各的
     llm_max_concurrency: int = 4
+    # 是否发送 enable_thinking 参数（DashScope 兼容端的思考开关）。
+    # 默认 None = 请求体里不带这个字段，保持各家端点的原有行为；
+    # 显式设 false 可把思考模型从 240s 压到 12s，代价是可能降低批改质量
+    llm_enable_thinking: bool | None = None
     # 是否让 httpx 读系统代理环境变量。访问需要代理的境外端点时要 True；
     # 但 NO_PROXY 里若有非法写法（如裸 [::1]）会导致客户端构造直接报错，此时设 False
     llm_trust_env_proxy: bool = True

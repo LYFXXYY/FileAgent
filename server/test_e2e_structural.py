@@ -2,8 +2,10 @@
 
 需要两个进程（两个终端）：
   1) cd server && uv run uvicorn test_llm_server:app --port 19000
-  2) cd server && LONGDOC_CHUNK_CHARS=60 uv run uvicorn main:app --port 8000
-     （第 10 节靠这个预算才会真的切块；用默认 6000 时那节断言会失败）
+  2) cd server && LONGDOC_CHUNK_CHARS=60 LLM_TRUST_ENV_PROXY=false uv run python run_backend.py
+     ⚠ 必须走 run_backend.py，不能直接 `uv run uvicorn main:app`：后者在 win32 硬编码
+     ProactorEventLoop，第 10 节的分块批改会在 psycopg3 异步模式上直接炸（见 AGENTS.md §2）
+     （第 10 节靠 LONGDOC_CHUNK_CHARS=60 这个预算才会真的切块；用默认 6000 时那节断言会失败）
   3) cd server && uv run python test_e2e_structural.py
 
 验证的是「AI 模型 → 结构化解析 → 定位 → 入库 → 下载 diff」全链路，
@@ -23,6 +25,7 @@ import os
 import shutil
 import sys
 import time
+from datetime import datetime
 from urllib.parse import unquote
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -361,7 +364,72 @@ def main():
                 str({x.purpose for x in rows}),
             )
 
-        print("\n===== 11. 删 provider → SET NULL，name 快照保留 =====")
+        print("\n===== 11. 非批改任务：清单透 None + 时间列同源 =====")
+        # 这一节锁两个曾经真出过的缺陷：
+        # 1) status 接口把 structured_output 为 NULL 压成 []，前端于是对非批改任务
+        #    显示"批改完成，未发现问题"（§3.7 的语义分界）；
+        # 2) processed_at 用应用时钟、uploaded_at 用 DB 时钟，容器钟差导致时间倒挂。
+        r = c.post(
+            f"{API}/tasks",
+            headers=tok,
+            json={
+                "name": "摘要任务",
+                "description": "",
+                "prompt_template": "请摘要：\n\n{{content}}",
+                "is_grading": False,
+                "provider_id": provider_id,
+            },
+        )
+        check("POST 非批改 task 201", r.status_code == 201, r.text)
+        plain_task_id = r.json()["id"]
+
+        buf = io.BytesIO()
+        doc = Document()
+        doc.add_paragraph("这是一篇测试作文。他高兴的跳了起来。")
+        doc.save(buf)
+        r = c.post(
+            f"{API}/upload?task_id={plain_task_id}",
+            headers=tok,
+            files={
+                "file": (
+                    "plain.docx",
+                    buf.getvalue(),
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            },
+        )
+        check("非批改上传 201", r.status_code == 201, r.text)
+        plain_log = r.json()["log_id"]
+        log_ids.append(plain_log)
+        plain_uploaded_at = r.json()["uploaded_at"]
+
+        r = c.post(f"{API}/process/{plain_log}", headers=tok)
+        check("非批改 POST /process 200", r.status_code == 200, r.text)
+        plain_final = {}
+        for _ in range(30):
+            time.sleep(1)
+            plain_final = c.get(f"{API}/process/{plain_log}/status", headers=tok).json()
+            if plain_final.get("status") in ("done", "failed"):
+                break
+
+        check("非批改轮询到 done", plain_final.get("status") == "done", str(plain_final))
+        check(
+            "非批改 issues 是 None（不是 []）",
+            plain_final.get("issues") is None,
+            repr(plain_final.get("issues")),
+        )
+        check("非批改 grading_degraded 为 False", plain_final.get("grading_degraded") is False)
+        check("非批改有产出文本", bool(plain_final.get("processed_content")))
+        check(
+            "processed_at 不早于 uploaded_at",
+            datetime.fromisoformat(plain_final["processed_at"])
+            >= datetime.fromisoformat(plain_uploaded_at),
+            f"{plain_uploaded_at} → {plain_final['processed_at']}",
+        )
+
+        c.delete(f"{API}/tasks/{plain_task_id}", headers=tok)
+
+        print("\n===== 12. 删 provider → SET NULL，name 快照保留 =====")
         r = c.delete(f"{API}/providers/{provider_id}", headers=tok)
         check("DELETE provider 204", r.status_code == 204, str(r.status_code))
         with database.SessionLocal() as db:

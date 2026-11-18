@@ -192,9 +192,16 @@ async function toggleActive(row: Provider) {
     <div class="page-header">
       <div class="page-header-content">
         <div class="page-icon">
-          <!-- 模型提供商图标：钥匙 -->
+          <!-- 模型提供商图标：机器人（与侧栏导航一致） -->
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M21 2L19 4M11.3891 13.3912C9.82881 14.9515 7.30015 14.9515 5.73985 13.3912C4.17956 11.8309 4.17956 9.30224 5.73985 7.74195C7.30015 6.18165 9.82881 6.18165 11.3891 7.74195L19 2M19 2L22 5L18 9L15 6L19 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            <circle cx="12" cy="2.6" r="1.4" fill="currentColor" stroke="none"/>
+            <path d="M12 4.4V6.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            <rect x="4" y="6.5" width="16" height="13" rx="4" stroke="currentColor" stroke-width="2"/>
+            <circle cx="9" cy="12" r="1.2" fill="currentColor" stroke="none"/>
+            <circle cx="15" cy="12" r="1.2" fill="currentColor" stroke="none"/>
+            <path d="M9.5 16H14.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            <path d="M1.5 11V14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            <path d="M22.5 11V14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
           </svg>
         </div>
         <div>
@@ -216,7 +223,7 @@ async function toggleActive(row: Provider) {
         <el-table-column prop="name" label="名称" min-width="120">
           <template #default="{ row }">
             <span class="provider-name">{{ row.name }}</span>
-            <el-tag v-if="row.is_public" type="danger" size="small" effect="plain" class="cap-tag">
+            <el-tag v-if="row.is_public" type="primary" size="small" effect="dark" class="cap-tag">
               官方
             </el-tag>
           </template>
@@ -274,8 +281,16 @@ async function toggleActive(row: Provider) {
       @closed="formRef?.clearValidate()"
     >
       <div class="dialog-title-bar">
+        <!-- 与导航、页头同一枚机器人图标（此处原先残留旧钥匙图标） -->
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M21 2L19 4M11.3891 13.3912C9.82881 14.9515 7.30015 14.9515 5.73985 13.3912C4.17956 11.8309 4.17956 9.30224 5.73985 7.74195C7.30015 6.18165 9.82881 6.18165 11.3891 7.74195L19 2M19 2L22 5L18 9L15 6L19 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          <circle cx="12" cy="2.6" r="1.4" fill="currentColor" stroke="none"/>
+          <path d="M12 4.4V6.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          <rect x="4" y="6.5" width="16" height="13" rx="4" stroke="currentColor" stroke-width="2"/>
+          <circle cx="9" cy="12" r="1.2" fill="currentColor" stroke="none"/>
+          <circle cx="15" cy="12" r="1.2" fill="currentColor" stroke="none"/>
+          <path d="M9.5 16H14.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          <path d="M1.5 11V14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          <path d="M22.5 11V14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
         </svg>
         <span>{{ dialogMode === 'create' ? '添加新的模型提供商' : '修改提供商配置' }}</span>
       </div>
@@ -326,74 +341,54 @@ async function toggleActive(row: Provider) {
 </template>
 
 <style scoped>
-/* 页面头部：图标 + 标题，与 Tasks.vue 保持一致 */
-.page-header-content {
-  display: flex;
-  align-items: center;
-  gap: var(--space-md);
-}
+/* 页面头部的 .page-header-content / .page-icon 已提到全局 style.css，五页共用 */
 
-.page-icon {
-  width: 48px;
-  height: 48px;
-  background: linear-gradient(135deg, #6366f1 0%, #a78bfa 100%);
-  color: #ffffff;
-  border-radius: 12px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.25);
-}
-
-/* 新建按钮渐变 */
+/* 新建按钮外观交给主题层的 primary 渐变胶囊 */
 .add-btn {
-  background: linear-gradient(135deg, #6366f1 0%, #818cf8 100%);
-  border: none;
-  transition: all 0.3s ease;
+  transition: transform var(--fa-duration-fast) var(--fa-ease-spring);
 }
 
 .add-btn:hover {
   transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.35);
 }
 
 /* 表格卡片包裹：圆角 + 阴影 + 入场动画 */
 .table-wrapper {
-  background: #ffffff;
-  border-radius: 12px;
-  border: 1px solid #e4e7ed;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
+  background: var(--fa-surface);
+  border-radius: 16px;
+  border: 1px solid color-mix(in oklab, var(--fa-ink) 7%, transparent);
+  box-shadow: var(--fa-shadow-lg);
   overflow: hidden;
-  animation: fadeInUp 0.4s ease-out;
+  animation: fadeInUp 0.35s var(--fa-ease-spring) both;
 }
 
-/* 表头渐变背景 */
+/* 表头暖中性底 */
 :deep(.el-table th.el-table__cell) {
-  background: linear-gradient(135deg, #f5f7fa 0%, #eef2ff 100%);
+  background: color-mix(in oklab, var(--fa-ink) 3%, var(--fa-bg));
 }
 
 /* 行悬停效果 */
 :deep(.el-table .el-table__row) {
-  transition: all 0.2s ease;
+  transition: background var(--fa-duration-fast) ease-out;
 }
 
 :deep(.el-table .el-table__row:hover > td) {
-  background: #f8faff !important;
+  background: color-mix(in oklab, var(--fa-accent) 9%, var(--fa-surface)) !important;
 }
 
 /* 提供商名称 */
 .provider-name {
   font-weight: 500;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 
 /* 模型标签 */
 .model-tag {
   display: inline-block;
   padding: 2px 8px;
-  background: #f0f9ff;
-  color: #409eff;
-  border-radius: 4px;
+  background: color-mix(in oklab, var(--fa-accent) 14%, var(--fa-bg));
+  color: var(--fa-accent);
+  border-radius: var(--fa-radius-field);
   font-size: 13px;
   font-family: 'Consolas', 'Courier New', monospace;
 }
@@ -413,7 +408,7 @@ async function toggleActive(row: Provider) {
   margin-top: 4px;
   font-size: 12px;
   line-height: 1.5;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 
 /* 对话框标题栏 */
@@ -423,16 +418,16 @@ async function toggleActive(row: Provider) {
   gap: 8px;
   padding: var(--space-sm) var(--space-md);
   margin-bottom: var(--space-md);
-  background: linear-gradient(135deg, #f0f0ff 0%, #e8e0ff 100%);
-  border-radius: 8px;
-  color: #6366f1;
+  background: color-mix(in oklab, var(--fa-ink) 4%, var(--fa-bg));
+  border-radius: var(--fa-radius-field);
+  color: var(--el-text-color-primary);
   font-weight: 500;
   font-size: 14px;
 }
 
-/* 对话框标题渐变 */
+/* 对话框标题分隔线：hairline，与其它页一致 */
 :deep(.provider-dialog .el-dialog__header) {
-  border-bottom: 1px solid #f0f0f5;
+  border-bottom: 1px solid color-mix(in oklab, var(--fa-ink) 6%, transparent);
   padding-bottom: 12px;
 }
 
@@ -441,11 +436,6 @@ async function toggleActive(row: Provider) {
 
 /* 响应式 */
 @media (max-width: 768px) {
-  .page-icon {
-    width: 40px;
-    height: 40px;
-  }
-
   .add-btn {
     font-size: 13px;
   }

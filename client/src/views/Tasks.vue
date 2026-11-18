@@ -271,13 +271,14 @@ function providerName(id: number | null): string {
         </el-table-column>
         <el-table-column label="批改" width="80" align="center">
           <template #default="{ row }">
-            <el-tag v-if="row.is_grading" type="warning" size="small" effect="light">是</el-tag>
+            <!-- 属性标记用主色，success/warning/danger 留给状态列 -->
+            <el-tag v-if="row.is_grading" type="primary" size="small" effect="light">是</el-tag>
             <span v-else class="text-muted">否</span>
           </template>
         </el-table-column>
         <el-table-column label="结果格式" width="100" align="center">
           <template #default="{ row }">
-            <el-tag v-if="row.output_format === 'pptx'" type="success" size="small" effect="plain">
+            <el-tag v-if="row.output_format === 'pptx'" type="primary" size="small" effect="plain">
               .pptx
             </el-tag>
             <span v-else class="text-muted">.docx</span>
@@ -405,69 +406,40 @@ function providerName(id: number | null): string {
 </template>
 
 <style scoped>
-/* ========== 页面头部 ========== */
-/* 头部内容区：图标 + 标题横排 */
-.page-header-content {
-  display: flex;
-  align-items: center;
-  gap: var(--space-md);
-}
+/* 页面头部的 .page-header-content / .page-icon 已提到全局 style.css，五页共用 */
 
-/* 页面图标容器：渐变背景 + 圆角 */
-.page-icon {
-  width: 48px;
-  height: 48px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 12px;
-  background: linear-gradient(135deg, #409eff 0%, #66b1ff 100%);
-  color: #ffffff;
-  box-shadow: 0 4px 12px rgba(64, 158, 255, 0.25);
-  flex-shrink: 0;
-}
-
-/* 新建按钮：渐变背景 + 悬停上浮 */
+/* 新建按钮：外观交给主题层的 primary 渐变胶囊，这里只加粗 */
 .create-btn {
-  background: linear-gradient(135deg, #409eff 0%, #66b1ff 100%);
-  border: none;
   font-weight: 600;
-  transition: all 0.3s ease;
-}
-
-.create-btn:hover {
-  background: linear-gradient(135deg, #66b1ff 0%, #409eff 100%);
-  transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(64, 158, 255, 0.35);
 }
 
 /* ========== 表格容器 ========== */
-/* 卡片式表格包裹：圆角 + 阴影 + 悬停加深 */
+/* 卡片式表格包裹：圆角 + 墨色阴影 + 悬停加深 */
 .table-wrapper {
-  background: #ffffff;
-  border-radius: 12px;
-  border: 1px solid #e4e7ed;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
+  background: var(--fa-surface);
+  border-radius: 16px;
+  border: 1px solid color-mix(in oklab, var(--fa-ink) 7%, transparent);
+  box-shadow: var(--fa-shadow-lg);
   overflow: hidden;
-  transition: all 0.3s ease;
-  animation: fadeInUp 0.4s ease-out;
+  transition: box-shadow var(--fa-duration-fast) var(--fa-ease-spring);
+  animation: fadeInUp 0.35s var(--fa-ease-spring) both;
 }
 
 .table-wrapper:hover {
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+  box-shadow: var(--fa-shadow-xl);
 }
 
-/* 表格行悬停高亮 */
+/* 表格行悬停高亮：暖橙荧光笔扫过一行 */
 :deep(.el-table__row:hover > td) {
-  background: linear-gradient(90deg, rgba(64, 158, 255, 0.03), rgba(64, 158, 255, 0.06));
+  background: color-mix(in oklab, var(--fa-accent) 9%, var(--fa-surface));
 }
 
-/* 表格头部渐变底色 */
+/* 表格头部：暖中性填充 */
 :deep(.el-table th.el-table__cell) {
-  background: linear-gradient(135deg, #f5f7fa 0%, #eef2ff 100%);
+  background: color-mix(in oklab, var(--fa-ink) 3%, var(--fa-bg));
   font-weight: 600;
-  color: #303133;
-  border-bottom: 2px solid #e4e7ed;
+  color: var(--el-text-color-primary);
+  border-bottom: 2px solid color-mix(in oklab, var(--fa-ink) 8%, transparent);
 }
 
 /* 去掉表格最外层边框，让 table-wrapper 的圆角生效 */
@@ -476,45 +448,45 @@ function providerName(id: number | null): string {
 }
 
 /* ========== 表格单元格 ========== */
-/* 任务名称：加粗 + 主色高亮 */
+/* 任务名称：加粗，悬停点亮暖橙 */
 .task-name {
   font-weight: 600;
-  color: #303133;
-  transition: color 0.2s ease;
+  color: var(--el-text-color-primary);
+  transition: color var(--fa-duration-fast) ease-out;
 }
 
 :deep(.el-table__row:hover) .task-name {
-  color: #409eff;
+  color: var(--fa-accent);
 }
 
 /* 模型名称：标签风格 */
 .model-name {
   font-size: 13px;
-  color: #606266;
+  color: var(--el-text-color-regular);
   padding: 2px 8px;
-  background: #f5f7fa;
-  border-radius: 6px;
-  border: 1px solid #e4e7ed;
+  background: color-mix(in oklab, var(--fa-ink) 3%, var(--fa-bg));
+  border-radius: var(--fa-radius-field);
+  border: 1px solid color-mix(in oklab, var(--fa-ink) 8%, transparent);
 }
 
 /* Prompt 预览代码块 */
 .prompt-preview {
   font-family: 'Consolas', 'Courier New', monospace;
   font-size: 12px;
-  color: #606266;
-  background: #f5f7fa;
+  color: var(--el-text-color-regular);
+  background: color-mix(in oklab, var(--fa-ink) 3%, var(--fa-bg));
   padding: 2px 6px;
   border-radius: 4px;
 }
 
 .text-muted {
-  color: #909399;
+  color: var(--el-text-color-secondary);
   font-size: 13px;
 }
 
 /* ========== 操作按钮 ========== */
 .action-btn {
-  transition: all 0.2s ease;
+  transition: transform var(--fa-duration-fast) var(--fa-ease-spring);
 }
 
 .action-btn:hover {
@@ -526,20 +498,16 @@ function providerName(id: number | null): string {
 }
 
 /* ========== 对话框 ========== */
-/* 对话框头部渐变装饰条 */
 :deep(.el-dialog__header) {
   padding-bottom: 12px;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid color-mix(in oklab, var(--fa-ink) 6%, transparent);
   margin-right: 0;
 }
 
 :deep(.el-dialog__title) {
   font-weight: 600;
   font-size: 18px;
-  background: linear-gradient(135deg, #303133 0%, #409eff 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  color: var(--el-text-color-primary);
 }
 
 :deep(.el-dialog__body) {
@@ -547,7 +515,7 @@ function providerName(id: number | null): string {
 }
 
 :deep(.el-dialog__footer) {
-  border-top: 1px solid #f0f0f0;
+  border-top: 1px solid color-mix(in oklab, var(--fa-ink) 6%, transparent);
   padding-top: 16px;
 }
 
@@ -576,21 +544,9 @@ function providerName(id: number | null): string {
 /* 输入框焦点高亮 */
 :deep(.el-input__wrapper:focus-within),
 :deep(.el-textarea__inner:focus) {
-  box-shadow: 0 0 0 1px #409eff inset !important;
+  box-shadow: 0 0 0 1px var(--fa-ink) inset !important;
 }
 
 /* ========== 动画 ========== */
 /* fadeInUp 已提取到全局 style.css，此处保留占位注释以说明来源 */
-
-/* ========== 响应式 ========== */
-@media (max-width: 768px) {
-  .page-header-content {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-  .page-icon {
-    width: 40px;
-    height: 40px;
-  }
-}
 </style>

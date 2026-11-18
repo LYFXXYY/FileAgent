@@ -64,16 +64,29 @@ function formatDate(raw: string): string {
   <div class="page">
     <div class="page-header">
       <div class="page-header-content">
-        <h2 class="page-title">用户管理</h2>
-        <p class="page-subtitle">
-          升降管理员角色、控制谁能使用官方默认模型。角色与授权变更对用户需重新登录生效；
-          授权吊销不打断正在处理的任务
-        </p>
+        <div class="page-icon">
+          <!-- 用户管理：人群图标，与导航入口一致 -->
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M17 21V19C17 16.79 14.76 15 12 15C9.24 15 7 16.79 7 19V21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            <circle cx="12" cy="7" r="4" stroke="currentColor" stroke-width="2"/>
+            <path d="M20 21V19C20 17.5 19 16.2 17.5 15.4M4 21V19C4 17.5 5 16.2 6.5 15.4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <div>
+          <h2 class="page-title">用户管理</h2>
+          <p class="page-subtitle">
+            升降管理员角色、控制谁能使用官方默认模型。角色与授权变更在对方下次进入应用时即生效，无需重新登录；
+            授权吊销不打断正在处理的任务
+          </p>
+        </div>
       </div>
     </div>
 
     <div class="table-wrapper">
       <el-table v-loading="loading" :data="users" stripe>
+        <template #empty>
+          <el-empty description="暂无用户数据" :image-size="80" />
+        </template>
         <el-table-column prop="id" label="ID" width="70" />
         <el-table-column prop="username" label="用户名" min-width="140" />
         <el-table-column label="角色" width="140">
@@ -111,9 +124,6 @@ function formatDate(raw: string): string {
 </template>
 
 <style scoped>
-.page {
-  padding: 4px;
-}
 .page-header {
   margin-bottom: 16px;
 }
@@ -123,12 +133,12 @@ function formatDate(raw: string): string {
 }
 .page-subtitle {
   margin: 0;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   font-size: 13px;
   max-width: 720px;
 }
 .table-wrapper {
-  background: #fff;
-  border-radius: 8px;
+  border-radius: var(--fa-radius-field);
+  overflow: hidden;
 }
 </style>

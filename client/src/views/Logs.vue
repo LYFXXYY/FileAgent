@@ -29,7 +29,8 @@ const retryingId = ref<number | null>(null) // 正在重试的行 ID
 
 const statusType = {
   pending: 'info',
-  processing: 'primary',
+  // 主色已是近黑，和 pending 的灰阶容易糊在一起，进行中改用暖色才分得开
+  processing: 'warning',
   done: 'success',
   failed: 'danger',
 } as const
@@ -41,6 +42,11 @@ const statusOptions = [
   { label: '已完成', value: 'done' },
   { label: '已失败', value: 'failed' },
 ]
+
+// 表格状态列与筛选下拉共用同一份中文文案（此前直接渲染英文枚举，与全站中文不一致）
+const statusLabel = Object.fromEntries(
+  statusOptions.filter((o) => o.value).map((o) => [o.value, o.label]),
+) as Record<string, string>
 
 async function load() {
   loading.value = true
@@ -225,7 +231,7 @@ async function retryProcess(row: LogEntry) {
         <el-table-column label="状态" width="100">
           <template #default="{ row }">
             <el-tag :type="statusType[row.status as keyof typeof statusType]" size="small">
-              {{ row.status }}
+              {{ statusLabel[row.status] ?? row.status }}
             </el-tag>
           </template>
         </el-table-column>
@@ -275,24 +281,7 @@ async function retryProcess(row: LogEntry) {
 </template>
 
 <style scoped>
-/* 页面头部：图标 + 标题 */
-.page-header-content {
-  display: flex;
-  align-items: center;
-  gap: var(--space-md);
-}
-
-.page-icon {
-  width: 48px;
-  height: 48px;
-  background: linear-gradient(135deg, #e6a23c 0%, #f0c78a 100%);
-  color: #ffffff;
-  border-radius: 12px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  box-shadow: 0 4px 12px rgba(230, 162, 60, 0.25);
-}
+/* 页面头部的 .page-header-content / .page-icon 已提到全局 style.css，五页共用 */
 
 /* 搜索筛选栏 */
 .filter-bar {
@@ -304,42 +293,42 @@ async function retryProcess(row: LogEntry) {
 
 /* 表格卡片包裹：圆角 + 阴影 + 入场动画 */
 .table-wrapper {
-  background: #ffffff;
-  border-radius: 12px;
-  border: 1px solid #e4e7ed;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
+  background: var(--fa-surface);
+  border-radius: 16px;
+  border: 1px solid color-mix(in oklab, var(--fa-ink) 7%, transparent);
+  box-shadow: var(--fa-shadow-lg);
   overflow: hidden;
-  animation: fadeInUp 0.4s ease-out;
+  animation: fadeInUp 0.35s var(--fa-ease-spring) both;
 }
 
-/* 表头渐变背景 */
+/* 表头暖中性底 */
 :deep(.el-table th.el-table__cell) {
-  background: linear-gradient(135deg, #f5f7fa 0%, #eef2ff 100%);
+  background: color-mix(in oklab, var(--fa-ink) 3%, var(--fa-bg));
 }
 
 /* 模型名称标签风格 */
 .model-name {
   display: inline-block;
   padding: 2px 8px;
-  background: #f0f9ff;
-  color: #409eff;
-  border-radius: 4px;
+  background: color-mix(in oklab, var(--fa-accent) 14%, var(--fa-bg));
+  color: var(--fa-accent);
+  border-radius: var(--fa-radius-field);
   font-size: 13px;
   font-family: 'Consolas', 'Courier New', monospace;
 }
 
 .error-text {
-  color: #f56c6c;
+  color: var(--el-color-danger);
   font-size: 13px;
 }
 
 .text-muted {
-  color: #c0c4cc;
+  color: var(--el-text-color-placeholder);
 }
 
 /* 空状态提示文字 */
 .empty-tip {
-  color: #909399;
+  color: var(--el-text-color-secondary);
   font-size: 13px;
   margin: 0 0 8px;
 }
@@ -352,11 +341,6 @@ async function retryProcess(row: LogEntry) {
 
 /* 响应式 */
 @media (max-width: 768px) {
-  .page-icon {
-    width: 40px;
-    height: 40px;
-  }
-
   .filter-bar {
     flex-wrap: wrap;
   }

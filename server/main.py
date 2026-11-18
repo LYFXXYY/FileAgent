@@ -21,6 +21,7 @@ if sys.platform == "win32":
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import func
 
 # 导入 database 模块和所有模型 —— 让 Base.metadata 收集到建表信息
 import database
@@ -87,6 +88,8 @@ async def lifespan(app: FastAPI):
         for log in stale:
             log.status = LogStatus.FAILED
             log.error_message = "服务重启导致处理中断，请重试"
+            # 模型约定"每个状态变更都记录 processed_at"，这里漏了会让已失败的日志没有完成时刻
+            log.processed_at = func.now()
         if stale:
             db.commit()
             logger.info("已将 %d 条卡死的 processing 日志重置为 failed", len(stale))
