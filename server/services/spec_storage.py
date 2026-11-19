@@ -21,8 +21,9 @@ from sqlalchemy.orm import Session
 
 from config import get_settings
 from models.spec_doc import SpecChunk, SpecDoc
-from services.chunking import ChunkError, split_document
+from services.chunking import ChunkError
 from services.pdf import PdfError, extract_text_from_pdf
+from services.spec_chunking import split_by_clause
 from services.word import extract_text_from_docx
 
 # 与 api/v1/process.py 同一份白名单语义。两处都派生，加格式时同步改
@@ -66,7 +67,9 @@ def ingest_spec_doc(
 
     budget = get_settings().spec_chunk_chars
     try:
-        chunks = split_document(text, max_chars=budget)
+        # 按条款边界切，不用批改那套贪心装箱：后者会把条款从【判定标准】前截断，
+        # 检索拿回来的就是缺判据的半条条款（实测 5/5 个边界都腰斩）
+        chunks = split_by_clause(text, max_chars=budget)
     except ChunkError as e:
         raise SpecStorageError(f"切块失败：{e}") from e
 

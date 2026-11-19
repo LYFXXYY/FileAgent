@@ -18,6 +18,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
 
 import { useAuthStore } from '@/stores/auth'
+import { markReady } from '@/router/notice'
 
 const route = useRoute()
 const router = useRouter()
@@ -28,6 +29,8 @@ const auth = useAuthStore()
 // 内部已吞错，不阻塞启动。
 onMounted(() => {
   auth.refreshProfile()
+  // 布局挂载 = app 就绪，此后守卫提示可以正常投递；顺带补投冷加载时攒下的一条
+  markReady()
 })
 
 // 当前激活的菜单项 —— 用路径反推，保证刷新后仍能高亮
@@ -269,23 +272,13 @@ async function handleLogout() {
   font-size: 14px;
 }
 
-/* 在线状态点：暖橙呼吸，胶囊导航上也有一点“活”的信号 */
+/* 在线状态点：暖橙呼吸，胶囊导航上也有一点“活”的信号（dotBreath 在全局 style.css） */
 .user-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: var(--fa-accent-pop);
-  animation: dotBreath 1.8s ease-in-out infinite;
-}
-
-@keyframes dotBreath {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.35;
-  }
+  animation: dotBreath var(--fa-duration-pulse) ease-in-out infinite;
 }
 
 /* ============ 主区域 ============ */

@@ -294,11 +294,11 @@ async function retryProcess(row: LogEntry) {
 /* 表格卡片包裹：圆角 + 阴影 + 入场动画 */
 .table-wrapper {
   background: var(--fa-surface);
-  border-radius: 16px;
+  border-radius: var(--fa-radius-card);
   border: 1px solid color-mix(in oklab, var(--fa-ink) 7%, transparent);
   box-shadow: var(--fa-shadow-lg);
   overflow: hidden;
-  animation: fadeInUp 0.35s var(--fa-ease-spring) both;
+  animation: fadeInUp var(--fa-duration-enter) var(--fa-ease-spring) both;
 }
 
 /* 表头暖中性底 */

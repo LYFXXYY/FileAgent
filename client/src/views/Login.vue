@@ -244,7 +244,7 @@ function switchTab(name: string | number) {
   position: relative;
   z-index: 1;
   max-width: 560px;
-  animation: fadeInUp 0.45s var(--fa-ease-spring) both;
+  animation: fadeInUp var(--fa-duration-enter) var(--fa-ease-spring) both;
 }
 
 .hero-eyebrow {
@@ -262,20 +262,10 @@ function switchTab(name: string | number) {
   height: 8px;
   border-radius: 50%;
   background: var(--fa-accent-pop);
-  animation: dotBreath 1.8s ease-in-out infinite;
+  animation: dotBreath var(--fa-duration-pulse) ease-in-out infinite;
 }
 
-@keyframes dotBreath {
-  0%,
-  100% {
-    opacity: 1;
-    transform: scale(1);
-  }
-  50% {
-    opacity: 0.35;
-    transform: scale(0.82);
-  }
-}
+/* dotBreath 用全局 style.css 那一份，不在这里重复定义 */
 
 .hero-title {
   margin: 0 0 var(--space-lg);
@@ -406,7 +396,7 @@ function switchTab(name: string | number) {
     transform var(--fa-duration-fast) var(--fa-ease-spring);
   position: relative;
   z-index: 1;
-  animation: fadeInUp 0.5s 0.08s var(--fa-ease-spring) both;
+  animation: fadeInUp var(--fa-duration-enter) 0.08s var(--fa-ease-spring) both;
 }
 
 .login-card:hover {

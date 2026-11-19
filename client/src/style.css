@@ -164,5 +164,40 @@ body {
 }
 
 .fade-in {
-  animation: fadeInUp 0.25s ease-out both;
+  animation: fadeInUp var(--fa-duration-enter) ease-out both;
+}
+
+/* 呼吸点：导航在线状态与登录页 eyebrow 共用一份（原先两处各写一遍，且数值不同） */
+@keyframes dotBreath {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.35;
+    transform: scale(0.82);
+  }
+}
+
+/* ============== 键盘焦点可见 ============== */
+/* 主色已是近黑，EP 默认焦点环在暖白底上几乎看不出来，统一给一枚暖橙描边。
+   用 :where() 保持 0 特异性，组件自身更具体的规则仍能覆盖 */
+:where(button, a, .el-switch, .el-menu-item, .el-select__wrapper, .el-upload-dragger):focus-visible {
+  outline: 2px solid var(--fa-accent-pop);
+  outline-offset: 2px;
+}
+
+/* ============== 降低动效 ============== */
+/* 系统开了减少动效时，装饰性循环动画与位移一律停掉。
+   注意 fadeInUp 的 fill 是 both，时长压到 0.01ms 后元素停在终态，不会隐形 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

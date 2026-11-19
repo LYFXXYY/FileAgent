@@ -124,21 +124,10 @@ function formatDate(raw: string): string {
 </template>
 
 <style scoped>
-.page-header {
-  margin-bottom: 16px;
-}
-.page-title {
-  margin: 0 0 4px;
-  font-size: 18px;
-}
-.page-subtitle {
-  margin: 0;
-  color: var(--el-text-color-secondary);
-  font-size: 13px;
-  max-width: 720px;
-}
+/* .page-header / .page-title / .page-subtitle 都走全局 style.css，这里不再抄一份改数值
+   （原先 Admin 的标题是 18px、下边距 16px，与另外四页不一致） */
 .table-wrapper {
-  border-radius: var(--fa-radius-field);
+  border-radius: var(--fa-radius-card);
   overflow: hidden;
 }
 </style>

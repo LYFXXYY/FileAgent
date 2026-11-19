@@ -417,12 +417,12 @@ function providerName(id: number | null): string {
 /* 卡片式表格包裹：圆角 + 墨色阴影 + 悬停加深 */
 .table-wrapper {
   background: var(--fa-surface);
-  border-radius: 16px;
+  border-radius: var(--fa-radius-card);
   border: 1px solid color-mix(in oklab, var(--fa-ink) 7%, transparent);
   box-shadow: var(--fa-shadow-lg);
   overflow: hidden;
   transition: box-shadow var(--fa-duration-fast) var(--fa-ease-spring);
-  animation: fadeInUp 0.35s var(--fa-ease-spring) both;
+  animation: fadeInUp var(--fa-duration-enter) var(--fa-ease-spring) both;
 }
 
 .table-wrapper:hover {
@@ -494,7 +494,7 @@ function providerName(id: number | null): string {
 }
 
 .delete-btn:hover {
-  text-shadow: 0 1px 4px rgba(245, 108, 108, 0.3);
+  text-shadow: 0 1px 4px color-mix(in oklab, var(--el-color-danger) 30%, transparent);
 }
 
 /* ========== 对话框 ========== */
@@ -538,7 +538,7 @@ function providerName(id: number | null): string {
   margin: 6px 0 0;
   font-size: 12px;
   line-height: 1.5;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 
 /* 输入框焦点高亮 */

@@ -19,17 +19,19 @@ html:root {
   --fa-accent-soft: oklch(90% 0.076 70.697); /* 暖橙浅档（用于光斑背景） */
   --fa-accent-pop: oklch(78% 0.17 65); /* 暖橙鲜档（高亮笔/渐变终点） */
 
-  /* ============ 缓动 ============ */
+  /* ============ 动效：时长四档 + 缓动 ============ */
+  /* 三档沿用 UI-REFERENCE §2 的实测体系，enter 是后来补的入场档 */
+  --fa-duration-fast: 0.2s; /* 交互反馈 */
+  --fa-duration-enter: 0.35s; /* 卡片/清单入场 */
+  --fa-duration-pulse: 1.8s; /* 骨架屏、呼吸点 */
+  --fa-duration-progress: 5s; /* 长进度 */
   /* spring 用于悬停/入场，比 ease-out 多一点回弹，交互不死板 */
   --fa-ease-spring: linear(0, 0.35, 0.7 18%, 1 38%, 0.92 55%, 1 72%, 0.985 85%, 1);
 
-  /* ============ 动效三档（UI-REFERENCE §2） ============ */
-  --fa-duration-fast: 0.2s; /* 交互反馈 */
-  --fa-duration-pulse: 1.8s; /* 骨架屏 */
-  --fa-duration-progress: 5s; /* 长进度 */
-
-  /* ============ 圆角分层（容器 24 / 控件 6 / 胶囊全圆） ============ */
+  /* ============ 圆角分层（容器 24 / 卡片 16 / 控件 6 / 胶囊全圆） ============ */
   --fa-radius-box: 24px;
+  /* 页面内次级容器（表格卡、步骤条底板、拖拽区）：原先四页各写一遍 16px 字面量 */
+  --fa-radius-card: 16px;
   --fa-radius-field: 6px;
   --fa-radius-pill: 9999px;
 

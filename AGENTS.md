@@ -203,12 +203,13 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - **主题层是唯一定制入口**：`client/src/assets/theme.css`（`main.ts` 里在 `style.css` 之后 import）覆盖 Element Plus 的 CSS 变量——暖白底 / 墨黑前景 / 近黑主色 / 暖橙高亮笔点缀，另有漂移光斑 + 噪点背景。新增视觉定制优先改这个文件，**不要在页面里硬编码色值**（历史遗留的蓝紫渐变已在 2026-11-17 全部清掉，回归检查：`grep -rn "409eff|66b1ff|6366f1" src --include=*.vue` 应为空）。覆盖层用 `html:root` 选择器压过 base.css 的 `:root`/`html` 双声明；整体回滚只需删 `main.ts` 一行 import。动效/圆角/色彩锚点令牌都定义在 theme.css 顶部 `--fa-*`，页面里引用令牌不引用字面值。
 - **给 `el-button--primary` 这类组件级规则加外观（渐变/圆角）时必须 `:not(.is-link):not(.is-text)`**——link 按钮也带 `el-button--primary` 类，否则"退出"这种文字链接会被刷成实心色块（2026-11-17 浏览器走查实拍）。同理 `el-step__head` 是容器，染背景要落到 `.el-step__icon.is-text` 上。
 - **页面头部结构是全局的**：`.page` / `.page-header` / `.page-header-content` / `.page-icon` 都在 `style.css`，五个业务页共用（原先 Tasks/Providers/Logs 各抄一份 `.page-icon`，已去重）。新页面直接套这套类名 + `page-header-content > (page-icon + div)`，不要再在 scoped 里另写头部样式。
-- **色彩分工**：`success/warning/danger/info` 只用于**状态**（日志状态、删除按钮）；属性标记（批改=是、`.pptx`、官方）一律 `type="primary"`。主色已是近黑，所以"处理中"用 `warning` 而不是 `primary`——否则与 `pending` 的灰阶糊在一起（UI-REFERENCE §4.5 预告的代价，实测踩到）。`Home.vue` 的 `TYPE_COLOR` 八色是**问题类型的数据编码**，不是装饰，不要为了统一色系而压成单色。
+- **色彩分工**：`success/warning/danger/info` 只用于**状态**（日志状态、删除按钮）；属性标记（批改=是、`.pptx`、官方）一律 `type="primary"`。主色已是近黑，所以"处理中"用 `warning` 而不是 `primary`——否则与 `pending` 的灰阶糊在一起（UI-REFERENCE §4.5 预告的代价，实测踩到）。
 - **状态值不给用户看英文枚举**：`Logs.vue` 的 `statusLabel` 从 `statusOptions` 派生，筛选下拉与表格列共用一份中文文案；新增枚举时改这一处。
-- 改了样式装载方式，验证不能只看 `npm run build` 过了：把 `dist/assets/*.css` 拼起来 grep 每个用过的 `el-*` 类名，才能确认样式真的进了产物（`el-option` / `el-tab-pane` / `el-config-provider` 三个是名字对不上，不是缺样式——它们的 style 入口引的是父组件 CSS）。真实交互（弹窗样式、loading 遮罩、分页中文文案）仍未在浏览器里跑过。
+- 改了样式装载方式，验证不能只看 `npm run build` 过了：把 `dist/assets/*.css` 拼起来 grep 每个用过的 `el-*` 类名，才能确认样式真的进了产物（`el-option` / `el-tab-pane` / `el-config-provider` 三个是名字对不上，不是缺样式——它们的 style 入口引的是父组件 CSS）。**弹窗样式、loading 遮罩、分页中文、状态中文标签、批注清单联动已在 2026-11-18 真浏览器逐项走过并存档结论**，别再写"未验证"；仍未在浏览器里跑的是移动端断点表现与深色模式（后者明确不做）。
 - provider 的 `capabilities` 后端存逗号分隔**字符串**、表单要的是**数组**，转换只认 `KNOWN_CAPABILITIES` 里的已知值（`client/src/views/Providers.vue` 的 `toCapabilityList()` / `buildPayload()`）——顺带做了顺序归一化和脏值丢弃，未知标记不会把表单卡死也不会吃 422。提交**必须走 `buildPayload()`**，别把带 `capabilityList` 临时字段的 form 整个发出去。
 - 上传格式只在两处声明：`Home.vue` 的 `accept=".docx,.pdf"` 和上传区文案。**前端不做扩展名校验**，`accept` 只管文件选择对话框，拖拽照样能拖进 `.txt`——真校验在后端白名单，400 文案已是给用户看的。加格式时要同时改这两处 + 后端派发表。
-- 结构化批改的原文高亮在 `Home.vue:buildParagraphs()`：按 `\n` 分段，用全局偏移 `start/end` 落到段内区间再套 span。**非高亮片段也必须给 `index: null`**（`Span.index` 是 `number | null` 必填），漏了会让相邻片段的 `seg.index` 是 `undefined`，点击时把 `activeIssueIndex` 写成 `undefined` 从而永不匹配。匹配不到位置的 issue 显示"未定位"，不要猜位置。
+- 结构化批改的原文高亮在 `client/src/utils/annotate.ts:buildParagraphs()`（纯函数，`annotate.test.ts` 钉着），视图在 `client/src/components/GradingResult.vue`。按 `\n` 分段，用全局偏移 `start/end` 折算成段内区间再套 span。**非高亮片段也必须给 `index: null`**（`Span.index` 是 `number | null` 必填），漏了会让相邻片段的 `seg.index` 是 `undefined`，点击时把 `activeIssueIndex` 写成 `undefined` 从而永不匹配。匹配不到位置的 issue 显示"未定位"，不要猜位置。卡片↔高亮的联动状态是 `GradingResult` 的局部状态，不要退回 Home 编排层。
+- **`TYPE_COLOR` 八色是问题类型的数据编码，不是装饰**：不要为了跟暖白/墨黑主色系统一而压成单色阶梯，那样"错别字"和"结构问题"就分不出来了。它住在 `utils/annotate.ts`，加类型时要同时改后端 `schemas/grading.py` 的 `ISSUE_TYPES` 与这里的两份表。
 - `gradingIssues` / `gradingDegraded` 和 `processedContent` 一样要走 `syncToStore()` + `home.ts` 持久化，并在 `reset()` / `goBackToUpload()` 里成对清空；`applyResult()` 是唯一铺结果到 UI 的入口（3 处轮询/上传回调都调它），别在调用点各自赋值。
 
 ## 5. 数据库变更
@@ -234,7 +235,7 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 
 当前路线（阶段 0–5，含为什么这么排）在 SPEC §9.2；阶段 0 交付与验证明细在 SPEC §9.3，阶段 1 在 §9.4，阶段 1.5（PDF 输入 + 去 Word 化）在 §9.5，阶段 2 最小版（评测台 + 基线数字）在 §9.6，阶段 3（长文档分块批改图）在 §9.7，缺陷台账第五轮在 §10，改 bug 前先看这几张表。
 
-门禁基线（均已实测通过，2026-11-18 真实模型轮之后）：`uv run pytest -q` → **204 passed**（199 + 3 条薄文字层扫描件判据 + 2 条传输层超时文案/思考开关）；`uv run ruff check .` → 全绿；`ruff format --check .` → 78 files formatted；`uv lock --check` → 一致（**83 包**）；`npm run build` → **通过**；`npm test` → **24 passed**（前端 vitest，见 §4）；`test_e2e.py` **31/0**、`test_e2e_structural.py` **60/0**（含第 11 节"非批改 issues=None + 时间列同源"8 项，已实跑）、`test_e2e_ppt.py` **28/0**（真渲染）。**e2e 必须走 `run_backend.py`**，详见 §2 那条 ⚠。
+门禁基线（均已实测通过，2026-11-18 真实模型轮之后）：`uv run pytest -q` → **204 passed**（199 + 3 条薄文字层扫描件判据 + 2 条传输层超时文案/思考开关）；`uv run ruff check .` → 全绿；`ruff format --check .` → 78 files formatted；`uv lock --check` → 一致（**83 包**）；`npm run build` → **通过**；`npm test` → **33 passed**（前端 vitest，见 §4）；`test_e2e.py` **31/0**、`test_e2e_structural.py` **60/0**（含第 11 节"非批改 issues=None + 时间列同源"8 项，已实跑）、`test_e2e_ppt.py` **28/0**（真渲染，2026-11-18 未重跑）。**e2e 必须走 `run_backend.py`**，详见 §2 那条 ⚠。
 
 
 - **`server/test_e2e.py` 是仓库自带的端到端冒烟脚本，不是遗留物，别删**：需后端已在 8000 运行、连真实 Postgres。它会注册 `tester_*` / `other_*` 两个临时账号，造 1 条日志和 1 个上传文件；**跑完自动清理 DB 记录**（llm_calls → logs → tasks → providers → users），落盘文件因 UUID 存储名无法精确定位，偶尔手工清。第 7 节现在真走重试路径（连不上假 provider → 重试 3 次 → failed），第 10 节直接改库把日志置为 done 来验证下载，都属预期行为。
@@ -253,8 +254,29 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
   - 本轮 6 份合计 35,181 token。成本只能事后从 `llm_calls` 看，`provider.max_tokens` 拦不住（见 §3.6）。
 - **路线 2026-11-16/17（见 SPEC §9.2）**：阶段 4（Postgres 基建，11-16 当天迁完）、阶段 5（PDF→PPT 全链路，11-17 八切片收齐，含 WSL LibreOffice 真渲染）、任务 2（管理员 + 默认模型授权，11-17）均已完成。**下一站 = 阶段 6**：本地 embedding + pgvector 检索 + 规范条款注入批改 prompt（SPEC §9.2 阶段 6；`spec_chunks` 加 embedding 列是改表，做前先问）。剩余待办按用户定的顺序：浏览器 UI 走查 → 阶段 6。
 - **管理员 + 默认模型授权（已于 2026-11-17 实施，简单版）**：`users.role` / `users.can_use_default` / `model_providers.is_public` 三列 + `require_admin` + `/admin/*` 三端点 + 前端 Admin 页。不做 audit / 跨用户 provider 管理（用户拍板）。授权判据集中在 `services/llm.py:provider_usable_by`，改任何 provider 可见性逻辑先看 SPEC §9.11 的实施清单。**admin 路由是 §3.1 隔离铁律的声明式例外**——新加管理端点挂 `require_admin` 即可，不要"顺手"补 user_id 过滤把 admin 视图废掉。
-- **阶段 5 PDF→PPT**：6 项决策已敲定（VLM 走 mock 起步、OCR / 图片 / 真云端 VLM 是显式扩展口子）；`task.output_format` 列扩 + `services/pptx_builder.py` 接 `image_refs=None`、`services/pdf.py:extract_text_from_pdf(fallback_to_ocr=False)`——这两个签名是"留口子"的硬约束，未来切真实现不能改外部接口。完整计划见 SPEC §9.12。
+- **阶段 5 PDF→PPT**：6 项决策已敲定（VLM 走 mock 起步、OCR / 图片 / 真云端 VLM 是显式扩展口子）；`task.output_format` 列扩 + `services/pptx_builder.py` 接 `image_refs=None` 这两个签名是"留口子"的硬约束，未来切真实现不能改外部接口。⚠ 同批设计的 `services/pdf.py:extract_text_from_pdf(fallback_to_ocr=False)` **至今没有实现**——真实签名一直是 `extract_text_from_pdf(file_bytes)`（见 §7 阶段 6 前置约束），接 OCR 时才补这个参数。完整计划见 SPEC §9.12。
 - 真机跑过的一手结论（2026-11-15，qwen3.7-flash + 合成中文 PDF）：结构化链路 OK（`degraded=False`、4 条 的/地/得 全部精确定位）。但该端点回来的 `revised_text` 与原文一字不差——意见对、修订没落地。这是 prompt 产出质量，不是提取或解析缺陷，正属阶段 2 评测台要量化的范围，别在提取层"顺手改 prompt"掩盖它。
+
+- **阶段 6 前置约束与实测事实（2026-11-19 核实，动手前先读这条）**
+  - **环境**：`vector 0.8.7` 已装进 `fileagent-postgres`；镜像里**没有 `pg_jieba` / `zhparser`** → 混合检索的中文分词这条路当前走不通，**先纯向量**。入库已跑通：`spec_docs` 有 1 篇（教学示例稿规范，10,889 字）、`spec_chunks` 66 块，检索层可以直接拿它当数据。
+  - **embedding 端点**：LM Studio `http://127.0.0.1:11386/v1`，模型 `text-embedding-bge-m3`（文件 `D:\aiagent\app\LM-studio\model\gpustack\bge-m3-GGUF\bge-m3-Q8_0.gguf`）。实测 **1024 维、模长 1.0（已归一化）、CLS pooling、非因果** → `Vector(1024)` + `vector_cosine_ops` 可定。⚠ 同一服务还挂着 `text-embedding-nomic-embed-text-v1.5` = **768 维**，模型名必须写死。
+    **好消息（2026-11-19 实测）**：`spec_chunks.embedding` 建成 `vector(1024)` 后，维度由 pgvector 硬约束——插 3 维直接报 `expected 1024 dimensions, not 3`。所以选错模型是**响亮失败**，不会静默混存两种维度；启动期校验仍要做（早报错比写到一半炸好），但它不是唯一防线。
+    ⚠ 查维度别用 `atttypid::regtype::text`，它只渲染成 `vector`；维度在 `pg_attribute.atttypmod`。`migrate_add_spec_embedding.py` 第一版就因此误报过。
+    ⚠ SQL 脚本里写这张表的列要注意 `end` 是 Postgres 保留字，得 `"end"`（ORM 自动加引号，应用侧不受影响）。
+  - **三个静默坑**（都会让检索"看起来能跑，其实不准"）：① query 端检索前缀**必须应用侧自己加**——GGUF 元数据里没有任何前缀信息，实测不加 top1 相似度 0.4643、加了 0.5143 且 top10 排序改变；② **超长输入不报错、静默截断**（16,280 字仍返回 1024 维，与截断到 1200 字的余弦只有 0.8811），切块长度得自己控；③ `usage.prompt_tokens` 恒 0 → **embedding 成本无法从响应得到**，要记账只能自己数文本长度。
+  - **确定性**：同一句两次编码余弦 0.9999999275，**不是逐位一致**（GPU 非确定性）。缓存键用文本哈希，别比向量。
+  - **批量只比逐条快 1.6×**（66 条 2.17s vs 3.46s）→ 全库回填很便宜，**不必为回填设计异步任务体系**，轻量方案站得住。
+  - **索引**：小库先精确扫描，**别急着上 HNSW**——ANN 索引带 `user_id` 过滤会静默少返回 top-k（§3.1 的隔离要求正好触发这个坑）。到万级再上，并配合过滤策略重审。**已按这条定策：迁移脚本刻意不建任何 ANN 索引**，检索层第一版直接顺序扫描。
+  - **embedding 成本怎么记（已定）**：端点 `usage.prompt_tokens` 恒 0，拿不到真实 token。成本代理 = **文本字符数**，而 `spec_docs.char_count` 与 `spec_chunks.text` 本来就在库里，`sum(len(chunk.text))` 就是编码量——**不需要为它加新列**。别为了记账去编一个 token 数字进 `llm_calls`。
+  - **切块（2026-11-19 已解决）**：原先复用批改的 `split_document`，10,889 字 / 66 条款切成 6 块、**5 个边界全部把条款拦腰截断**，断点正好落在【判定标准】之前——检索拿到的是缺判据的半条条款。现在改用 `services/spec_chunking.py:split_by_clause`：**一块一条款**，章标题并入其下首条，超长条款才退回按句细分，切完自查三条不变式（切片相等 / 不重叠 / `reassemble == 原文`），破了就抛而不是静默入库。
+    实测复验：同一份规范重传后 **66 块、0 块缺【判定标准】、0 块塞多条条款、平均每块 165 字**。
+    ⚠ 语义变更：`spec_chunk_chars` 现在是"**单条条款上限**"，不是装箱目标（`config.py` 注释已改）。
+    ⚠ 验不变式别用裸 `"".join`——块之间隔着被丢掉的空白，join 一定短几个字符，那不是我方缺陷，要走 `reassemble`。
+  - **规范库不可变（已用测试钉住）**：`spec_storage` 只暴露 `ingest_spec_doc` / `delete_spec_doc`，没有 UPDATE 口子；`tests/test_spec_storage.py` 有两条回归——同名重传是新增一行而非覆盖、且模块里不存在 `update*/edit*/modify*` 函数。改了删了重传，别开原地更新的头。
+  - **效度边界**：规范文档与评测夹具都是 AI 生成的，机制能学透，但**数字不能当真实世界结论**（简历别写"接入 RAG 提升 X%"，那是循环自证）。
+  - **资产位置**：`server/fixtures/specs/文字编辑校对规范（教学示例稿）.md|.docx`（66 条款、四段式标签已统一为【判定标准】、零表格）；`eval/cases.py` 现有 **15 条夹具**（新 10 条带 `expect_clauses`，指向上述条款编号）。原始生成稿不归档——两份草稿 txt 已删且从未入库，别再引用 `_ai_generated_drafts/` 这个目录。
+  - **embedding 列迁移脚本已写、未执行**：`server/migrate_add_spec_embedding.py`（幂等 `ADD COLUMN IF NOT EXISTS embedding vector(1024)`；`--check` 只读干跑已实测；回滚是 `DROP COLUMN`）。执行它 = 改表，要先问用户。脚本里写明了**故意不建 ANN 索引**，理由见上面"索引"那条。
+  - **`fallback_to_ocr` 从未实现**：`services/pdf.py:188` 的真实签名一直是 `extract_text_from_pdf(file_bytes)`。接 MinerU 时才按 SPEC §9.12 的语义真正加上（**由调用方决定这次要不要 OCR，提取器自己不偷跑**），同时输出要走双轨：`plain_text` 守 §3.8 与 docx 同构的不变式给批改/diff，`structured`（markdown + blocks + bbox）给 RAG 与未来的 PDF 原生批注。
 
 ## 8. 两份副本（**2026-11-16 起不再同步**）
 

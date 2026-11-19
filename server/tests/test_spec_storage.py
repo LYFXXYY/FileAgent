@@ -133,3 +133,73 @@ def test_each_doc_owned_by_caller_id(session):
     b = ingest_spec_doc(session, user_id=2, title="b", filename="b.docx", file_bytes=raw)
     assert a.user_id == 1
     assert b.user_id == 2
+
+
+# ---------- 规范库不可变（阶段 6 前置约束 4） ----------
+def test_reingest_same_title_creates_new_doc_not_update(session):
+    """
+    改了规范就重传，旧文档整份留着。
+
+    这条约束是为 embedding 准备的：一旦支持 UPDATE，旧向量会和新正文共存，
+    检索会命中已经作废的条款——而那种错在结果里看不出痕迹。
+    """
+    raw = _docx_bytes(["1.1.1 同音别字", "【判定标准】替换后语义不通即判定。"])
+
+    first = ingest_spec_doc(
+        session, user_id=1, title="同一份规范", filename="a.docx", file_bytes=raw
+    )
+    old_chunks = session.query(SpecChunk).filter(SpecChunk.doc_id == first.id).all()
+    old_texts = [c.text for c in old_chunks]
+
+    second = ingest_spec_doc(
+        session, user_id=1, title="同一份规范", filename="b.docx", file_bytes=raw
+    )
+
+    assert second.id != first.id
+    assert session.query(SpecDoc).filter(SpecDoc.title == "同一份规范").count() == 2
+    # 旧文档一块没动
+    now = [c.text for c in session.query(SpecChunk).filter(SpecChunk.doc_id == first.id).all()]
+    assert now == old_texts
+
+
+def test_module_exposes_no_update_path(session):
+    """入库模块只有 ingest / delete 两个写入口，没有原地改的口子"""
+    import services.spec_storage as m
+
+    public = {n for n in dir(m) if not n.startswith("_") and callable(getattr(m, n))}
+    assert not {n for n in public if n.lower().startswith(("update", "edit", "modify"))}
+
+
+def test_chunks_follow_clause_boundaries(session):
+    """
+    入库切块按条款走：三条条款就该是三块，且每块都带着【判定标准】。
+
+    这条直接钉住 2026-11-19 实测到的腰斩缺陷（旧写法 2000 字装箱会把判据切到下一块）。
+    """
+    raw = _docx_bytes(
+        [
+            "1.1.1 同音别字",
+            "【适用情形】读音相同但含义不同。",
+            "【判定标准】替换后语义不通即判定。",
+            "【错误示例】再接再励。",
+            "【正确示例】再接再厉。",
+            "1.1.2 形近别字",
+            "【适用情形】字形相近的字写错。",
+            "【判定标准】核对部首与词义。",
+            "【错误示例】提纲很草。",
+            "【正确示例】提纲很差。",
+            "2.1.1 语序不当",
+            "【适用情形】定语顺序不合习惯。",
+            "【判定标准】按领属、数量、动词短语排列。",
+            "【错误示例】他很学习努力。",
+            "【正确示例】他学习很努力。",
+        ]
+    )
+    doc = ingest_spec_doc(session, user_id=1, title="条款规范", filename="c.docx", file_bytes=raw)
+    chunks = (
+        session.query(SpecChunk).filter(SpecChunk.doc_id == doc.id).order_by(SpecChunk.seq).all()
+    )
+
+    assert len(chunks) == 3
+    assert all("【判定标准】" in c.text for c in chunks)
+    assert [c.start for c in chunks] == sorted(c.start for c in chunks)

@@ -10,13 +10,13 @@
  * 首屏只加载 Login + Layout，其他页面按需加载，类似 Java 的 SPI
  */
 
-import { ElMessage } from 'element-plus'
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 
 import { useAuthStore } from '@/stores/auth'
 
 import AppLayout from '@/components/AppLayout.vue'
 import Home from '@/views/Home.vue'
+import { setNotice, flushNotice } from './notice'
 
 const Login = () => import('@/views/Login.vue')
 const Tasks = () => import('@/views/Tasks.vue')
@@ -65,11 +65,18 @@ router.beforeEach((to) => {
   if (to.name === 'login' && auth.isLoggedIn) {
     return { name: 'home' }
   }
-  // 管理页：非 admin 直接回首页。这只是入口拦截，后端 require_admin 才是权限边界
-  // 给一句提示而不是静默跳转——否则用户分不清是被拦了还是页面坏了
+  // 管理页：非 admin 回首页。这只是入口拦截，后端 require_admin 才是权限边界。
+  // 提示走 notice 投递而不是在这里直接弹——冷加载时 app 还没挂载，消息挂不上 DOM
   if (to.meta.adminOnly && !auth.isAdmin) {
-    ElMessage.warning('你没有管理权限，已返回工作台')
+    setNotice('你没有管理权限，已返回工作台')
     return { name: 'home' }
   }
   return true
+})
+
+// 导航完成后再投递守卫攒下的提示。
+// 为什么不在守卫里直接弹：被拦回的目标常常就是当前路由（比如从首页手输 /admin），
+// 此时 fullPath 没变，任何"等路由变化再显示"的写法都不会触发（实测踩过两次）。
+router.afterEach(() => {
+  flushNotice()
 })
