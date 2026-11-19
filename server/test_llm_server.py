@@ -16,6 +16,9 @@ from fastapi.responses import JSONResponse
 
 app = FastAPI(title="FileAgent Mock LLM")
 
+# 最后一次收到的 messages。RAG 端到端靠它证明"条款真的进了 prompt"
+_LAST: dict = {"messages": []}
+
 
 @app.get("/v1/models")
 async def models():
@@ -90,6 +93,7 @@ async def chat_completions(request: Request):
     便于 e2e 脚本断言解析定位结果。
     """
     body = await request.json()
+    _LAST["messages"] = body.get("messages", [])
     fmt = body.get("response_format")
 
     if isinstance(fmt, dict) and fmt.get("type") in ("json_schema", "json_object"):
@@ -107,3 +111,21 @@ async def chat_completions(request: Request):
         "model": "answered-model",
         "usage": {"prompt_tokens": 1234, "completion_tokens": 234, "total_tokens": 1468},
     }
+
+
+@app.post("/v1/_mock/reset")
+async def _reset():
+    """清空记录，避免跨用例污染（与 test_vlm_server 同一套约定）"""
+    _LAST["messages"] = []
+    return {"ok": True}
+
+
+@app.get("/v1/_mock/last")
+async def _last():
+    """
+    回吐最后一次收到的 messages。
+
+    给 RAG 端到端用：条款到底有没有进 prompt，只有被调用方自己能证明；
+    看结果里的 refs 只能说明"检索到了"，不能说明"送进去了"。
+    """
+    return {"messages": _LAST["messages"]}

@@ -99,15 +99,29 @@ class Settings(BaseSettings):
     embedding_api_key: str = ""
     # 编码是短请求，不需要 LLM 那套 180s；但整批一次发，留 60s 余量
     embedding_timeout: float = 60.0
-    # bge 系列做检索是**非对称**的：文档端不加前缀，查询端要加。
-    # GGUF 元数据里没有任何前缀信息，必须由应用侧自己拼（实测 top1 0.4643 → 0.5143 且排序改变）
-    embedding_query_prefix: str = "为这个句子生成表示以用于检索相关文章："
+    # bge 系列做检索是否要加查询前缀，**取决于具体模型**：
+    # `bge-large-zh-v1.5` 那一批是带指令训练的，官方要求查询端加
+    # "为这个句子生成表示以用于检索相关文章："；而 **bge-m3 不是**——它训练时不带指令。
+    # 本机实测（9 条夹具、66 条款、k=5）：加前缀 recall@5=0.380 / hit=0.778，
+    # 不加 recall@5=0.491 / hit=0.889。所以默认留空，换模型时再按该模型的训练方式配。
+    # 前缀不在 GGUF 元数据里，只能应用侧拼；加了也不会报错，只会让相似度整体漂移。
+    embedding_query_prefix: str = ""
     # 入库时同步编码。关掉则文本照常入库、向量留给回填脚本
     spec_embed_on_ingest: bool = True
+    # 批改前是否自动召回规范条款。关掉后批改链路与"阶段 6 之前"逐字一致，
+    # 评测台靠它做 RAG A/B（同 longdoc_enabled 的思路）
+    spec_rag_enabled: bool = True
     # 检索返回几条条款。规范条款平均 165 字，5 条 ≈ 800 字上下文
     spec_retrieval_top_k: int = 5
+    # 召回方式：hybrid（默认，向量+词法 RRF 融合）/ vector / lexical。
+    # 评测台靠这三个取值做消融，别把它当装饰性开关
+    spec_retrieval_mode: str = "hybrid"
     # 注入批改 prompt 的条款上下文字数上限，超了从末尾截断（宁少不爆上下文）
     spec_context_max_chars: int = 3000
+    # 查询滑窗：bge 对超长输入静默截断，整篇一次编码等于只拿开头去检索
+    spec_query_window_chars: int = 800
+    # 最多几个窗口。超出时等步长抽样（覆盖首尾比只取开头诚实）
+    spec_query_max_windows: int = 4
 
     # ---------- PPT 渲染（阶段 5 s5.4）----------
     # 'stub'（默认）= 1×1 占位 PNG，便携、快、单测/e2e 用；

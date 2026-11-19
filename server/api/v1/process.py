@@ -41,9 +41,13 @@ from schemas.process import ChunkProgressResponse, ProcessResponse, UploadRespon
 from services.grading import (
     build_messages,
     deserialize_issues,
+    deserialize_refs,
     is_degraded,
     parse_grading_output,
     serialize_result,
+)
+from services.grading import (
+    spec_note as read_spec_note,
 )
 from services.llm import (
     LLMError,
@@ -55,12 +59,17 @@ from services.llm import (
 )
 from services.pdf import PdfError, extract_text_from_pdf
 from services.pptx_builder import PptxError, build_pptx
+from services.spec_retrieval import SpecContext, collect_spec_context
 from services.word import create_diff_docx, create_plain_docx, extract_text_from_docx
 
 logger = logging.getLogger("fileagent.process")
 
 router = APIRouter()
 settings = get_settings()
+
+# 未启用规范检索时的空上下文。用常量而不是到处传 None，`_run_model` 里就能直接读
+# spec.context / spec.refs，不必每处判空（判空漏一处就是 AttributeError 级的白崩）
+_NO_SPEC = SpecContext(context="", refs=[], note=None)
 
 # 支持的输入格式 → 文本提取器。白名单直接由这张表的键派生，
 # 免得加了格式却忘了改白名单（或反过来），两处对不上就是 500。
@@ -243,14 +252,30 @@ async def _run_processing(log_id: int) -> None:
             except LLMError:
                 logger.info("用户 %s 没有 vision 提供商，PPT 批评循环跳过", log.user_id)
 
+        original_text = log.original_content or ""
+
+        # 规范条款召回（阶段 6 A3）。只在"批改 + 非 PPT + 不分块"时尝试：
+        # - 分块路径给每块注入同一份条款会按块数重复烧 token，那是另一刀（按块查询）
+        # - PPT 大纲不读规范条款
+        # 检索失败不把已能跑通的批改判成失败：collect_spec_context 内部兜住并回传 note
+        spec = _NO_SPEC
+        if task.is_grading and task.output_format != "pptx" and not _should_chunk(original_text):
+            spec = await run_in_threadpool(
+                collect_spec_context,
+                db,
+                user_id=log.user_id,
+                document_text=original_text,
+            )
+
         try:
             output = await _run_model(
                 task,
                 provider,
                 task.prompt_template,
-                log.original_content or "",
+                original_text,
                 log.id,
                 critic_provider=critic_provider,
+                spec=spec,
             )
         except LLMError as e:
             await _meter(
@@ -404,6 +429,7 @@ async def _run_model(
     log_id: int,
     *,
     critic_provider: ModelProvider | None = None,
+    spec: SpecContext | None = None,
 ) -> _ModelOutput:
     """
     三条路径：pptx 走 PPT 流水线（含批评循环）、批改走结构化（含分块）、其他走纯 chat
@@ -464,15 +490,17 @@ async def _run_model(
         )
 
     prompt = prompt_template.replace("{{content}}", original_text)
+    spec = spec or _NO_SPEC
     result, payload = await chat_json(
-        build_messages(prompt),
+        build_messages(prompt, spec.context),
         provider,
         json_schema=GRADING_JSON_SCHEMA,
     )
     grading = parse_grading_output(result.content, payload, original_text)
     return _ModelOutput(
         grading.revised_text,
-        serialize_result(grading),
+        # refs/note 进信封：让"这次到底参考了哪几条规范"能从结果本身查出来
+        serialize_result(grading, refs=spec.refs or None, note=spec.note),
         (
             _MeteredCall(
                 result,
@@ -517,6 +545,8 @@ async def process_status(
         processed_content=log.processed_content if done else None,
         issues=deserialize_issues(log.structured_output) if graded else None,
         grading_degraded=is_degraded(log.structured_output) if done else False,
+        spec_refs=deserialize_refs(log.structured_output) if graded else None,
+        spec_note=read_spec_note(log.structured_output) if graded else None,
         progress=progress,
     )
 

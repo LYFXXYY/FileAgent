@@ -19,7 +19,7 @@
 
 import { defineStore } from 'pinia'
 import { ref, watch } from 'vue'
-import type { GradingIssue, UploadResponse } from '@/api/types'
+import type { GradingIssue, SpecRef, UploadResponse } from '@/api/types'
 
 interface HomeState {
   currentStep: number
@@ -32,6 +32,8 @@ interface HomeState {
   processedContent: string | null
   gradingIssues: GradingIssue[] | null
   gradingDegraded: boolean
+  specRefs: SpecRef[] | null
+  specNote: string | null
 }
 
 const STORAGE_KEY = 'fileagent_home_state'
@@ -48,6 +50,8 @@ export const useHomeStore = defineStore('home', () => {
   const processedContent = ref<string | null>(null)
   const gradingIssues = ref<GradingIssue[] | null>(null)
   const gradingDegraded = ref(false)
+  const specRefs = ref<SpecRef[] | null>(null)
+  const specNote = ref<string | null>(null)
 
   // ---------- 持久化方法 ----------
   function save() {
@@ -63,6 +67,8 @@ export const useHomeStore = defineStore('home', () => {
         processedContent: processedContent.value,
         gradingIssues: gradingIssues.value,
         gradingDegraded: gradingDegraded.value,
+    specRefs: specRefs.value,
+    specNote: specNote.value,
       }
       sessionStorage.setItem(STORAGE_KEY, JSON.stringify(state))
     } catch (err) {
@@ -84,6 +90,8 @@ export const useHomeStore = defineStore('home', () => {
       processedContent,
       gradingIssues,
       gradingDegraded,
+      specRefs,
+      specNote,
     ],
     save,
     { deep: true }
@@ -105,6 +113,8 @@ export const useHomeStore = defineStore('home', () => {
         processedContent.value = parsed.processedContent ?? null
         gradingIssues.value = parsed.gradingIssues ?? null
         gradingDegraded.value = parsed.gradingDegraded ?? false
+        specRefs.value = parsed.specRefs ?? null
+        specNote.value = parsed.specNote ?? null
       }
     } catch (err) {
       console.warn('sessionStorage restore failed:', err)
@@ -125,6 +135,8 @@ export const useHomeStore = defineStore('home', () => {
     processedContent.value = null
     gradingIssues.value = null
     gradingDegraded.value = false
+    specRefs.value = null
+    specNote.value = null
   }
 
   return {
@@ -138,6 +150,8 @@ export const useHomeStore = defineStore('home', () => {
     processedContent,
     gradingIssues,
     gradingDegraded,
+    specRefs,
+    specNote,
     save,
     restore,
     clear,

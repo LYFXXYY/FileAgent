@@ -8,12 +8,15 @@ import pytest
 
 from schemas.grading import ISSUE_TYPES, GradingIssue, GradingResult, normalize_type
 from services.grading import (
+    GRADING_OUTPUT_INSTRUCTION,
     build_messages,
     deserialize_issues,
+    deserialize_refs,
     is_degraded,
     locate_issues,
     parse_grading_output,
     serialize_result,
+    spec_note,
 )
 
 # 一段含重复片段的原文，用于验证定位
@@ -276,3 +279,89 @@ def test_contract_requires_revised_text_field():
 
     assert "revised_text" in system["content"]
     assert "issues" in system["content"]
+
+
+# ---------- 规范条款注入（阶段 6 A3） ----------
+def test_build_messages_without_spec_is_unchanged():
+    """
+    不传条款时 messages 与阶段 6 之前逐字一致。
+
+    这条钉住"未启用 RAG 的批改链路不受影响"——用户明确要求先保证这一点，
+    注入逻辑一旦改动了默认路径的任何一个字节，这里就该红。
+    """
+    msgs = build_messages("请批改：{{content}}")
+
+    assert len(msgs) == 2
+    assert msgs[1]["content"] == "请批改：{{content}}"
+
+
+def test_spec_context_goes_to_user_message_not_system():
+    """
+    条款是内容不是契约，进 user。
+
+    混进 system 会让模型把输出格式约束当材料一起改写（§3.7 立的边界），
+    出格率上升而且是静默的。
+    """
+    msgs = build_messages("批改这份文档", spec_context="【1.1.1】同音别字……")
+
+    assert msgs[0]["content"] == GRADING_OUTPUT_INSTRUCTION  # system 契约原样
+    assert "1.1.1" in msgs[1]["content"]
+    assert "JSON" not in msgs[1]["content"]  # 契约没被搬进 user
+
+
+def test_spec_context_is_appended_after_prompt():
+    """条款排在用户要求与正文之后：模型对尾部更敏感，也保证原文 prompt 不被改写"""
+    msgs = build_messages("原有要求", spec_context="条款甲")
+
+    assert msgs[1]["content"].startswith("原有要求")
+    assert "条款甲" in msgs[1]["content"]
+
+
+def test_spec_context_tells_model_not_to_force_citations():
+    """
+    必须写明"不适用就不要硬套"。
+
+    否则模型会给每条意见都挂一个不相干的条款号，引用看起来更权威、实际更假。
+    """
+    msgs = build_messages("要求", spec_context="条款甲")
+
+    assert "不要引用" in msgs[1]["content"]
+
+
+# ---------- 引用溯源落在信封里 ----------
+def test_refs_roundtrip_through_envelope():
+    refs = [{"clause": "1.1.1", "score": 0.51, "doc_id": 3, "seq": 0}]
+    stored = serialize_result(GradingResult(revised_text="修订", issues=[]), refs=refs, note=None)
+
+    assert deserialize_refs(stored) == refs
+    assert spec_note(stored) is None
+    # 老字段一个都不能少：issues 展示路径读的是同一份信封
+    assert deserialize_issues(stored) == []
+
+
+def test_note_roundtrip_and_absence():
+    stored = serialize_result(GradingResult(revised_text="x", issues=[]), note="端点未就绪")
+
+    assert spec_note(stored) == "端点未就绪"
+    assert deserialize_refs(stored) == []
+
+
+def test_envelope_without_refs_has_no_new_keys():
+    """
+    没用规范库时信封形状与阶段 6 之前完全一致。
+
+    多写一个空 refs 会让"没用规范"和"用了但没引用"在数据上分不开，
+    也平白改变历史数据的对比基线。
+    """
+    import json
+
+    stored = serialize_result(GradingResult(revised_text="x", issues=[]))
+
+    assert set(json.loads(stored)) == {"degraded", "issues"}
+
+
+def test_refs_and_note_survive_garbage():
+    assert deserialize_refs(None) == []
+    assert deserialize_refs("[1]") == []
+    assert spec_note(None) is None
+    assert spec_note('{"spec_note": 123}') is None  # 类型不对当没有

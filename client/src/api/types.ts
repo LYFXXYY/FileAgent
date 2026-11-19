@@ -150,8 +150,37 @@ export interface ProcessResponse {
   issues: GradingIssue[] | null
   /** true = 模型未按 JSON 格式出货，已退回自由文本（和 issues=[] 不是一回事） */
   grading_degraded: boolean
+  /**
+   * 本次真正进过 prompt 的规范条款（阶段 6）。
+   * null = 非批改任务或历史数据；空数组 = 没用规范库（没建库 / 开关关掉 / 没召回相关条款）
+   */
+  spec_refs?: SpecRef[] | null
+  /** 规范检索被降级的原因。与"没查到相关条款"分开显示，否则用户以为库里没内容 */
+  spec_note?: string | null
   /** 长文档分块进度；短文、非批改任务、以及还没切块时为 null */
   progress?: ChunkProgress | null
+}
+
+/** 一条被引用的规范条款 */
+export interface SpecRef {
+  /** 条款号，如 2.1.1；解析不出编号时后端回落到 doc3-#7 形态的定位符 */
+  clause: string
+  score: number
+  /** 这一条靠哪一路召回：vector=余弦、lexical=字二元组重合、both=两路都命中。
+      两个标尺不同（余弦常见 0.4–0.6，Dice 常见 0.05–0.2），不标来源数字没法解释 */
+  via?: 'vector' | 'lexical' | 'both'
+  doc_id: number
+  seq: number
+}
+
+// ========== 规范库（阶段 6） ==========
+export interface SpecDoc {
+  id: number
+  title: string
+  source_format: string
+  char_count: number
+  chunk_count: number
+  uploaded_at: string
 }
 
 // ========== 操作日志 ==========

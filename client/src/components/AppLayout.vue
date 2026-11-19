@@ -85,6 +85,16 @@ async function handleLogout() {
           </el-icon>
           <span>任务管理</span>
         </el-menu-item>
+        <el-menu-item index="/specs">
+          <el-icon>
+            <!-- 规范库：一本立着的书（与 Specs.vue 页头同一图形） -->
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+              <path d="M4 4.5A1.5 1.5 0 0 1 5.5 3H19v18H5.5A1.5 1.5 0 0 1 4 19.5V4.5Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+              <path d="M8 3v18" stroke="currentColor" stroke-width="2"/>
+            </svg>
+          </el-icon>
+          <span>规范库</span>
+        </el-menu-item>
         <el-menu-item index="/providers">
           <el-icon>
             <!-- 模型提供商：机器人图标（对外接 LLM 服务，机器人比钥匙更贴语义） -->

@@ -6,18 +6,31 @@
  * 1. 这块的联动状态（activeIssueIndex）本来就是局部状态，不该占工作台的编排逻辑；
  * 2. 原先 .issue-card / .highlight-segment 一个样式规则都没有，清单一直是裸 HTML 渲染。
  *
- * 输入只有三样：清单、是否降级、原文。不碰 store、不发请求。
+ * 输入：清单、是否降级、原文，以及（阶段 6）本次进过 prompt 的规范条款与检索降级说明。
+ * 不碰 store、不发请求。
  */
 import { computed, ref } from 'vue'
 
-import type { GradingIssue } from '@/api/types'
+import type { GradingIssue, SpecRef } from '@/api/types'
 import { buildParagraphs, TYPE_COLOR, TYPE_LABEL } from '@/utils/annotate'
 
 const props = defineProps<{
   issues: GradingIssue[]
   degraded: boolean
   original: string
+  /** 本次真正进过 prompt 的规范条款。null/空 = 没用规范库，此时整行不出现 */
+  refs?: SpecRef[] | null
+  /** 检索被降级的原因。与"没召回相关条款"分开说，否则用户以为库里没内容 */
+  note?: string | null
 }>()
+
+// 引用来源标签。不显示原始分数：余弦常见 0.4–0.6、词法 Dice 常见 0.05–0.2，
+// 两个标尺并排显示会让用户以为 0.05 那条是"匹配得差"，而它其实是词法的最强命中
+const VIA_LABEL: Record<string, string> = {
+  vector: '语义',
+  lexical: '错例',
+  both: '双路',
+}
 
 const activeIssueIndex = ref<number | null>(null)
 
@@ -34,6 +47,31 @@ function selectIssue(idx: number) {
 
 <template>
   <div class="grading-result">
+    <!-- 规范依据（阶段 6）：条款号可溯源，所以这行是"事实"而不是装饰 -->
+    <div v-if="refs && refs.length" class="spec-refs">
+      <span class="spec-refs-label">本次依据的规范条款</span>
+      <el-tag
+        v-for="r in refs"
+        :key="`${r.doc_id}-${r.seq}`"
+        type="primary"
+        size="small"
+        class="spec-ref-tag"
+      >
+        {{ r.clause }}
+        <span class="spec-ref-via">{{ VIA_LABEL[r.via ?? 'vector'] }}</span>
+      </el-tag>
+    </div>
+
+    <!-- 检索降级：和"没召回相关条款"必须分开说，否则用户以为库里没内容 -->
+    <el-alert
+      v-if="note"
+      class="grading-alert"
+      :title="note"
+      type="warning"
+      :closable="false"
+      show-icon
+    />
+
     <!-- 降级：模型没守格式，退回自由文本。必须和"批了但 0 条"分开说（AGENTS §3.7） -->
     <el-alert
       v-if="degraded"
@@ -109,6 +147,31 @@ function selectIssue(idx: number) {
   flex-direction: column;
   gap: var(--space-md);
   text-align: left;
+}
+
+/* 规范条款引用条：属性标记用 primary（近黑），不占语义色——语义色留给状态（AGENTS §4） */
+.spec-refs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-md);
+  padding: 10px 14px;
+  border-radius: var(--fa-radius-field);
+  background: color-mix(in oklab, var(--fa-ink) 4%, var(--fa-bg));
+  border: 1px solid color-mix(in oklab, var(--fa-ink) 8%, transparent);
+}
+
+.spec-refs-label {
+  font-size: var(--fa-text-sm);
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+}
+
+.spec-ref-via {
+  margin-left: 4px;
+  font-size: var(--fa-text-xs);
+  opacity: 0.7;
 }
 
 .grading-alert {

@@ -43,11 +43,30 @@ GRADING_OUTPUT_INSTRUCTION = """你是一名严谨的文档批改助手。
 同一处文字只保留一条意见；拿不准的宁可不报。"""
 
 
-def build_messages(prompt: str) -> list[dict[str, str]]:
-    """拼批改请求：契约在 system，用户的批改要求在 user"""
+# 召回条款的包装：位置在用户文档之后（模型对 prompt 尾部更敏感），
+# 并且明确"不适用就不要硬套"——否则模型会给每个问题都挂一条不相干的条款号。
+SPEC_CONTEXT_TEMPLATE = """以下是从规范库里按相关度召回的条款，判断时优先依据它们：
+
+{context}
+
+要求：
+- 只在与本文确实相关时依据这些条款，并在 reason 末尾用（依据 条款号）标注；不适用的条款不要引用。
+- 召回不等于本文一定有对应错误，不要因为"规范里有这条"就报问题。"""
+
+
+def build_messages(prompt: str, spec_context: str = "") -> list[dict[str, str]]:
+    """
+    拼批改请求：契约在 system，用户的批改要求（+ 可选的规范条款）在 user
+
+    条款上下文进 user 而不是 system：它是**内容**（随每次检索变化），不是契约。
+    混进 system 会让模型把格式约束当材料一起改写，出格率明显上升。
+    """
+    user = prompt
+    if spec_context:
+        user = f"{prompt}\n\n{SPEC_CONTEXT_TEMPLATE.format(context=spec_context)}"
     return [
         {"role": "system", "content": GRADING_OUTPUT_INSTRUCTION},
-        {"role": "user", "content": prompt},
+        {"role": "user", "content": user},
     ]
 
 
@@ -141,10 +160,41 @@ def _parse_issues(raw_issues: object, original_text: str) -> list[GradingIssue]:
     return locate_issues(parsed, original_text)
 
 
-def serialize_result(result: GradingResult) -> str:
-    """落库用：operation_logs.structured_output 存这一个 JSON 串"""
-    payload = {"degraded": result.degraded, "issues": [i.model_dump() for i in result.issues]}
+def serialize_result(
+    result: GradingResult,
+    *,
+    refs: list[dict[str, Any]] | None = None,
+    note: str | None = None,
+) -> str:
+    """
+    落库用：operation_logs.structured_output 存这一个 JSON 串
+
+    `refs` 是本次真正进过 prompt 的规范条款（阶段 6）。记在信封里而不是让用户去猜：
+    "有没有用规范"和"用了哪几条"必须能从结果本身查出来，否则 RAG 出没生效看不出来。
+    `note` 是检索被跳过/失败的原因，和 refs 空列表区分开——"库里没相关内容"
+    与"编码端点没起来"是两件事，混在一起显示就等于撒谎（同 §3.7 的 NULL vs []）。
+    """
+    payload: dict[str, Any] = {
+        "degraded": result.degraded,
+        "issues": [i.model_dump() for i in result.issues],
+    }
+    if refs:
+        payload["refs"] = refs
+    if note:
+        payload["spec_note"] = note
     return json.dumps(payload, ensure_ascii=False)
+
+
+def deserialize_refs(stored: str | None) -> list[dict[str, Any]]:
+    """本次批改引用了哪些规范条款。没有（含历史数据）就是空列表"""
+    refs = _deserialize(stored).get("refs")
+    return refs if isinstance(refs, list) else []
+
+
+def spec_note(stored: str | None) -> str | None:
+    """规范检索的降级说明。正常引用了条款或压根没开规范库时都是 None"""
+    note = _deserialize(stored).get("spec_note")
+    return note if isinstance(note, str) and note else None
 
 
 def deserialize_issues(stored: str | None) -> list[dict[str, Any]]:

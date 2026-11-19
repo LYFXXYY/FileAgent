@@ -39,6 +39,8 @@ uv run uvicorn test_llm_server:app --port 19000            # 假 OpenAI 文本�
 uv run uvicorn test_vlm_server:app --port 19001            # 假 VLM 视觉批评端点（PPT 批评循环 e2e 用）
 uv run python test_e2e.py                      # 端到端 31 项：需后端在 8000 已起 + 假 LLM 不用，见 §7
 uv run python test_e2e_structural.py           # 结构化批改 + PDF + 分块端到端 60 项，零真实 token
+uv run python test_e2e_rag.py                  # 规范库入库→检索→注入 端到端 41 项：后端 + 假 LLM + **本地 embedding 端点**三者在跑
+uv run python -m eval.retrieval                # recall@k 三臂对拍（纯本地，零 token）；--modes hybrid,vector,lexical / --k 5
 uv run python test_e2e_ppt.py                  # PPT 流水线端到端 28 项：后端 + 假 LLM 19000 + 假 VLM 19001 三进程必起
 uv run python -m eval.runner --provider 5 --case clean   # 评测台冒烟：**会真花钱**，先单条再全量
 ```
@@ -202,6 +204,42 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - **回填刻意不分页也不建异步任务**：实测 66 块一批 2.17s、全库 26s 含启动。批量按 32 条切段只为兜住"上千块"的情况，不是性能调优。
 - **仍然不建 ANN 索引**：见 §7 阶段 6 前置约束那条，pgvector 近似索引带 `user_id` 过滤会静默少返回 top-k。回填后 66 块全部有向量，检索走精确余弦扫描。
 
+### 3.13 规范检索与注入（阶段 6 · A2–A4）
+
+- **隔离压在 SQL 里**：`services/spec_retrieval.py` 的 `_VECTOR_SQL` 用 `JOIN spec_docs` 带 `user_id`，不是"先查 doc_id 再 IN"。后者漏掉 JOIN 就等于跨用户读别人的规范，而且列表会变长。
+- **`embedding IS NOT NULL` 必须写进 WHERE**：NULL 参与 `<=>` 排序得到 NULL score，位置不可解释——宁可少召回不要乱序。
+- **滑窗查询是必须的**：bge 静默截断（见 §3.12 坑 2），整篇一次编码等于只拿开头去检索。超 `spec_query_max_windows` 时等步长抽样，**并且首段和末段都必须落进窗口**——`int(i * step)` 那种取法末段永远进不来（10 段抽 4 个只到第 7 段），文档尾巴的条款静默查不到。
+- **条款号只认行首**：交叉引用（"参见 3.1.6"）、行距（"1.5 倍"）、年份都长成 x.y 形状，不锚定 `^` 就会把引用读成本块编号，而引用编号错了在结果里看不出任何异常。
+- **查询前缀默认是空串**，这条**推翻了 §7 里那条旧记载**：bge-m3 训练时不带指令（带指令的是 bge-large-zh 那一批）。实测 9 条夹具 k=5：加前缀 recall@5=0.380 / hit=0.778，不加 recall@5=0.491 / hit=0.889。换模型时按该模型的训练方式配 `EMBEDDING_QUERY_PREFIX`，别再照"非对称就要加前缀"的通用说法默认回去。
+- **注入进 user 不进 system**：条款是内容不是契约（§3.7 那条边界）。混进 system 模型会把输出格式一起改写。
+- **注入必须带"不适用就不要硬套"**：否则模型给每条意见都挂一个不相干的条款号，引用看起来更权威、实际更假。
+- **引用落在 `structured_output` 信封里**（`refs` / `spec_note`），不加新列、不改 `llm_calls`。**没用规范库时信封形状与阶段 6 之前逐字一致**（不写空 `refs` 键）——否则"没用规范"和"用了但没引用"在数据上分不开。
+- **三种"没有"互不混淆**（同 §3.7 的 NULL vs `[]`）：没建库/开关关掉 → `refs=[]` 且 `note=None`；查了不相关 → 同上；**查不了** → `refs=[]` 且 `note` 有文案。前端 status 透 `spec_refs` / `spec_note` 两个字段。
+- **检索是旁路**：`collect_spec_context` 内部吞掉一切异常返回"空上下文 + note"，批改照跑。编码端点挂了不该把已能工作的批改判成 failed。
+- **分块路径刻意不注入**：给每块注入同一份条款会按块数重复烧 token，正确做法是按块查询——那是下一刀，别顺手加。
+- **`test_e2e_rag.py` 开机先探 embedding 端点**：缺了直接退出（返回码 4），不让断言在"没向量"的世界里一片红。假 LLM 端点新增 `GET /v1/_mock/last`，用它证明"条款真的进了 prompt"——只看结果里的 refs 只能证明检索到了，证明不了送进去了。
+- **recall@k 的量法**：`python -m eval.retrieval`，只打本地编码。基线（66 条款 / 9 条带 `expect_clauses` 的夹具 / 不加前缀）：k=3 → 0.324，k=5 → 0.491，k=10 → 0.546；hit@5 已是 0.889，所以 k>5 主要补的是"一次文档里的第二、第三条条款"。这层只测"该给的条款有没有进 prompt"，**和模型批得好不好是两件事**，别拿它当 RAG 有效性结论（夹具与规范文档都是 AI 生成的，见 §7 效度边界）。
+
+### 3.14 混合召回（阶段 6 · A5，纯向量不够看之后加的）
+
+起因是一次真机跑：58 字的短文，纯向量 top-5 召回的条款**五条全不相干**（模型靠自己还是批对了，等于 RAG 白注入）。实测三臂对拍：
+
+| 模式 | recall@5 | hit@5 | recall@10 | hit@10 |
+|---|---|---|---|---|
+| `vector` | 0.491 | 0.889 | 0.546 | 0.889 |
+| `lexical` | 0.722 | 1.000 | 0.806 | 1.000 |
+| `hybrid`（默认） | 0.722 | 1.000 | 0.778 | 1.000 |
+
+- **词法这一路是字二元组 Dice，不是分词**：镜像里没有 pg_jieba / zhparser，应用侧也不引分词库。它补的是"文档里出现了规范举过的错例"这类表面重合——正好是纯向量捞不到的那种。
+- **⚠ 这批夹具结构性地偏向词法**：阶段 6 夹具的错例本来就是从那份规范里抄的，所以字二元组天然重合。`0.722` 只说明"这一层信号在本库里可区分"，**不是"词法优于向量"的世界性结论**；用户自己的文档不会照抄规范错例，那时靠的是向量那一路。
+- **默认 hybrid 的理由是抗故障而不是召回**：k=5 时它等于词法，k=10 时反而低于词法（0.778 < 0.806）。任何一路失灵都还能召回——编码端点没起来时词法照常出条款，这是纯向量做不到的。
+- **融合用 RRF 不用分数相加**：余弦常见 0.4–0.6、Dice 常见 0.05–0.2，相加等于让大标尺那一路永远说了算，而且换个模型比例就变。
+- **每路各取 k 条，不取 2k**：实测取 2k 时 hybrid@10 从 0.778 掉到 0.741——向量臂名次靠后也要占坑，把词法的高置信条款挤出去了。
+- **`SpecHit.via` 必须带着**：两个分数标尺混在同一个 `score` 字段里，不标来源就没法解释。前端因此**不显示数字、只显示来源**（语义/错例/双路）；给用户看 0.05 会让他们以为那条匹配得差，而它其实是词法的最强命中。
+- **消融靠 `SPEC_RETRIEVAL_MODE`**（`hybrid` / `vector` / `lexical`），`eval.retrieval --modes` 用它对拍。别把它当装饰开关。
+- **`clause_id` 扫块头最多 4 行，遇 `【` 就停**：真实规范的第 0 块是"文档标题 / 第1章 错别字类 / 1.1.1 同音别字"，只看前两行读不出编号，引用会显示成 `doc3-#0` 这种定位符——实测模型会照着这个假编号写进 reason，用户看到的溯源就是错的。行首锚定 + 遇正文标记即停，两件事一起才既不漏也不误读。
+
+
 ## 4. 前端不可违反的约定
 
 - **前端测试是 `npm test`（vitest + happy-dom），配置在 `vitest.config.ts` 不在 `vite.config.ts`**：构建入口 `vue-tsc -b && vite build` 是唯一的类型门禁，不要为了跑测试去改它。测试文件放 `src/**/*.test.ts`，会被 `tsconfig.app.json` 的 include 一起类型检查，所以 `noUnusedLocals` 之类在测试里同样生效。当前只测 SFC 之外的纯逻辑（`extractErrorMessage`、`tokenStorage`、两个 Pinia store），**没装 @vue/test-utils**——要测组件渲染再说。加新配置项时记得：测试里用 `SimpleNamespace` 造假 Settings，字段缺一个就是一堆 AttributeError（本轮加 `llm_enable_thinking` 时 29 个测试连带失败就是这个原因）。
@@ -223,7 +261,8 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - 上传格式只在两处声明：`Home.vue` 的 `accept=".docx,.pdf"` 和上传区文案。**前端不做扩展名校验**，`accept` 只管文件选择对话框，拖拽照样能拖进 `.txt`——真校验在后端白名单，400 文案已是给用户看的。加格式时要同时改这两处 + 后端派发表。
 - 结构化批改的原文高亮在 `client/src/utils/annotate.ts:buildParagraphs()`（纯函数，`annotate.test.ts` 钉着），视图在 `client/src/components/GradingResult.vue`。按 `\n` 分段，用全局偏移 `start/end` 折算成段内区间再套 span。**非高亮片段也必须给 `index: null`**（`Span.index` 是 `number | null` 必填），漏了会让相邻片段的 `seg.index` 是 `undefined`，点击时把 `activeIssueIndex` 写成 `undefined` 从而永不匹配。匹配不到位置的 issue 显示"未定位"，不要猜位置。卡片↔高亮的联动状态是 `GradingResult` 的局部状态，不要退回 Home 编排层。
 - **`TYPE_COLOR` 八色是问题类型的数据编码，不是装饰**：不要为了跟暖白/墨黑主色系统一而压成单色阶梯，那样"错别字"和"结构问题"就分不出来了。它住在 `utils/annotate.ts`，加类型时要同时改后端 `schemas/grading.py` 的 `ISSUE_TYPES` 与这里的两份表。
-- `gradingIssues` / `gradingDegraded` 和 `processedContent` 一样要走 `syncToStore()` + `home.ts` 持久化，并在 `reset()` / `goBackToUpload()` 里成对清空；`applyResult()` 是唯一铺结果到 UI 的入口（3 处轮询/上传回调都调它），别在调用点各自赋值。
+- `gradingIssues` / `gradingDegraded` 和 `processedContent` 一样要走 `syncToStore()` + `home.ts` 持久化，并在 `reset()` / `goBackToUpload()` 里成对清空；`applyResult()` 是唯一铺结果到 UI 的入口（3 处轮询/上传回调都调它），别在调用点各自赋值。**阶段 6 的 `specRefs` / `specNote` 走同一条路**：加字段时 `home.ts` 的六处（state / 接口 / save / watch 数组 / restore / clear / return）和 Home 的两处清空都要成对改，漏一处就是刷新后显示上一次的引用。
+- **规范库页（`views/Specs.vue`，阶段 6）**：上传走 `el-upload` 的 `:http-request` 自定义，不能用它默认的请求——那条路绕过 axios 拦截器，token 带不上。删除要写清后果（"之后批改不再召回它的 N 条条款"），因为规范库不可变，删了只能重传。条款引用显示在 `GradingResult.vue` 顶部，`refs` 为空时整行不出现（不是显示"参考了 0 条"）。
 
 ## 5. 数据库变更
 
@@ -248,8 +287,8 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 
 当前路线（阶段 0–5，含为什么这么排）在 SPEC §9.2；阶段 0 交付与验证明细在 SPEC §9.3，阶段 1 在 §9.4，阶段 1.5（PDF 输入 + 去 Word 化）在 §9.5，阶段 2 最小版（评测台 + 基线数字）在 §9.6，阶段 3（长文档分块批改图）在 §9.7，缺陷台账第五轮在 §10，改 bug 前先看这几张表。
 
-门禁基线（均已实测通过，2026-11-19 阶段 6 A1 之后）：`uv run pytest -q` → **235 passed**（219 + 13 条 embedding 传输层 + 3 条向量入库；上一行写的 204 是阶段 6 切块/薄文字层那批测试落地前抄的，已按实际改）；`uv run ruff check .` → 全绿；`ruff format --check .` → 85 files formatted；`uv lock --check` → 一致（**84 包**，新增 `pgvector` 只为 ORM 能声明 `vector(1024)`）；`npm run build` → **通过**；`npm test` → **33 passed**（前端 vitest，见 §4）；`test_e2e.py` **31/0**、`test_e2e_structural.py` **60/0**（含第 11 节"非批改 issues=None + 时间列同源"8 项，已实跑）、`test_e2e_ppt.py` **28/0**（真渲染，2026-11-18 未重跑）。**e2e 必须走 `run_backend.py`**，详见 §2 那条 ⚠。
-⚠ **三个 e2e 脚本目前完全没碰 `/specs` 路由**（grep 无匹配）：规范库入库、检索、注入都只有单测覆盖，端到端是缺口。给阶段 6 加 e2e 时要记得端点依赖本地 embedding 服务，脚本得先探活再决定跳过还是失败。
+门禁基线（均已实测通过，2026-11-19 阶段 6 A1–A5 之后）：`uv run pytest -q` → **277 passed**（219 → +13 embedding 传输层 + 3 向量入库 + 21 检索层 + 7 注入与信封 + 6 collect_spec_context + 8 混合召回与条款号；曾写过的 204 是切块/薄文字层那批落地前抄的，已按实际改）；`uv run ruff check .` → 全绿；`ruff format --check .` → 89 files formatted；`uv lock --check` → 一致（**84 包**，新增 `pgvector` 只为 ORM 能声明 `vector(1024)`）；`npm run build` → **通过**；`npm test` → **33 passed**（前端 vitest，见 §4）；`test_e2e.py` **31/0**、`test_e2e_structural.py` **60/0**、`test_e2e_ppt.py` **28/0**（真渲染）、`test_e2e_rag.py` **43/0**（新增，规范库→检索→注入）。**e2e 必须走 `run_backend.py`**，详见 §2 那条 ⚠。
+⚠ ~~三个 e2e 脚本目前完全没碰 `/specs` 路由~~ → **阶段 6 已补**：`test_e2e_rag.py` 覆盖上传、向量落库、列表与越权、注入、引用落库、删库后归零。它比另外三套多一个前置——**本地 embedding 端点必须在跑**，脚本开头探活，缺了直接退出（返回码 4）而不是让断言一片红。
 
 
 - **`server/test_e2e.py` 是仓库自带的端到端冒烟脚本，不是遗留物，别删**：需后端已在 8000 运行、连真实 Postgres。它会注册 `tester_*` / `other_*` 两个临时账号，造 1 条日志和 1 个上传文件；**跑完自动清理 DB 记录**（llm_calls → logs → tasks → providers → users），落盘文件因 UUID 存储名无法精确定位，偶尔手工清。第 7 节现在真走重试路径（连不上假 provider → 重试 3 次 → failed），第 10 节直接改库把日志置为 done 来验证下载，都属预期行为。

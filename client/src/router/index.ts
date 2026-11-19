@@ -20,6 +20,7 @@ import { setNotice, flushNotice } from './notice'
 
 const Login = () => import('@/views/Login.vue')
 const Tasks = () => import('@/views/Tasks.vue')
+const Specs = () => import('@/views/Specs.vue')
 const Providers = () => import('@/views/Providers.vue')
 const Logs = () => import('@/views/Logs.vue')
 const Admin = () => import('@/views/Admin.vue')
@@ -38,6 +39,7 @@ const routes: RouteRecordRaw[] = [
     children: [
       { path: '', name: 'home', component: Home },
       { path: 'tasks', name: 'tasks', component: Tasks },
+      { path: 'specs', name: 'specs', component: Specs },
       { path: 'providers', name: 'providers', component: Providers },
       { path: 'logs', name: 'logs', component: Logs },
       // 管理页：adminOnly 标记 + 守卫兜底；真正的权限把关在后端 require_admin

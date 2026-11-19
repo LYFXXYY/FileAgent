@@ -19,7 +19,7 @@ import { extractErrorMessage } from '@/api/client'
 import { processApi } from '@/api/process'
 import { providerApi } from '@/api/providers'
 import { taskApi } from '@/api/tasks'
-import type { ChunkProgress, GradingIssue, Provider, Task } from '@/api/types'
+import type { ChunkProgress, GradingIssue, Provider, SpecRef, Task } from '@/api/types'
 import GradingResult from '@/components/GradingResult.vue'
 import { useHomeStore } from '@/stores/home'
 
@@ -41,6 +41,8 @@ const processingError = ref(homeStore.processingError)
 const processedContent = ref(homeStore.processedContent)
 const gradingIssues = ref(homeStore.gradingIssues)
 const gradingDegraded = ref(homeStore.gradingDegraded)
+const specRefs = ref<SpecRef[] | null>(homeStore.specRefs)
+const specNote = ref<string | null>(homeStore.specNote)
 // 长文档分块进度。刻意不进 store：它是瞬时状态，刷新后第一次轮询就会重新拿到，
 // 持久化反而会显示上一次任务的块数，那是骗人
 const chunkProgress = ref<ChunkProgress | null>(null)
@@ -128,13 +130,23 @@ function syncToStore() {
   homeStore.processedContent = processedContent.value
   homeStore.gradingIssues = gradingIssues.value
   homeStore.gradingDegraded = gradingDegraded.value
+  homeStore.specRefs = specRefs.value
+  homeStore.specNote = specNote.value
 }
 
 // 把一次处理成功的响应内容铺到 UI：正文 + 问题清单 + 降级标记
-function applyResult(resp: { processed_content: string | null; issues: GradingIssue[] | null; grading_degraded: boolean }) {
+function applyResult(resp: {
+  processed_content: string | null
+  issues: GradingIssue[] | null
+  grading_degraded: boolean
+  spec_refs?: SpecRef[] | null
+  spec_note?: string | null
+}) {
   processedContent.value = resp.processed_content
   gradingIssues.value = resp.issues
   gradingDegraded.value = resp.grading_degraded
+  specRefs.value = resp.spec_refs ?? null
+  specNote.value = resp.spec_note ?? null
 }
 
 // 分块进度的唯一铺值入口（和 applyResult 同理：三处状态读取都要走它，别各自赋值）
@@ -157,6 +169,8 @@ onMounted(async () => {
   processedContent.value = homeStore.processedContent
   gradingIssues.value = homeStore.gradingIssues
   gradingDegraded.value = homeStore.gradingDegraded
+  specRefs.value = homeStore.specRefs
+  specNote.value = homeStore.specNote
   pickedFile.value = null // File 对象不可序列化，恢复时重置
 
   // 如果恢复时仍处于处理中，查询一次后端真实状态，避免前端显示 stale 状态
@@ -346,6 +360,8 @@ function processNewFile() {
   processedContent.value = null
   gradingIssues.value = null
   gradingDegraded.value = false
+  specRefs.value = null
+  specNote.value = null
   chunkProgress.value = null
   homeStore.logId = null
   syncToStore()
@@ -365,6 +381,8 @@ function reset() {
   processedContent.value = null
   gradingIssues.value = null
   gradingDegraded.value = false
+  specRefs.value = null
+  specNote.value = null
   chunkProgress.value = null
   homeStore.clear() // 清空 store 中的持久化状态
 }
@@ -580,6 +598,8 @@ function reset() {
             v-if="gradingIssues"
             :issues="gradingIssues"
             :degraded="gradingDegraded"
+            :refs="specRefs"
+            :note="specNote"
             :original="originalText"
           />
 

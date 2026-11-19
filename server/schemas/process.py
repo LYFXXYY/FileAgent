@@ -53,5 +53,10 @@ class ProcessResponse(BaseModel):
     grading_degraded: bool = False
     # 分块进度。非分块任务（短文、摘要类）恒为 None
     progress: ChunkProgressResponse | None = None
+    # 本次批改真正进过 prompt 的规范条款（阶段 6）。None = 非批改/历史数据；
+    # 空列表 = 没用规范库（没建库、开关关掉、或没召回相关条款）
+    spec_refs: list[dict] | None = None
+    # 规范检索被降级的原因。和"没查到相关条款"必须分开显示，否则用户以为库里没内容
+    spec_note: str | None = None
 
     model_config = {"from_attributes": True}
