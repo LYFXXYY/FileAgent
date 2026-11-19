@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import io
+from types import SimpleNamespace
 
 import pytest
 from docx import Document
@@ -15,7 +16,27 @@ from sqlalchemy.orm import sessionmaker
 from database import Base
 from models.spec_doc import SpecChunk, SpecDoc
 from models.user import User
+from services.embedding import EmbeddingError
 from services.spec_storage import SpecStorageError, delete_spec_doc, ingest_spec_doc
+
+
+@pytest.fixture(autouse=True)
+def fake_embedder(monkeypatch):
+    """
+    假编码：不出网。
+
+    入库链路现在默认会算向量（spec_embed_on_ingest=true），不桩掉它这些测试全部会
+    因为"embedding 端点未配置"红掉。桩返回可辨识的短向量——SQLite 不校验列宽，
+    真库上维度不符由 services/embedding.py 自己拦。
+    """
+    seen: list[list[str]] = []
+
+    def _fake(texts):
+        seen.append(list(texts))
+        return [[float(len(t)), 0.5] for t in texts]
+
+    monkeypatch.setattr("services.spec_storage.embed_texts", _fake)
+    return seen
 
 
 @pytest.fixture()
@@ -203,3 +224,53 @@ def test_chunks_follow_clause_boundaries(session):
     assert len(chunks) == 3
     assert all("【判定标准】" in c.text for c in chunks)
     assert [c.start for c in chunks] == sorted(c.start for c in chunks)
+
+
+# ---------- 向量入库（阶段 6 A1） ----------
+def test_ingest_writes_embedding_per_chunk(session, fake_embedder):
+    """每块都拿到向量，且编码收到的文本就是那些块文本——顺序一致、不漏块"""
+    raw = _docx_bytes(["1.1.1 同音别字", "【判定标准】替换后语义不通即判定。"])
+    doc = ingest_spec_doc(session, user_id=1, title="向量规范", filename="v.docx", file_bytes=raw)
+
+    chunks = session.query(SpecChunk).filter(SpecChunk.doc_id == doc.id).all()
+    assert chunks
+    assert all(c.embedding is not None for c in chunks)
+    assert fake_embedder == [[c.text for c in chunks]]
+
+
+def test_embed_failure_aborts_whole_ingest(session, monkeypatch):
+    """
+    编码失败 = 这份规范根本没进来。
+
+    规范库没有 UPDATE 口子，"文本进了、向量为 NULL"是补不回来的静默缺陷：
+    列表页显示已入库，检索却永远看不见这些块。所以必须整份失败。
+    """
+
+    def _boom(texts):
+        raise EmbeddingError("连不上 embedding 端点")
+
+    monkeypatch.setattr("services.spec_storage.embed_texts", _boom)
+    before_docs = session.query(SpecDoc).count()
+    before_chunks = session.query(SpecChunk).count()
+
+    raw = _docx_bytes(["1.1.1 同音别字", "【判定标准】替换后语义不通即判定。"])
+    with pytest.raises(SpecStorageError, match="向量编码失败"):
+        ingest_spec_doc(session, user_id=1, title="进不来", filename="f.docx", file_bytes=raw)
+
+    assert session.query(SpecDoc).count() == before_docs
+    assert session.query(SpecChunk).count() == before_chunks
+
+
+def test_embed_disabled_leaves_vectors_null(session, fake_embedder, monkeypatch):
+    """关掉开关时只存文本，向量交给回填脚本——这是给"先建库后接端点"留的口子"""
+    monkeypatch.setattr(
+        "services.spec_storage.get_settings",
+        lambda: SimpleNamespace(spec_chunk_chars=2000, spec_embed_on_ingest=False),
+    )
+    raw = _docx_bytes(["1.1.1 同音别字", "【判定标准】替换后语义不通即判定。"])
+    doc = ingest_spec_doc(session, user_id=1, title="纯文本", filename="n.docx", file_bytes=raw)
+
+    chunks = session.query(SpecChunk).filter(SpecChunk.doc_id == doc.id).all()
+    assert chunks
+    assert all(c.embedding is None for c in chunks)
+    assert fake_embedder == []  # 一次外呼都没发

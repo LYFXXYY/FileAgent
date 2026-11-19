@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from config import get_settings
 from models.spec_doc import SpecChunk, SpecDoc
 from services.chunking import ChunkError
+from services.embedding import EmbeddingError, embed_texts
 from services.pdf import PdfError, extract_text_from_pdf
 from services.spec_chunking import split_by_clause
 from services.word import extract_text_from_docx
@@ -73,6 +74,11 @@ def ingest_spec_doc(
     except ChunkError as e:
         raise SpecStorageError(f"切块失败：{e}") from e
 
+    # 向量在写库之前算：规范库没有 UPDATE 口子（只有 ingest / delete），
+    # 一旦"文本进了、向量缺了"就补不回来，检索会静默看不见这些块，而列表页仍显示已入库。
+    # 所以编码失败必须让整份入库失败，而不是留 NULL。
+    embeddings = _embed_for_ingest([c.text for c in chunks])
+
     doc = SpecDoc(
         user_id=user_id,
         title=title or _strip_ext(filename),
@@ -83,7 +89,7 @@ def ingest_spec_doc(
     db.add(doc)
     db.flush()  # 拿 doc.id 给 chunk 用
 
-    for c in chunks:
+    for c, vec in zip(chunks, embeddings, strict=True):
         db.add(
             SpecChunk(
                 doc_id=doc.id,
@@ -91,11 +97,26 @@ def ingest_spec_doc(
                 text=c.text,
                 start=c.start,
                 end=c.end,
+                embedding=vec,
             )
         )
     db.commit()
     db.refresh(doc)
     return doc
+
+
+def _embed_for_ingest(chunk_texts: list[str]) -> list[list[float] | None]:
+    """
+    入库时的编码步骤。`spec_embed_on_ingest=false` 时整批返回 None（只存文本，
+    向量交给 backfill 脚本补），这是给"端点还没准备好但想先把规范库建起来"留的口子。
+    """
+    if not get_settings().spec_embed_on_ingest:
+        return [None] * len(chunk_texts)
+
+    try:
+        return embed_texts(chunk_texts)
+    except EmbeddingError as e:
+        raise SpecStorageError(f"向量编码失败，规范未入库：{e}") from e
 
 
 def delete_spec_doc(db: Session, *, doc: SpecDoc) -> None:

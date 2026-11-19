@@ -86,6 +86,29 @@ class Settings(BaseSettings):
     #   2026-11-19 实测：当装箱用时（2000 字装 11 条）会把条款从【判定标准】前截断。
     spec_chunk_chars: int = 2000
 
+    # ---------- 规范库向量检索（阶段 6）----------
+    # embedding 端点刻意**不给默认值**：本机 LM Studio 的端口不固定（随上次启动漂移），
+    # 写死一个"看起来能用"的默认值，换来的是连到别的模型上、维度对不上还静默入库。
+    # 留空 = 未配置，任何编码调用都会响亮报错并提示去 .env 填。
+    embedding_base_url: str = ""
+    embedding_model: str = ""
+    # 模型名必须写死并校验维度：同一服务上常挂着多种维度的 embedding 模型
+    # （实测 bge-m3=1024、nomic-v1.5=768），选错是响亮失败而不是静默混存
+    embedding_dimensions: int = 1024
+    # 本地服务一般无需鉴权；云端端点填这里（不进 git）
+    embedding_api_key: str = ""
+    # 编码是短请求，不需要 LLM 那套 180s；但整批一次发，留 60s 余量
+    embedding_timeout: float = 60.0
+    # bge 系列做检索是**非对称**的：文档端不加前缀，查询端要加。
+    # GGUF 元数据里没有任何前缀信息，必须由应用侧自己拼（实测 top1 0.4643 → 0.5143 且排序改变）
+    embedding_query_prefix: str = "为这个句子生成表示以用于检索相关文章："
+    # 入库时同步编码。关掉则文本照常入库、向量留给回填脚本
+    spec_embed_on_ingest: bool = True
+    # 检索返回几条条款。规范条款平均 165 字，5 条 ≈ 800 字上下文
+    spec_retrieval_top_k: int = 5
+    # 注入批改 prompt 的条款上下文字数上限，超了从末尾截断（宁少不爆上下文）
+    spec_context_max_chars: int = 3000
+
     # ---------- PPT 渲染（阶段 5 s5.4）----------
     # 'stub'（默认）= 1×1 占位 PNG，便携、快、单测/e2e 用；
     # 'soffice' = 经 WSL LibreOffice 真渲染（需 WSL2 + libreoffice-impress，见 pptx_renderer）

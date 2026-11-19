@@ -4,16 +4,19 @@
 【表语义】
 - `spec_docs`：每个用户能存任意份规范文档（论文格式要求、单位手册、课程约定）。
   正文不进这张表，权威在 `spec_chunks.text`，靠 `seq` 顺序拼回。
-- `spec_chunks`：按段落切好的检索粒度。阶段 4 只入库不做检索；阶段 6 给这张表加
-  embedding 列 + pgvector 索引就能用，不需要再动 schema 主体。
+- `spec_chunks`：按**条款边界**切好的检索粒度（services/spec_chunking.split_by_clause，
+  一块一条款）。阶段 4 只入库；阶段 6 加上 `embedding vector(1024)` 列，检索走顺序扫描
+  ——**刻意不建 ANN 索引**：pgvector 的近似索引带 `user_id` 过滤会静默少返回 top-k，
+  而 §3.1 要求每个查询都带 user_id，两者正好对撞。量级到万级再连同过滤策略一起重审。
 
 【为什么切块存而不存整篇】
 1. 阶段 6 检索是按块召回的，块大小是检索精度的主旋钮；存整篇时每次召回都要现场切，
    边界漂了召回也跟着漂。
 2. 一份规范文档几万字起步，整篇塞进 LLM prompt 既不省钱又会被中段折角"lost in middle"
    影响。预先切好块，prompt 只塞 top-k 块。
-3. `reassemble(source, chunks, [c.text for c in chunks])` 是 §3.10 已立的不变式，
-   阶段 6 用同一份 services/chunking.py 切，规范库和批改链路共享同一套边界规则。
+3. 切块不变式（块文本=原文连续切片、不重叠、逐字拼回原文）由 `split_by_clause` 自己
+   断言，破了直接抛。批改链路（services/chunking.py）用的是另一套贪心装箱，
+   拿它切规范会把条款从【判定标准】前腰斩——实测 5/5 个边界全断，故两套不共用。
 
 【为什么没有 source_path】
 正文权威在 DB，磁盘只作审计留存——和 operation_logs 同一原则。规范库不需要回原文件，
@@ -28,10 +31,17 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database import Base
+
+# 向量维度是这个列的**唯一权威声明**：`spec_chunks.embedding` 建出来就是 vector(1024)。
+# 三处必须一致——这里的常量、`.env` 的 EMBEDDING_DIMENSIONS、实际模型输出的维度。
+# pgvector 的列宽是硬约束（插错维度直接报 "expected 1024 dimensions, not 3"），
+# 所以选错模型是响亮失败；services/embedding.py 仍在启动期再校验一次，早报错更好。
+EMBEDDING_DIM = 1024
 
 
 class SpecDoc(Base):
@@ -88,6 +98,12 @@ class SpecChunk(Base):
     # 全局偏移，与 services/chunking.Chunk 一一对应。阶段 6 给前端做"指回原文位置"用
     start: Mapped[int] = mapped_column(Integer, nullable=False)
     end: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    # 条款向量（阶段 6）。nullable 是给历史数据留的口子：加列的迁移不会回填，
+    # 回填前这些块就是 NULL —— 检索必须把它们排除在外，否则余弦算出来是 NULL 排序错位。
+    # 新入库的块由 services/embedding.py 同步算好；编码端点不可用时入库直接失败，
+    # 不留"文本进了、向量永远缺"的半成品（规范库没有 UPDATE 口子，漏了就补不回来）
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM), nullable=True)
 
     doc: Mapped[SpecDoc] = relationship(back_populates="chunks")
 

@@ -32,6 +32,8 @@ uv run pytest -q                               # 202 passed；纯函数 + 假 cl
 uv run ruff check .                            # 全绿
 uv run ruff format --check .                   # 全部已格式化
 uv lock --check                                # 依赖锁一致性
+uv run python backfill_spec_embeddings.py --check   # 看规范库还欠多少向量（只读）
+uv run python backfill_spec_embeddings.py      # 真编码回填：需 .env 的 EMBEDDING_* 指向在跑的端点
 LONGDOC_CHUNK_CHARS=60 LLM_TRUST_ENV_PROXY=false uv run python run_backend.py    # 跑 test_e2e_structural 用这套环境
 uv run uvicorn test_llm_server:app --port 19000            # 假 OpenAI 文本端点（批改 + PPT 大纲共用同一进程，按 system prompt 路由）
 uv run uvicorn test_vlm_server:app --port 19001            # 假 VLM 视觉批评端点（PPT 批评循环 e2e 用）
@@ -189,6 +191,17 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - **`parse_outline_output` / `parse_critique` 阶梯降级不许抛**。和 §3.7 批改结构化一样：用户的文档必须拿到一个结果。critic 解析失败一律归 needs_revision + degraded=True，**绝不返回 pass**——把"没听清"当"通过了"是交付污染。
 - **没有 checkpointer**：s5.4 stub 渲染阶段批评循环跑一次也就几毛；接真渲染（耗时秒级 + 多 VLM 往返）之后再考虑挂 `AsyncPostgresSaver`。`thread_id` 已预留，调用接口不变。
 
+### 3.12 规范库向量层（阶段 6 · A1）
+
+- **embedding 端点没有默认值**：`EMBEDDING_BASE_URL` / `EMBEDDING_MODEL` 留空即报"未配置"。本机 LM Studio 端口随上次启动漂移，写死一个"看着能用"的默认值换来的是静默打到别的模型上（维度还刚好一样的话完全无信号）。维度三处必须一致：`models/spec_doc.py:EMBEDDING_DIM`（列宽的唯一权威）、`EMBEDDING_DIMENSIONS`（配置）、模型实际输出；`_check_config()` 在前两者不等时拦，第三处由响应维度门禁拦（实测 768 维回来直接报错，不让它进 1024 的列）。
+- **查询前缀只在查询端加**：bge 检索是非对称的，GGUF 元数据里没有任何前缀信息，只能应用侧拼（`embedding_query_prefix`）。`embed_texts()` 永远不加——文档端也加的话入库向量全变成"查询表示"，相似度整体下降但不报错。
+- **编码不写 `llm_calls`**：该端点 `usage.prompt_tokens` 恒 0，写进去的就是编造的数字。成本代理用字符数（`sum(len(chunk.text))`，库里本来就有）。
+- **入库时编码失败 = 整份失败**：规范库只有 `ingest` / `delete`，没有 UPDATE 口子。"文本进了、向量 NULL"补不回来，而且检索会静默排除这些块、列表页却显示已入库。所以 `_embed_for_ingest()` 在写库**之前**跑，失败抛 `SpecStorageError` → 400。`SPEC_EMBED_ON_INGEST=false` 是给"先建库后接端点"留的口子，此时块为 NULL，靠 `backfill_spec_embeddings.py` 补。
+- **编码函数是同步的**：入库路由本身是 `def`（FastAPI 丢线程池），阻塞最自然；异步侧要用它得 `run_in_threadpool` 包（同 §3.3 的 `record_llm_call()`）。`httpx.Client(trust_env=False)` 是刻意的——端点固定在 127.0.0.1，走系统代理只会绕远，且本机 `NO_PROXY` 含裸 `[::1]` 时 httpx 直接抛 InvalidURL（§3.6 那个 `LLM_TRUST_ENV_PROXY` 开关是给要翻代理的聊天端点用的，这里不需要配置项）。
+- **不重试、不降级**：编码幂等，重跑比在库里留半成品便宜。别把 §3.6 的聊天重试白名单搬过来。
+- **回填刻意不分页也不建异步任务**：实测 66 块一批 2.17s、全库 26s 含启动。批量按 32 条切段只为兜住"上千块"的情况，不是性能调优。
+- **仍然不建 ANN 索引**：见 §7 阶段 6 前置约束那条，pgvector 近似索引带 `user_id` 过滤会静默少返回 top-k。回填后 66 块全部有向量，检索走精确余弦扫描。
+
 ## 4. 前端不可违反的约定
 
 - **前端测试是 `npm test`（vitest + happy-dom），配置在 `vitest.config.ts` 不在 `vite.config.ts`**：构建入口 `vue-tsc -b && vite build` 是唯一的类型门禁，不要为了跑测试去改它。测试文件放 `src/**/*.test.ts`，会被 `tsconfig.app.json` 的 include 一起类型检查，所以 `noUnusedLocals` 之类在测试里同样生效。当前只测 SFC 之外的纯逻辑（`extractErrorMessage`、`tokenStorage`、两个 Pinia store），**没装 @vue/test-utils**——要测组件渲染再说。加新配置项时记得：测试里用 `SimpleNamespace` 造假 Settings，字段缺一个就是一堆 AttributeError（本轮加 `llm_enable_thinking` 时 29 个测试连带失败就是这个原因）。
@@ -235,7 +248,8 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 
 当前路线（阶段 0–5，含为什么这么排）在 SPEC §9.2；阶段 0 交付与验证明细在 SPEC §9.3，阶段 1 在 §9.4，阶段 1.5（PDF 输入 + 去 Word 化）在 §9.5，阶段 2 最小版（评测台 + 基线数字）在 §9.6，阶段 3（长文档分块批改图）在 §9.7，缺陷台账第五轮在 §10，改 bug 前先看这几张表。
 
-门禁基线（均已实测通过，2026-11-18 真实模型轮之后）：`uv run pytest -q` → **204 passed**（199 + 3 条薄文字层扫描件判据 + 2 条传输层超时文案/思考开关）；`uv run ruff check .` → 全绿；`ruff format --check .` → 78 files formatted；`uv lock --check` → 一致（**83 包**）；`npm run build` → **通过**；`npm test` → **33 passed**（前端 vitest，见 §4）；`test_e2e.py` **31/0**、`test_e2e_structural.py` **60/0**（含第 11 节"非批改 issues=None + 时间列同源"8 项，已实跑）、`test_e2e_ppt.py` **28/0**（真渲染，2026-11-18 未重跑）。**e2e 必须走 `run_backend.py`**，详见 §2 那条 ⚠。
+门禁基线（均已实测通过，2026-11-19 阶段 6 A1 之后）：`uv run pytest -q` → **235 passed**（219 + 13 条 embedding 传输层 + 3 条向量入库；上一行写的 204 是阶段 6 切块/薄文字层那批测试落地前抄的，已按实际改）；`uv run ruff check .` → 全绿；`ruff format --check .` → 85 files formatted；`uv lock --check` → 一致（**84 包**，新增 `pgvector` 只为 ORM 能声明 `vector(1024)`）；`npm run build` → **通过**；`npm test` → **33 passed**（前端 vitest，见 §4）；`test_e2e.py` **31/0**、`test_e2e_structural.py` **60/0**（含第 11 节"非批改 issues=None + 时间列同源"8 项，已实跑）、`test_e2e_ppt.py` **28/0**（真渲染，2026-11-18 未重跑）。**e2e 必须走 `run_backend.py`**，详见 §2 那条 ⚠。
+⚠ **三个 e2e 脚本目前完全没碰 `/specs` 路由**（grep 无匹配）：规范库入库、检索、注入都只有单测覆盖，端到端是缺口。给阶段 6 加 e2e 时要记得端点依赖本地 embedding 服务，脚本得先探活再决定跳过还是失败。
 
 
 - **`server/test_e2e.py` 是仓库自带的端到端冒烟脚本，不是遗留物，别删**：需后端已在 8000 运行、连真实 Postgres。它会注册 `tester_*` / `other_*` 两个临时账号，造 1 条日志和 1 个上传文件；**跑完自动清理 DB 记录**（llm_calls → logs → tasks → providers → users），落盘文件因 UUID 存储名无法精确定位，偶尔手工清。第 7 节现在真走重试路径（连不上假 provider → 重试 3 次 → failed），第 10 节直接改库把日志置为 done 来验证下载，都属预期行为。
@@ -275,7 +289,7 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
   - **规范库不可变（已用测试钉住）**：`spec_storage` 只暴露 `ingest_spec_doc` / `delete_spec_doc`，没有 UPDATE 口子；`tests/test_spec_storage.py` 有两条回归——同名重传是新增一行而非覆盖、且模块里不存在 `update*/edit*/modify*` 函数。改了删了重传，别开原地更新的头。
   - **效度边界**：规范文档与评测夹具都是 AI 生成的，机制能学透，但**数字不能当真实世界结论**（简历别写"接入 RAG 提升 X%"，那是循环自证）。
   - **资产位置**：`server/fixtures/specs/文字编辑校对规范（教学示例稿）.md|.docx`（66 条款、四段式标签已统一为【判定标准】、零表格）；`eval/cases.py` 现有 **15 条夹具**（新 10 条带 `expect_clauses`，指向上述条款编号）。原始生成稿不归档——两份草稿 txt 已删且从未入库，别再引用 `_ai_generated_drafts/` 这个目录。
-  - **embedding 列迁移脚本已写、未执行**：`server/migrate_add_spec_embedding.py`（幂等 `ADD COLUMN IF NOT EXISTS embedding vector(1024)`；`--check` 只读干跑已实测；回滚是 `DROP COLUMN`）。执行它 = 改表，要先问用户。脚本里写明了**故意不建 ANN 索引**，理由见上面"索引"那条。
+  - **embedding 列已加、向量已回填（2026-11-19 A1 收口）**：`server/migrate_add_spec_embedding.py` 已执行（幂等 `ADD COLUMN IF NOT EXISTS embedding vector(1024)`，故意不建 ANN 索引）；`models/spec_doc.py` 同步声明了该列，所以新库 `create_all()` 也直接带。66 块全部有向量（`backfill_spec_embeddings.py`，一批 2.17s / 全库含启动 26s）。回滚是 `DROP COLUMN`。
   - **`fallback_to_ocr` 从未实现**：`services/pdf.py:188` 的真实签名一直是 `extract_text_from_pdf(file_bytes)`。接 MinerU 时才按 SPEC §9.12 的语义真正加上（**由调用方决定这次要不要 OCR，提取器自己不偷跑**），同时输出要走双轨：`plain_text` 守 §3.8 与 docx 同构的不变式给批改/diff，`structured`（markdown + blocks + bbox）给 RAG 与未来的 PDF 原生批注。
 
 ## 8. 两份副本（**2026-11-16 起不再同步**）
