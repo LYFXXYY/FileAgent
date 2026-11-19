@@ -126,7 +126,7 @@ def _sqlite_paths(tmp_path):
     return str(tmp_path / "ckpt.sqlite3"), str(tmp_path / "store.sqlite3")
 
 
-def _run(tmp_path, client, *, thread_id="log-1", instruction=INSTRUCTION):
+def _run(tmp_path, client, *, thread_id="log-1", instruction=INSTRUCTION, spec_lookup=None):
     """跑一轮图。每个调用都用全新的 sqlite 文件路径（tmp_path 是函数级 fixture）"""
     llm._client = None
     llm._semaphore = None
@@ -148,12 +148,13 @@ def _run(tmp_path, client, *, thread_id="log-1", instruction=INSTRUCTION):
                     thread_id=thread_id,
                     checkpointer=saver,
                     store=store,
+                    spec_lookup=spec_lookup,
                 )
 
     return asyncio.run(go())
 
 
-def _reuse(tmp_path, client, *, thread_id="log-1", instruction=INSTRUCTION):
+def _reuse(tmp_path, client, *, thread_id="log-1", instruction=INSTRUCTION, spec_lookup=None):
     """保留同一对 sqlite 文件，模拟续跑场景"""
     llm._client = None
     llm._semaphore = None
@@ -175,6 +176,7 @@ def _reuse(tmp_path, client, *, thread_id="log-1", instruction=INSTRUCTION):
                     thread_id=thread_id,
                     checkpointer=saver,
                     store=store,
+                    spec_lookup=spec_lookup,
                 )
 
     return asyncio.run(go())
@@ -330,3 +332,99 @@ def test_derive_pg_dsn_strips_sqlalchemy_driver_prefix():
     assert derive_pg_dsn("postgresql+psycopg://u:p@h/d") == "postgresql://u:p@h/d"
     # 已经是裸串就原样返回，不再次剥前缀
     assert derive_pg_dsn("postgresql://u:p@h/d") == "postgresql://u:p@h/d"
+
+
+# ---------- 按块注入规范条款（阶段 6 A6） ----------
+class _RecordingClient(_RouteClient):
+    """记下每次请求的 messages，用来证明条款是按块进的那条消息"""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.messages = []
+
+    async def post(self, url, headers=None, json=None, **ignored):
+        self.messages.append([dict(m) for m in json["messages"]])
+        return await super().post(url, headers=headers, json=json, **ignored)
+
+
+def _make_lookup(seen):
+    async def lookup(chunk_text: str):
+        seen.append(chunk_text)
+        clause = f"{len(seen)}.1.1 按块条款"
+        return (
+            f"【{clause}】判定标准见条文",
+            [{"clause": clause, "score": 0.5, "via": "lexical", "doc_id": 1, "seq": len(seen)}],
+            None,
+        )
+
+    return lookup
+
+
+def test_spec_lookup_runs_once_per_chunk_with_that_chunk_text(tmp_path):
+    """
+    长文档必须按块查询：整篇查一次等于只按开头几段检索（bge 还会静默截断长输入）。
+
+    断言两件事：每块各查一次、查询用的文本就是那一块的文本。
+    """
+    seen: list[str] = []
+    client = _RecordingClient()
+    _run(tmp_path, client, spec_lookup=_make_lookup(seen))
+
+    assert len(seen) == 3
+    for chunk in seen:
+        assert chunk and chunk in DOC
+    assert len({c for c in seen}) == 3  # 三块文本互不相同
+
+
+def test_chunk_context_lands_in_that_chunk_user_message(tmp_path):
+    """条款进对应块的那条 user 消息，不进 system（契约不被污染）"""
+    seen: list[str] = []
+    client = _RecordingClient()
+    _run(tmp_path, client, spec_lookup=_make_lookup(seen))
+
+    assert len(client.messages) == 3
+    for idx, msgs in enumerate(client.messages):
+        user = next(m["content"] for m in msgs if m["role"] == "user")
+        system = next(m["content"] for m in msgs if m["role"] == "system")
+        assert f"{idx + 1}.1.1 按块条款" in user
+        assert "按块条款" not in system
+
+
+def test_refs_are_union_across_chunks(tmp_path):
+    """三块各召回一条 → 并集三条，且都还能溯源"""
+    seen: list[str] = []
+    result = _run(tmp_path, _RecordingClient(), spec_lookup=_make_lookup(seen))
+
+    clauses = [r["clause"] for r in result.refs]
+    assert len(clauses) == 3
+    assert len(set(clauses)) == 3  # 三块各一条，没有互相覆盖
+    assert result.spec_note is None
+
+
+def test_no_spec_lookup_keeps_prompts_clean(tmp_path):
+    """不传 lookup 时不注入任何条款段、refs 为空——长文档路径与阶段 6 之前一致"""
+    client = _RecordingClient()
+    result = _run(tmp_path, client)
+
+    assert result.refs == ()
+    assert result.spec_note is None
+    for msgs in client.messages:
+        user = next(m["content"] for m in msgs if m["role"] == "user")
+        assert "规范库" not in user and "判定标准" not in user
+
+
+def test_cached_chunk_replays_refs_without_re_querying(tmp_path):
+    """
+    命中按块缓存的块不再查询，但引用必须照样报出来。
+
+    否则"重跑一次引用就消失了"——用户会以为规范库变空了，其实是缓存把引用吞了。
+    """
+    first: list[str] = []
+    _run(tmp_path, _RecordingClient(), spec_lookup=_make_lookup(first))
+    assert len(first) == 3
+
+    second: list[str] = []
+    result = _reuse(tmp_path, _RecordingClient(), spec_lookup=_make_lookup(second))
+
+    assert second == []  # 三块全命中缓存，一次都没查
+    assert len(result.refs) == 3

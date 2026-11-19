@@ -254,18 +254,23 @@ async def _run_processing(log_id: int) -> None:
 
         original_text = log.original_content or ""
 
-        # 规范条款召回（阶段 6 A3）。只在"批改 + 非 PPT + 不分块"时尝试：
-        # - 分块路径给每块注入同一份条款会按块数重复烧 token，那是另一刀（按块查询）
-        # - PPT 大纲不读规范条款
+        # 规范条款召回（阶段 6）。只在"批改 + 非 PPT"时尝试，且两条路径分开：
+        # - 单发：整篇查一次，条款进那一条 user 消息
+        # - 分块：按块查（长文档各段涉及的条款不同，全局 top-k 等于只按开头检索），
+        #   查询能力以闭包传进图，节点自己不碰 DB
         # 检索失败不把已能跑通的批改判成失败：collect_spec_context 内部兜住并回传 note
         spec = _NO_SPEC
-        if task.is_grading and task.output_format != "pptx" and not _should_chunk(original_text):
-            spec = await run_in_threadpool(
-                collect_spec_context,
-                db,
-                user_id=log.user_id,
-                document_text=original_text,
-            )
+        spec_lookup = None
+        if task.is_grading and task.output_format != "pptx":
+            if _should_chunk(original_text):
+                spec_lookup = _open_spec_lookup(log.user_id)
+            else:
+                spec = await run_in_threadpool(
+                    collect_spec_context,
+                    db,
+                    user_id=log.user_id,
+                    document_text=original_text,
+                )
 
         try:
             output = await _run_model(
@@ -276,6 +281,7 @@ async def _run_processing(log_id: int) -> None:
                 log.id,
                 critic_provider=critic_provider,
                 spec=spec,
+                spec_lookup=spec_lookup,
             )
         except LLMError as e:
             await _meter(
@@ -421,6 +427,29 @@ def _render_outline_as_text(outline: PptOutline) -> str:
     return "\n".join(parts)
 
 
+def _open_spec_lookup(user_id: int):
+    """
+    给分块批改图用的按块条款查询闭包（阶段 6 A6）。
+
+    每次调用自开一个 session：图会并发跑多个块，跨线程共用同一个 Session 不安全，
+    而且请求级 session 早就关了——和 §3.3 里 `record_llm_call()` 同一个理由。
+    返回 (上下文, refs, note)，节点侧只拿这三样，不认识 DB。
+    """
+
+    async def lookup(chunk_text: str) -> tuple[str, list[dict], str | None]:
+        def _work():
+            db = SessionLocal()
+            try:
+                return collect_spec_context(db, user_id=user_id, document_text=chunk_text)
+            finally:
+                db.close()
+
+        ctx = await run_in_threadpool(_work)
+        return ctx.context, ctx.refs, ctx.note
+
+    return lookup
+
+
 async def _run_model(
     task: Task,
     provider: ModelProvider,
@@ -430,6 +459,7 @@ async def _run_model(
     *,
     critic_provider: ModelProvider | None = None,
     spec: SpecContext | None = None,
+    spec_lookup=None,
 ) -> _ModelOutput:
     """
     三条路径：pptx 走 PPT 流水线（含批评循环）、批改走结构化（含分块）、其他走纯 chat
@@ -468,6 +498,7 @@ async def _run_model(
             provider,
             prompt_template,
             thread_id=f"log-{log_id}",
+            spec_lookup=spec_lookup,
         )
         grading = GradingResult(
             revised_text=graded.revised_text,
@@ -476,7 +507,12 @@ async def _run_model(
         )
         return _ModelOutput(
             grading.revised_text,
-            serialize_result(grading),
+            # 各块引用的并集同样落进信封：长文档的溯源清单不能只在单发路径里有
+            serialize_result(
+                grading,
+                refs=list(graded.refs) or None,
+                note=graded.spec_note,
+            ),
             # 命中缓存的块本轮没有外呼，再记账就是重复计成本
             tuple(
                 _MeteredCall(
@@ -594,7 +630,13 @@ async def download(
         # 结果永远是 .docx，所以文件名取原名去掉扩展再补 .docx——
         # 直接拼 original_filename 会让 PDF 输出一份叫 "xxx.pdf" 的 docx，下载方打不开
         if is_grading:
-            buf = create_diff_docx(log.original_content or "", log.processed_content or "")
+            # 引用清单从信封里取（阶段 6 A7）：批完那一刻召回了哪些条款已经定死，
+            # 下载时回查规范库会因为库被删改而给出对不上的清单
+            buf = create_diff_docx(
+                log.original_content or "",
+                log.processed_content or "",
+                spec_refs=deserialize_refs(log.structured_output) or None,
+            )
             filename = f"批改_{stem}.docx"
         else:
             buf = create_plain_docx(log.processed_content or "")

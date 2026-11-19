@@ -343,6 +343,21 @@ def main() -> int:
             r.status_code == 200 and r.content[:2] == b"PK",
             str(r.status_code),
         )
+        # 依据条款那一页必须真的进了交付件：界面上有、下载没有，等于溯源只在屏幕上活着
+        delivered = Document(io.BytesIO(r.content))
+        body = "\n".join(para.text for para in delivered.paragraphs)
+        check("交付 docx 含「依据条款」页", "本次批改依据的规范条款" in body, body[-200:])
+        refs_page = body.split("本次批改依据的规范条款", 1)[1]
+        check(
+            "交付 docx 列出了召回的条款号",
+            all(x["clause"] in refs_page for x in refs),
+            refs_page[:200],
+        )
+        # 只查引用页：正文里出现条款全文是模型自己回显的（假 LLM 会把整条 prompt 当修订文返回），
+        # 不是交付件转载的——那一页才是我们控制的边界
+        check(
+            "引用页只列条款号与标题，不转载条文", "【判定标准】" not in refs_page, refs_page[:200]
+        )
 
         print("\n===== 10. 没建规范库的账号：批改链路完好且不注入 =====")
         # 提供商按 user 隔离，第二个账号必须有自己的 provider + task，不能借用

@@ -18,6 +18,7 @@ from services.spec_retrieval import (
     SpecHit,
     build_context,
     clause_id,
+    excerpt_line,
     fuse_rrf,
     lexical_hits,
     merge_hits,
@@ -433,3 +434,31 @@ def test_clause_id_from_three_line_head():
 def test_clause_id_stops_at_body_marker():
     """遇到【…】正文标记就停：正文里的交叉引用不是本块编号"""
     assert clause_id("第1章 错别字类\n【适用情形】参见 3.1.6 的说明。\n3.1.6 成语误用") is None
+
+
+# ---------- 条款标题行（引用页与交付件都用它） ----------
+def test_excerpt_picks_the_clause_heading_line_not_the_doc_title():
+    """第 0 块首行是文档标题。取首行会让引用页显示成规范的名字而不是条款名"""
+    text = "文字编辑校对规范（教学示例稿）\n第1章 错别字类\n1.1.1 同音别字\n【适用情形】读音相同。"
+    assert excerpt_line(text) == "1.1.1 同音别字"
+
+
+def test_excerpt_falls_back_to_first_line():
+    assert excerpt_line("没有编号的一段规范\n正文") == "没有编号的一段规范"
+
+
+def test_excerpt_of_empty_text_is_empty():
+    assert excerpt_line("   ") == ""
+
+
+def test_refs_carry_excerpt(ctx_env):
+    """
+    引用里必须带标题行：下载路径只读 structured_output。
+
+    回查规范库会因为库被删改而给出对不上的清单——批完那一刻的依据就丢了。
+    """
+    ctx_env["hits"] = [_hit(0, "1.1.1 同音别字\n【判定标准】替换后语义不通即判定。", 0.51)]
+    from services.spec_retrieval import collect_spec_context
+
+    ctx = collect_spec_context(None, user_id=17, document_text="正文")
+    assert ctx.refs[0]["excerpt"] == "1.1.1 同音别字"

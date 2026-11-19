@@ -112,7 +112,36 @@ def create_plain_docx(text: str) -> BytesIO:
     return buf
 
 
-def create_diff_docx(original: str, revised: str) -> BytesIO:
+def _append_spec_refs(doc: Document, refs: list[dict]) -> None:
+    """
+    依据条款清单单独一页（阶段 6 A7）。
+
+    为什么写进交付件而不是只留在界面上：批改稿常被转给别人或离线看，那时无依据可查，
+    "按什么标准判的"就丢了。这一页是给下游读者的，不是给用户回忆的。
+
+    只列条款号与标题行，不整段抄录规范正文：交付件会被外发，把用户规范库的全文塞进去
+    等于替他做了一次转载。要看条文去规范库页。
+    """
+    doc.add_page_break()
+
+    title = doc.add_paragraph()
+    run = title.add_run("本次批改依据的规范条款")
+    run.bold = True
+    run.font.size = Pt(12)
+
+    note = doc.add_paragraph()
+    note_run = note.add_run("（按相关度自规范库召回，仅列条款号与标题；完整条文请在规范库查看）")
+    note_run.font.size = Pt(9)
+
+    for ref in refs:
+        line = doc.add_paragraph()
+        head = line.add_run(f"{ref.get('clause', '?')}　")
+        head.bold = True
+        excerpt = str(ref.get("excerpt", "")).strip().splitlines()
+        line.add_run(excerpt[0] if excerpt else "")
+
+
+def create_diff_docx(original: str, revised: str, spec_refs: list[dict] | None = None) -> BytesIO:
     """
     生成带红字标注的 diff Word —— 用于批改任务
 
@@ -184,6 +213,10 @@ def create_diff_docx(original: str, revised: str) -> BytesIO:
     # 添加纯文本段落（黑色，无标注）
     for line in clean_revised.split("\n"):
         doc.add_paragraph(line)
+
+    # 依据条款页：没召回就没这一页，一个字都不多写（保持与阶段 6 之前一致的交付件）
+    if spec_refs:
+        _append_spec_refs(doc, spec_refs)
 
     buf = BytesIO()
     doc.save(buf)

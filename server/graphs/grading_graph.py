@@ -43,7 +43,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Annotated, Any, Protocol, TypedDict
@@ -129,6 +129,15 @@ class ChunkResult(TypedDict, total=False):
     finish_reason: str | None
     # 本轮有没有真的外呼过。命中的块不写 llm_calls，否则重复计成本
     cached: bool
+    # 这一块进过 prompt 的规范条款（阶段 6）。跟着结果一起进按块缓存：
+    # 命中缓存时不重新编码，但引用必须照样能报出来，否则重跑一次"引用就消失了"
+    refs: list[dict[str, Any]]
+    spec_note: str | None
+
+
+# 按块查询规范条款的回调：给一块文本，返回（条款上下文, 引用, 降级说明）。
+# 由调用方闭包传进图里（同 provider/store），节点自己不碰 DB
+SpecLookup = Callable[[str], Awaitable[tuple[str, list[dict[str, Any]], str | None]]]
 
 
 def _upsert_results(old: list[ChunkResult], new: list[ChunkResult]) -> list[ChunkResult]:
@@ -254,6 +263,22 @@ class LongdocResult:
     chunk_count: int
     cached_chunks: int
     calls: tuple[ChunkCall, ...]
+    # 各块召回条款的并集（阶段 6）。按 (doc_id, seq) 去重后保留最高分——
+    # 同一条款被三块都命中只算一次，否则引用清单会被重复项刷满
+    refs: tuple[dict[str, Any], ...] = ()
+    # 任一块的检索降级说明。有就说明这次 RAG 没完全生效，不能当成"没引用就是没问题"
+    spec_note: str | None = None
+
+
+def _merge_refs(results: list[ChunkResult]) -> tuple[dict[str, Any], ...]:
+    """跨块合并引用清单：同一条款留最高分，按分数降序"""
+    best: dict[tuple[int, int], dict[str, Any]] = {}
+    for r in results:
+        for ref in r.get("refs") or []:
+            key = (ref.get("doc_id"), ref.get("seq"))
+            if key not in best or ref.get("score", 0) > best[key].get("score", 0):
+                best[key] = ref
+    return tuple(sorted(best.values(), key=lambda x: x.get("score", 0), reverse=True))
 
 
 def _fingerprint(text: str, instruction: str, model_name: str) -> str:
@@ -276,11 +301,14 @@ def _build_graph(
     max_parallel: int,
     store: _AsyncStore,
     thread_id: str,
+    spec_lookup: SpecLookup | None = None,
 ):
     """
     provider、instruction、store 都用闭包传进节点，状态里只留可序列化内容
 
     状态里塞 ORM 对象或连接的话检查点直接写不下去，这是扇出上图最容易踩的第一脚。
+    `spec_lookup` 同理（阶段 6 按块召回规范条款）：节点自己不查库，查询能力由调用方
+    闭包传进来——这样节点仍然可以用假 lookup 单测，也不会出现跨线程共用 session。
     """
     semaphore = asyncio.Semaphore(max_parallel)
     namespace = ("longdoc", thread_id)
@@ -315,9 +343,14 @@ def _build_graph(
             return {"results": [hit]}
 
         async with semaphore:
+            # 条款按**块**查询而不是整篇查一次：长文档各段涉及的条款不同，
+            # 一份全局 top-k 等于只按开头几段做检索（bge 还会静默截断更长的输入）
+            context, refs, spec_note = "", [], None
+            if spec_lookup is not None:
+                context, refs, spec_note = await spec_lookup(payload["text"])
             prompt = instruction.replace("{{content}}", payload["text"])
             result, parsed = await chat_json(
-                build_messages(prompt), provider, json_schema=GRADING_JSON_SCHEMA
+                build_messages(prompt, context), provider, json_schema=GRADING_JSON_SCHEMA
             )
         grading = parse_grading_output(result.content, parsed, payload["text"])
 
@@ -344,6 +377,8 @@ def _build_graph(
             "tier": result.format_tier,
             "finish_reason": result.finish_reason,
             "cached": False,
+            "refs": refs,
+            "spec_note": spec_note,
         }
         await store.aput(
             namespace,
@@ -393,6 +428,7 @@ async def _grade_with_backend(
     thread_id: str,
     checkpointer: Any,
     store: _AsyncStore,
+    spec_lookup: SpecLookup | None = None,
 ) -> LongdocResult:
     """
     共用图执行路径：把已经构造好的 checkpointer / store 传进来跑图
@@ -402,7 +438,7 @@ async def _grade_with_backend(
     """
     settings = get_settings()
     max_parallel = min(_MAX_INFLIGHT_HINT, max(1, int(settings.llm_max_concurrency)))
-    builder = _build_graph(provider, instruction, max_parallel, store, thread_id)
+    builder = _build_graph(provider, instruction, max_parallel, store, thread_id, spec_lookup)
     graph = builder.compile(checkpointer=checkpointer)
     final = await graph.ainvoke(
         {"source": source},
@@ -434,6 +470,8 @@ async def _grade_with_backend(
             )
             for r in results
         ),
+        refs=_merge_refs(results),
+        spec_note=next((r.get("spec_note") for r in results if r.get("spec_note")), None),
     )
 
 
@@ -443,12 +481,16 @@ async def grade_long_document(
     instruction: str,
     *,
     thread_id: str,
+    spec_lookup: SpecLookup | None = None,
 ) -> LongdocResult:
     """
     生产入口：分块批改一篇长文档，检查点和按块缓存都落到 Postgres。
 
     `thread_id` 用 `log-{log_id}`：同一日志重跑会命中同一条时间线，
     已成功的外呼直接读缓存返回，不再花钱。真要从头再批一次，换个 thread_id。
+
+    `spec_lookup` 是阶段 6 的按块条款查询回调（见 `_build_graph`）。不传就是
+    不注入规范，行为与阶段 6 之前一致——长文档路径不该因为规范库不可用而变差。
 
     两个 saver/store 各持一条 psycopg 连接（同一 DSN），互不打扰；
     阶段 4 起不再用 SQLite 文件，checkpoints 和 store 表都在业务库的 `public` schema 里。
@@ -466,4 +508,5 @@ async def grade_long_document(
             thread_id=thread_id,
             checkpointer=checkpointer,
             store=store,
+            spec_lookup=spec_lookup,
         )

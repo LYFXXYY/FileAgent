@@ -387,6 +387,20 @@ class SpecContext:
     note: str | None
 
 
+def excerpt_line(chunk_text: str) -> str:
+    """
+    条款的标题行（给引用清单和交付件那一页用）。
+
+    取"含条款号那一行"而不是第一行：真实规范的第 0 块首行是文档标题、次行是章标题，
+    直接给第一行会让引用页显示成规范的名字而不是条款名。
+    """
+    lines = chunk_text.strip().splitlines()
+    for line in lines[:_HEAD_LINES]:
+        if _CLAUSE_RE.match(line):
+            return line.strip()
+    return lines[0].strip() if lines else ""
+
+
 def collect_spec_context(db: Session, *, user_id: int, document_text: str) -> SpecContext:
     """
     批改前的规范召回，**旁路设计**：任何异常都不许把已能跑通的批改判成失败。
@@ -426,6 +440,9 @@ def collect_spec_context(db: Session, *, user_id: int, document_text: str) -> Sp
                 "clause": h.clause,
                 "score": round(h.score, 4),
                 "via": h.via,
+                # 标题行随引用一起落库：交付件那一页要显示条款名，
+                # 而下载路径只有 structured_output，不该为了取一行标题回查规范库
+                "excerpt": excerpt_line(h.text),
                 "doc_id": h.doc_id,
                 "seq": h.seq,
             }

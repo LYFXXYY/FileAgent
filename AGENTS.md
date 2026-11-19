@@ -216,9 +216,9 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - **引用落在 `structured_output` 信封里**（`refs` / `spec_note`），不加新列、不改 `llm_calls`。**没用规范库时信封形状与阶段 6 之前逐字一致**（不写空 `refs` 键）——否则"没用规范"和"用了但没引用"在数据上分不开。
 - **三种"没有"互不混淆**（同 §3.7 的 NULL vs `[]`）：没建库/开关关掉 → `refs=[]` 且 `note=None`；查了不相关 → 同上；**查不了** → `refs=[]` 且 `note` 有文案。前端 status 透 `spec_refs` / `spec_note` 两个字段。
 - **检索是旁路**：`collect_spec_context` 内部吞掉一切异常返回"空上下文 + note"，批改照跑。编码端点挂了不该把已能工作的批改判成 failed。
-- **分块路径刻意不注入**：给每块注入同一份条款会按块数重复烧 token，正确做法是按块查询——那是下一刀，别顺手加。
+- **分块路径按块查询，不是整篇查一次**（A6 已落地）：给每块注入同一份全局 top-k 等于只按开头几段检索（bge 还会静默截断长输入），而且长文档各段涉及的条款不同。查询能力以 `spec_lookup` 闭包传进 `_build_graph`——节点不查库（§3.10 那条边界在这里的延续），闭包里每次自开独立 session（并发跑块，跨线程共用 session 不安全，同 `record_llm_call`）。**命中按块缓存的块不再查询，但 `refs` 随结果一起存进缓存**，否则"重跑一次引用就消失了"。
 - **`test_e2e_rag.py` 开机先探 embedding 端点**：缺了直接退出（返回码 4），不让断言在"没向量"的世界里一片红。假 LLM 端点新增 `GET /v1/_mock/last`，用它证明"条款真的进了 prompt"——只看结果里的 refs 只能证明检索到了，证明不了送进去了。
-- **recall@k 的量法**：`python -m eval.retrieval`，只打本地编码。基线（66 条款 / 9 条带 `expect_clauses` 的夹具 / 不加前缀）：k=3 → 0.324，k=5 → 0.491，k=10 → 0.546；hit@5 已是 0.889，所以 k>5 主要补的是"一次文档里的第二、第三条条款"。这层只测"该给的条款有没有进 prompt"，**和模型批得好不好是两件事**，别拿它当 RAG 有效性结论（夹具与规范文档都是 AI 生成的，见 §7 效度边界）。
+- **recall@k 的量法**：`python -m eval.retrieval --k 5 --modes hybrid,vector,lexical`，只打本地编码、零 token。具体数字见 §3.14 那张表（那一层落地后重测的）。这层只量"该给的条款有没有进 prompt"，**和模型批得好不好是两件事**，别拿它当 RAG 有效性结论（夹具与规范文档都是 AI 生成的，见 §7 效度边界）。
 
 ### 3.14 混合召回（阶段 6 · A5，纯向量不够看之后加的）
 
@@ -226,13 +226,18 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 
 | 模式 | recall@5 | hit@5 | recall@10 | hit@10 |
 |---|---|---|---|---|
-| `vector` | 0.491 | 0.889 | 0.546 | 0.889 |
-| `lexical` | 0.722 | 1.000 | 0.806 | 1.000 |
-| `hybrid`（默认） | 0.722 | 1.000 | 0.778 | 1.000 |
+| `vector` | 0.491 | 0.889 | 0.583 | 0.889 |
+| `lexical` | 0.843 | 1.000 | 0.926 | 1.000 |
+| `hybrid`（默认） | 0.815 | 1.000 | 0.898 | 1.000 |
+
+（上表是修好 `clause_id` **之后**的数。修之前是 0.491 / 0.722 / 0.722——差的不是检索，
+是测量：第 0 块的条款号被读成 `doc3-#0`，期望 1.1.1 永远对不上。**度量本身也会带 bug**，
+数字跳变时先怀疑量法。）
 
 - **词法这一路是字二元组 Dice，不是分词**：镜像里没有 pg_jieba / zhparser，应用侧也不引分词库。它补的是"文档里出现了规范举过的错例"这类表面重合——正好是纯向量捞不到的那种。
 - **⚠ 这批夹具结构性地偏向词法**：阶段 6 夹具的错例本来就是从那份规范里抄的，所以字二元组天然重合。`0.722` 只说明"这一层信号在本库里可区分"，**不是"词法优于向量"的世界性结论**；用户自己的文档不会照抄规范错例，那时靠的是向量那一路。
-- **默认 hybrid 的理由是抗故障而不是召回**：k=5 时它等于词法，k=10 时反而低于词法（0.778 < 0.806）。任何一路失灵都还能召回——编码端点没起来时词法照常出条款，这是纯向量做不到的。
+- **默认 hybrid 的理由是抗故障，不是召回最高**：融合会略低于纯词法（k=5 时 0.815 < 0.843），换来的是任一路失灵都还能召回——编码端点没起来时词法照常出条款，这是纯向量做不到的；反过来用户自己的文档不会照抄规范错例时，词法失灵、向量兜住。
+- **加了词法臂之后，前缀配错不再致命**：实测 hybrid 带不带前缀 recall@5 都是 0.815，而纯 vector 从 0.491 掉到 0.380。词法那一路把名次差拉回来了，所以前缀这个坑现在只影响 vector 单臂模式。
 - **融合用 RRF 不用分数相加**：余弦常见 0.4–0.6、Dice 常见 0.05–0.2，相加等于让大标尺那一路永远说了算，而且换个模型比例就变。
 - **每路各取 k 条，不取 2k**：实测取 2k 时 hybrid@10 从 0.778 掉到 0.741——向量臂名次靠后也要占坑，把词法的高置信条款挤出去了。
 - **`SpecHit.via` 必须带着**：两个分数标尺混在同一个 `score` 字段里，不标来源就没法解释。前端因此**不显示数字、只显示来源**（语义/错例/双路）；给用户看 0.05 会让他们以为那条匹配得差，而它其实是词法的最强命中。
@@ -287,11 +292,11 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 
 当前路线（阶段 0–5，含为什么这么排）在 SPEC §9.2；阶段 0 交付与验证明细在 SPEC §9.3，阶段 1 在 §9.4，阶段 1.5（PDF 输入 + 去 Word 化）在 §9.5，阶段 2 最小版（评测台 + 基线数字）在 §9.6，阶段 3（长文档分块批改图）在 §9.7，缺陷台账第五轮在 §10，改 bug 前先看这几张表。
 
-门禁基线（均已实测通过，2026-11-19 阶段 6 A1–A5 之后）：`uv run pytest -q` → **277 passed**（219 → +13 embedding 传输层 + 3 向量入库 + 21 检索层 + 7 注入与信封 + 6 collect_spec_context + 8 混合召回与条款号；曾写过的 204 是切块/薄文字层那批落地前抄的，已按实际改）；`uv run ruff check .` → 全绿；`ruff format --check .` → 89 files formatted；`uv lock --check` → 一致（**84 包**，新增 `pgvector` 只为 ORM 能声明 `vector(1024)`）；`npm run build` → **通过**；`npm test` → **33 passed**（前端 vitest，见 §4）；`test_e2e.py` **31/0**、`test_e2e_structural.py` **60/0**、`test_e2e_ppt.py` **28/0**（真渲染）、`test_e2e_rag.py` **43/0**（新增，规范库→检索→注入）。**e2e 必须走 `run_backend.py`**，详见 §2 那条 ⚠。
+门禁基线（均已实测通过，2026-11-19 阶段 6 A1–A5 之后）：`uv run pytest -q` → **277 passed**（219 → +13 embedding 传输层 + 3 向量入库 + 21 检索层 + 7 注入与信封 + 6 collect_spec_context + 8 混合召回与条款号；曾写过的 204 是切块/薄文字层那批落地前抄的，已按实际改）；`uv run ruff check .` → 全绿；`ruff format --check .` → 89 files formatted；`uv lock --check` → 一致（**84 包**，新增 `pgvector` 只为 ORM 能声明 `vector(1024)`）；`npm run build` → **通过**；`npm test` → **33 passed**（前端 vitest，见 §4）；`test_e2e.py` **31/0**、`test_e2e_structural.py` **60/0**、`test_e2e_ppt.py` **28/0**（真渲染）、`test_e2e_rag.py` **46/0**（新增，规范库→检索→注入→交付件条款页）。**e2e 必须走 `run_backend.py`**，详见 §2 那条 ⚠。
 ⚠ ~~三个 e2e 脚本目前完全没碰 `/specs` 路由~~ → **阶段 6 已补**：`test_e2e_rag.py` 覆盖上传、向量落库、列表与越权、注入、引用落库、删库后归零。它比另外三套多一个前置——**本地 embedding 端点必须在跑**，脚本开头探活，缺了直接退出（返回码 4）而不是让断言一片红。
 
 
-- **`server/test_e2e.py` 是仓库自带的端到端冒烟脚本，不是遗留物，别删**：需后端已在 8000 运行、连真实 Postgres。它会注册 `tester_*` / `other_*` 两个临时账号，造 1 条日志和 1 个上传文件；**跑完自动清理 DB 记录**（llm_calls → logs → tasks → providers → users），落盘文件因 UUID 存储名无法精确定位，偶尔手工清。第 7 节现在真走重试路径（连不上假 provider → 重试 3 次 → failed），第 10 节直接改库把日志置为 done 来验证下载，都属预期行为。
+- **`server/test_e2e.py` 是仓库自带的端到端冒烟脚本，不是遗留物，别删**：需后端已在 8000 运行、连真实 Postgres。它会注册 `tester_*` / `other_*` 两个临时账号，造 1 条日志和 1 个上传文件；**跑完自动清理 DB 记录**（llm_calls → logs → tasks → providers → users），落盘文件因 UUID 存储名无法精确定位，偶尔手工清——**`operation_logs` 里根本没有存落盘名的列**（只有 `original_filename` 是用户看到的原名），所以磁盘副本按设计就不可回溯，只能按命名规则清：`ls uploads | grep -E '^[0-9a-f]{32}\.(docx|pdf)$' | xargs -I{} rm uploads/{}`。⚠ 用户放进 `uploads/` 的**具名文件是真实文档夹具**，不属于清理范围（2026-11-19 按这条清了 35 个 e2e 产物，6 份具名文档一个没碰）。第 7 节现在真走重试路径（连不上假 provider → 重试 3 次 → failed），第 10 节直接改库把日志置为 done 来验证下载，都属预期行为。
 - **`server/test_e2e_structural.py` + `test_llm_server.py` 是阶段 1 新增的结构化端到端**，同样别删：需后端 + 假 LLM 两个进程都在跑，全程零真实 token。mock 端点**刻意不支持 `response_format`**（回 400）来如实模拟国产兼容端点并逼出 `chat_json` 的降级路径，所以 LLM 日志里出现的 `400 Bad Request`（每次 `chat_json` 两条：`json_schema` 和 `json_object` 各一档）是预期行为不是故障。第 8 节是阶段 1.5 加的 **PDF 输入链路**：用 pymupdf 现场合成"每视觉行一个 block"的中文 PDF，断言提取结果与 docx **逐字相等**、定位成功、下载名换成 `.docx`——改提取器必跑它。它注册 `e2e_s_*` 账号，**跑完同样自动清理 DB + checkpoints/**。
 - **`server/test_e2e_ppt.py` + `test_vlm_server.py` 是阶段 5 新增的 PPT 端到端**：需后端 + 假 LLM 19000 + 假 VLM 19001 **三进程**都在跑，28 项断言覆盖 plan → assemble → render → critique(needs_revision) → revise → assemble → critique(pass) → 下载 .pptx → python-pptx 重读页数 + llm_calls 归因（outline 行归 text provider、critic 行归 vision provider）。假 VLM 按 prompt 里的 `[critic-thread:...]` 标记计数，`MOCK_VLM_STUB_ROUNDS` 环境变量控退出轮次（默认 1，所以 e2e 第一次挑刺第二次必 pass），`/v1/_mock/reset` 在脚本开头清空计数避免跨用例污染。它注册 `e2e_p_*` 账号，跑完自动清理 DB。
 - 单测**不连 Postgres 也不出网**：HTTP 走假 client（替 `services.llm.get_client`），provider 路由走内存 SQLite。所以 `pytest` 绿不代表能连上数据库，端到端才是那一层的验证。加测试请保持这个边界，也别引入 `pytest-asyncio`——现有测试直接 `asyncio.run()` 就够。
@@ -305,7 +310,7 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
   - **图文混排的宣教类 PDF 报 0 条问题**（1282 字符散在 9 页、92 张图）。`degraded=False` 说明模型守了格式、真的认为没问题。此时界面显示"批改完成，未发现问题"对用户是误导——文档有内容，只是这类内容不该走文字批改。要不要加"提取密度异常/图文混排"提示是产品决策，未做。
   - PDF→PPT 走真视觉模型跑通：批评循环实际外呼 4 次（outline→critic→outline→critic），产出 12 页 pptx 可被 python-pptx 重读，单份 22,571 token（≈批改一份的 6 倍）。
   - 本轮 6 份合计 35,181 token。成本只能事后从 `llm_calls` 看，`provider.max_tokens` 拦不住（见 §3.6）。
-- **路线 2026-11-16/17（见 SPEC §9.2）**：阶段 4（Postgres 基建，11-16 当天迁完）、阶段 5（PDF→PPT 全链路，11-17 八切片收齐，含 WSL LibreOffice 真渲染）、任务 2（管理员 + 默认模型授权，11-17）均已完成。**下一站 = 阶段 6**：本地 embedding + pgvector 检索 + 规范条款注入批改 prompt（SPEC §9.2 阶段 6；`spec_chunks` 加 embedding 列是改表，做前先问）。剩余待办按用户定的顺序：浏览器 UI 走查 → 阶段 6。
+- **路线 2026-11-16/17/19（见 SPEC §9.2）**：阶段 4（Postgres 基建，11-16）、阶段 5（PDF→PPT 全链路，11-17 八切片）、任务 2（管理员 + 默认模型授权，11-17）、**阶段 6（本地 embedding + pgvector 检索 + 条款注入，11-19 A1–A7 全部交付，见 SPEC §9.14）** 均已完成。**下一站 = 拓展别的功能**（用户 2026-11-19 定的方向）。阶段 6 留下的三个小口子已一并收掉：分块路径按块注入（A6）、依据条款写进交付 docx（A7）、引用显示收拢成"语义/错例/双路"标记。仍然没做：`interrupt` 人工确认分块方案（要先有 UI）、长文两段式摘要、`checkpoints/` 体积治理与 TTL、引用点击回跳规范原文、`format_tier` 落库（改表要先问）。
 - **管理员 + 默认模型授权（已于 2026-11-17 实施，简单版）**：`users.role` / `users.can_use_default` / `model_providers.is_public` 三列 + `require_admin` + `/admin/*` 三端点 + 前端 Admin 页。不做 audit / 跨用户 provider 管理（用户拍板）。授权判据集中在 `services/llm.py:provider_usable_by`，改任何 provider 可见性逻辑先看 SPEC §9.11 的实施清单。**admin 路由是 §3.1 隔离铁律的声明式例外**——新加管理端点挂 `require_admin` 即可，不要"顺手"补 user_id 过滤把 admin 视图废掉。
 - **阶段 5 PDF→PPT**：6 项决策已敲定（VLM 走 mock 起步、OCR / 图片 / 真云端 VLM 是显式扩展口子）；`task.output_format` 列扩 + `services/pptx_builder.py` 接 `image_refs=None` 这两个签名是"留口子"的硬约束，未来切真实现不能改外部接口。⚠ 同批设计的 `services/pdf.py:extract_text_from_pdf(fallback_to_ocr=False)` **至今没有实现**——真实签名一直是 `extract_text_from_pdf(file_bytes)`（见 §7 阶段 6 前置约束），接 OCR 时才补这个参数。完整计划见 SPEC §9.12。
 - 真机跑过的一手结论（2026-11-15，qwen3.7-flash + 合成中文 PDF）：结构化链路 OK（`degraded=False`、4 条 的/地/得 全部精确定位）。但该端点回来的 `revised_text` 与原文一字不差——意见对、修订没落地。这是 prompt 产出质量，不是提取或解析缺陷，正属阶段 2 评测台要量化的范围，别在提取层"顺手改 prompt"掩盖它。

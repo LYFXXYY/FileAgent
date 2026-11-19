@@ -36,6 +36,12 @@ const activeIssueIndex = ref<number | null>(null)
 
 const paras = computed(() => buildParagraphs(props.original, props.issues))
 
+// 长文档按块召回后引用可能有十几条，全列出来这行会比清单本身还长。
+// 数据一条不少（refs 原样落库、交付页也全量），这里只是收起显示
+const MAX_VISIBLE_REFS = 8
+const visibleRefs = computed(() => (props.refs ?? []).slice(0, MAX_VISIBLE_REFS))
+const hiddenRefCount = computed(() => Math.max(0, (props.refs ?? []).length - MAX_VISIBLE_REFS))
+
 // 点卡片：选中并滚到原文里的对应位置
 function selectIssue(idx: number) {
   activeIssueIndex.value = idx
@@ -51,7 +57,7 @@ function selectIssue(idx: number) {
     <div v-if="refs && refs.length" class="spec-refs">
       <span class="spec-refs-label">本次依据的规范条款</span>
       <el-tag
-        v-for="r in refs"
+        v-for="r in visibleRefs"
         :key="`${r.doc_id}-${r.seq}`"
         type="primary"
         size="small"
@@ -60,6 +66,7 @@ function selectIssue(idx: number) {
         {{ r.clause }}
         <span class="spec-ref-via">{{ VIA_LABEL[r.via ?? 'vector'] }}</span>
       </el-tag>
+      <span v-if="hiddenRefCount" class="spec-refs-more">+{{ hiddenRefCount }}</span>
     </div>
 
     <!-- 检索降级：和"没召回相关条款"必须分开说，否则用户以为库里没内容 -->
@@ -166,6 +173,11 @@ function selectIssue(idx: number) {
   font-size: var(--fa-text-sm);
   font-weight: 600;
   color: var(--el-text-color-primary);
+}
+
+.spec-refs-more {
+  font-size: var(--fa-text-xs);
+  color: var(--el-text-color-secondary);
 }
 
 .spec-ref-via {
