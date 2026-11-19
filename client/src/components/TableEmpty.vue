@@ -52,10 +52,11 @@ const emit = defineEmits<{ action: [] }>()
 .table-empty {
   display: flex;
   flex-direction: column;
-  /* 左对齐整块：原先居中 + 42ch 上限，长句被切成两行居中排（2026-11-19 截图实拍） */
+  /* 整块仍由表格居中，但块内左对齐：长说明占满自己的宽度排成一行，
+     标题/按钮贴它的左缘，避免出现"两行居中阶梯"（2026-11-19 反馈） */
   align-items: flex-start;
   gap: 10px;
-  padding: var(--space-lg) var(--space-md);
+  padding: var(--space-lg) 0;
 }
 
 .empty-mark {

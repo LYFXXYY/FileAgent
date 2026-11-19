@@ -240,16 +240,11 @@ html:root .el-select__wrapper {
 }
 
 /* 表格空态：EP 给 .el-table__empty-text 预设了 line-height: 60px 和 200px 宽，
-   会把自定义空态整块往下撑 —— 实测空态因此虚高约 60px */
+   会把自定义空态整块往下撑 —— 实测空态因此虚高约 60px。
+   只放开宽度，不改 .el-table__empty-block 的居中：空态留在表格中间，文案不再断行 */
 html:root .el-table__empty-text {
   width: auto;
   line-height: normal;
-}
-
-/* 空态整块贴左：EP 默认 justify-content: center，长句会在表格中间换行成两行。
-   左对齐后文案占满可用宽度，一行放得下（2026-11-19 反馈） */
-html:root .el-table__empty-block {
-  justify-content: flex-start;
 }
 
 /* 表格：去外框感，表头用暖填充 */
