@@ -13,6 +13,7 @@ import { extractErrorMessage } from '@/api/client'
 import { providerApi } from '@/api/providers'
 import { taskApi } from '@/api/tasks'
 import type { OutputFormat, Provider, Task, TaskCreatePayload } from '@/api/types'
+import TableEmpty from '@/components/TableEmpty.vue'
 
 /**
  * 预置的常用任务模板（纯前端静态常量，不会写入数据库）
@@ -258,6 +259,14 @@ function providerName(id: number | null): string {
     <!-- 任务列表表格 -->
     <div class="table-wrapper">
       <el-table v-loading="loading" :data="tasks" class="task-table">
+        <template #empty>
+          <TableEmpty
+            title="还没有任务"
+            hint="任务就是一段 Prompt 模板加上一种处理方式。先建一个，工作台才能选它"
+            action-text="新建任务"
+            @action="openCreate"
+          />
+        </template>
         <el-table-column prop="name" label="任务名称" min-width="140">
           <template #default="{ row }">
             <span class="task-name">{{ row.name }}</span>
@@ -461,7 +470,7 @@ function providerName(id: number | null): string {
 
 /* 模型名称：标签风格 */
 .model-name {
-  font-size: 13px;
+  font-size: var(--fa-text-sm);
   color: var(--el-text-color-regular);
   padding: 2px 8px;
   background: color-mix(in oklab, var(--fa-ink) 3%, var(--fa-bg));
@@ -472,7 +481,7 @@ function providerName(id: number | null): string {
 /* Prompt 预览代码块 */
 .prompt-preview {
   font-family: 'Consolas', 'Courier New', monospace;
-  font-size: 12px;
+  font-size: var(--fa-text-xs);
   color: var(--el-text-color-regular);
   background: color-mix(in oklab, var(--fa-ink) 3%, var(--fa-bg));
   padding: 2px 6px;
@@ -481,7 +490,7 @@ function providerName(id: number | null): string {
 
 .text-muted {
   color: var(--el-text-color-secondary);
-  font-size: 13px;
+  font-size: var(--fa-text-sm);
 }
 
 /* ========== 操作按钮 ========== */
@@ -506,7 +515,7 @@ function providerName(id: number | null): string {
 
 :deep(.el-dialog__title) {
   font-weight: 600;
-  font-size: 18px;
+  font-size: var(--fa-text-lg);
   color: var(--el-text-color-primary);
 }
 
@@ -530,13 +539,13 @@ function providerName(id: number | null): string {
 
 .draft-btn {
   margin-top: 6px;
-  font-size: 12px;
+  font-size: var(--fa-text-xs);
 }
 
 /* 表单控件下方的辅助提示文字 */
 .field-hint {
   margin: 6px 0 0;
-  font-size: 12px;
+  font-size: var(--fa-text-xs);
   line-height: 1.5;
   color: var(--el-text-color-secondary);
 }

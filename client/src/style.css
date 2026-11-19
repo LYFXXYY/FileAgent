@@ -30,7 +30,7 @@ body {
     'Helvetica Neue',
     Arial,
     sans-serif;
-  font-size: 14px;
+  font-size: var(--fa-text-base);
   line-height: 1.6;
   color: var(--fa-ink);
   background: var(--fa-bg);
@@ -42,7 +42,8 @@ body {
 /* 色彩/圆角/动效令牌在 assets/theme.css，这里只留布局与间距刻度 */
 :root {
   /* 布局尺寸 */
-  --app-content-max-width: 1200px;
+  /* 1440：1920 屏上原先 1200 会留下左右各 336px 死区，Logs 这类 8 列表格还被挤 */
+  --app-content-max-width: 1440px;
 
   /* 间距刻度（Element Plus 内部也是这套） */
   --space-xs: 4px;
@@ -60,8 +61,9 @@ body {
   border: 1px solid color-mix(in oklab, var(--fa-ink) 7%, transparent);
   box-shadow: var(--fa-shadow-lg);
   padding: var(--space-lg);
-  /* 120px = 悬浮导航避让 88px + 主区内边距上下 32px+24px 的余量，让卡片刚好铺满一屏 */
-  min-height: calc(100vh - 120px);
+  /* 只给一个下限，不再强行撑满一屏：原先 min-height: 100vh-120px 让内容少的页面
+     拖出一大片空卡面（留白投诉的主因之一）。现在卡片跟着内容走 */
+  min-height: 420px;
 }
 
 .page-header {
@@ -108,17 +110,17 @@ body {
 }
 
 .page-title {
-  font-size: 20px;
-  font-weight: 600;
+  font-size: var(--fa-text-xl);
+  font-weight: 700;
   color: var(--el-text-color-primary);
   margin: 0;
-  letter-spacing: -0.2px;
+  letter-spacing: -0.02em;
 }
 
 .page-subtitle {
-  font-size: 13px;
+  font-size: var(--fa-text-sm);
   color: var(--el-text-color-secondary);
-  margin: 4px 0 0;
+  margin: 6px 0 0;
 }
 
 .page-body {
@@ -147,7 +149,7 @@ body {
 }
 
 .el-table {
-  font-size: 14px;
+  font-size: var(--fa-text-base);
 }
 
 /* ============== 通用淡入动画 ============== */

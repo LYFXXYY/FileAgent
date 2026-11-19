@@ -19,6 +19,18 @@ html:root {
   --fa-accent-soft: oklch(90% 0.076 70.697); /* 暖橙浅档（用于光斑背景） */
   --fa-accent-pop: oklch(78% 0.17 65); /* 暖橙鲜档（高亮笔/渐变终点） */
 
+  /* ============ 字阶（2026-11-19 重定） ============ */
+  /* 原先全站挤在 12/13/14px 三档里，主次分不出来。这里拉开成六级，
+     并把 Element Plus 的 --el-font-size-* 一并接上，避免"页面用了令牌、组件还是 14px" */
+  --fa-text-xs: 13px; /* 说明、计数、标签 */
+  --fa-text-sm: 15px; /* 次要正文、副标题 */
+  --fa-text-base: 16px; /* 正文默认 */
+  --fa-text-md: 18px; /* 卡片标题 */
+  --fa-text-lg: 20px; /* 区块标题 */
+  --fa-text-xl: 24px; /* 页面主标题 */
+  --fa-text-2xl: 30px; /* 强调数字/大标题 */
+  --fa-display: clamp(44px, 5.6vw, 78px); /* 仅登录页 hero */
+
   /* ============ 动效：时长四档 + 缓动 ============ */
   /* 三档沿用 UI-REFERENCE §2 的实测体系，enter 是后来补的入场档 */
   --fa-duration-fast: 0.2s; /* 交互反馈 */
@@ -81,6 +93,14 @@ html:root {
   /* 圆角令牌 */
   --el-border-radius-base: var(--fa-radius-field);
   --el-border-radius-small: 4px;
+
+  /* 字阶令牌接到组件库：输入框、按钮、表格、弹窗全部跟着抬 */
+  --el-font-size-extra-small: var(--fa-text-xs);
+  --el-font-size-small: var(--fa-text-xs);
+  --el-font-size-base: var(--fa-text-base);
+  --el-font-size-medium: var(--fa-text-md);
+  --el-font-size-large: var(--fa-text-lg);
+  --el-font-size-extra-large: var(--fa-text-xl);
 }
 
 /* ============ 页面底：暖白 + 漂移光斑 + 噪点 ============ */
@@ -217,6 +237,19 @@ html:root .el-input__wrapper,
 html:root .el-textarea__inner,
 html:root .el-select__wrapper {
   border-radius: var(--fa-radius-field);
+}
+
+/* 表格空态：EP 给 .el-table__empty-text 预设了 line-height: 60px 和 200px 宽，
+   会把自定义空态整块往下撑 —— 实测空态因此虚高约 60px */
+html:root .el-table__empty-text {
+  width: auto;
+  line-height: normal;
+}
+
+/* 空态整块贴左：EP 默认 justify-content: center，长句会在表格中间换行成两行。
+   左对齐后文案占满可用宽度，一行放得下（2026-11-19 反馈） */
+html:root .el-table__empty-block {
+  justify-content: flex-start;
 }
 
 /* 表格：去外框感，表头用暖填充 */

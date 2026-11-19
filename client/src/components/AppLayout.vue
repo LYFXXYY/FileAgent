@@ -19,6 +19,7 @@ import { ElMessageBox } from 'element-plus'
 
 import { useAuthStore } from '@/stores/auth'
 import { markReady } from '@/router/notice'
+import BrandMark from '@/components/BrandMark.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -57,16 +58,9 @@ async function handleLogout() {
     <!-- ============ 悬浮胶囊导航 ============ -->
     <header class="float-nav">
       <div class="brand">
-        <!-- 品牌图标：文件 + AI 概念，与 Login.vue 保持一致 -->
-        <span class="brand-icon">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M14 2H6C4.9 2 4 2.9 4 4V20C4 21.1 4.9 22 6 22H18C19.1 22 20 21.1 20 20V8L14 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-            <path d="M14 2V8H20" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-            <path d="M8 13H16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-            <path d="M8 17H13" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-          </svg>
-        </span>
-        <span class="brand-name">FileAgent</span>
+        <!-- 品牌标记与登录卡片共用同一个组件，不再两处各画一份 -->
+        <BrandMark :size="28" class="brand-icon" />
+        <span class="brand-name"><b>File</b><i>Agent</i></span>
       </div>
 
       <el-menu :default-active="activeMenu" router mode="horizontal" :ellipsis="false" class="nav-menu">
@@ -165,11 +159,12 @@ async function handleLogout() {
   left: 16px;
   right: 16px;
   z-index: 100;
-  height: 48px;
+  /* 64px：原先 48 的横条把品牌位一起压小了，字标和 logo 都撑不起来 */
+  height: 64px;
   display: flex;
   align-items: center;
-  gap: var(--space-md);
-  padding: 0 6px 0 18px;
+  gap: var(--space-lg);
+  padding: 0 10px 0 26px;
   border-radius: var(--fa-radius-pill);
   background: color-mix(in oklab, var(--fa-surface) 70%, transparent);
   -webkit-backdrop-filter: blur(24px);
@@ -188,10 +183,7 @@ async function handleLogout() {
 .brand {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--el-text-color-primary);
+  gap: 10px;
   white-space: nowrap;
 }
 
@@ -199,6 +191,40 @@ async function handleLogout() {
   color: var(--fa-ink);
   display: flex;
   align-items: center;
+}
+
+/* 字标：File 墨黑、Agent 暖橙，底下压一道荧光笔 —— 与导航激活态同一个动作 */
+.brand-name {
+  font-size: var(--fa-text-xl);
+  letter-spacing: -0.025em;
+  line-height: 1;
+}
+
+.brand-name b {
+  font-weight: 800;
+  color: var(--fa-ink);
+}
+
+.brand-name i {
+  position: relative;
+  z-index: 0;
+  font-style: normal;
+  font-weight: 700;
+  padding: 0 2px;
+  color: var(--fa-accent);
+}
+
+.brand-name i::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 5px;
+  z-index: -1;
+  border-radius: 2px;
+  background: color-mix(in oklab, var(--fa-accent-pop) 38%, transparent);
+  transform: rotate(-1.4deg);
 }
 
 /* ============ 横向菜单：去组件库默认外观，激活态自绘 ============ */
@@ -211,14 +237,21 @@ async function handleLogout() {
   background: transparent;
   flex: 1;
   min-width: 0;
+  /* el-menu 自身高度是 60（组件库默认值），菜单项只有 40。
+     横向菜单的交叉轴默认是 stretch，但显式给了 height 后子项会贴顶，
+     必须在这里居中，否则导航文字在胶囊里偏上（2026-11-19 截图实拍） */
+  display: flex;
+  align-items: center;
 }
 
 .nav-menu :deep(.el-menu-item) {
-  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  height: 40px;
   margin: 0 2px;
-  padding: 0 14px;
+  padding: 0 18px;
   border-radius: var(--fa-radius-pill);
-  font-size: 14px;
+  font-size: var(--fa-text-base);
   transition: all var(--fa-duration-fast) var(--fa-ease-spring);
 }
 
@@ -269,7 +302,7 @@ async function handleLogout() {
 
 .username {
   color: var(--el-text-color-regular);
-  font-size: 14px;
+  font-size: var(--fa-text-base);
 }
 
 /* 在线状态点：暖橙呼吸，胶囊导航上也有一点“活”的信号（dotBreath 在全局 style.css） */
@@ -283,7 +316,8 @@ async function handleLogout() {
 
 /* ============ 主区域 ============ */
 .app-main {
-  padding: 88px 24px 32px;
+  /* 104px = 胶囊 top 16 + 高 64 + 24 呼吸位 */
+  padding: 104px 24px 32px;
   max-width: calc(var(--app-content-max-width) + 48px);
   margin: 0 auto;
   width: 100%;

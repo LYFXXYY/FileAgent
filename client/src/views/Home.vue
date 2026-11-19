@@ -731,7 +731,7 @@ function reset() {
 /* 卡片标题和描述 */
 .step-card h3 {
   margin: 0 0 var(--space-sm);
-  font-size: 18px;
+  font-size: var(--fa-text-lg);
   font-weight: 600;
   color: var(--el-text-color-primary);
 }
@@ -739,7 +739,7 @@ function reset() {
 .card-desc {
   margin: 0 0 var(--space-lg);
   color: var(--el-text-color-regular);
-  font-size: 14px;
+  font-size: var(--fa-text-base);
   line-height: 1.6;
 }
 
@@ -771,7 +771,7 @@ function reset() {
   border-left: 3px solid var(--fa-accent-pop);
   border-radius: var(--fa-radius-field);
   box-shadow: 0 2px 8px color-mix(in oklab, var(--fa-ink) 5%, transparent);
-  font-size: 14px;
+  font-size: var(--fa-text-base);
   color: var(--el-text-color-regular);
   display: inline-block;
   text-align: left;
@@ -785,14 +785,14 @@ function reset() {
 
 .file-size {
   color: var(--el-text-color-secondary);
-  font-size: 13px;
+  font-size: var(--fa-text-sm);
 }
 
 /* 提示信息 */
 .hint {
   margin: 0 0 var(--space-md);
   color: var(--el-text-color-regular);
-  font-size: 14px;
+  font-size: var(--fa-text-base);
   line-height: 1.6;
 }
 
@@ -817,21 +817,21 @@ function reset() {
 
 .chunk-progress-label {
   margin: 0 0 8px;
-  font-size: 14px;
+  font-size: var(--fa-text-base);
   font-weight: 600;
   color: var(--el-text-color-primary);
 }
 
 .chunk-progress .hint {
   margin: 8px 0 0;
-  font-size: 12px;
+  font-size: var(--fa-text-xs);
   color: var(--el-text-color-secondary);
 }
 
 .empty-hint {
   margin-top: var(--space-md);
   color: var(--el-text-color-secondary);
-  font-size: 13px;
+  font-size: var(--fa-text-sm);
 }
 
 /* 文本预览区域（提取文本 / 处理结果） */
@@ -841,7 +841,7 @@ function reset() {
   padding: var(--space-md);
   background: color-mix(in oklab, var(--fa-ink) 3%, var(--fa-bg));
   border-radius: var(--fa-radius-field);
-  font-size: 13px;
+  font-size: var(--fa-text-sm);
   line-height: 1.7;
   color: var(--el-text-color-primary);
   white-space: pre-wrap;

@@ -13,6 +13,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 
 import { useAuthStore } from '@/stores/auth'
+import BrandMark from '@/components/BrandMark.vue'
 
 const auth = useAuthStore()
 const router = useRouter()
@@ -85,70 +86,75 @@ function switchTab(name: string | number) {
     <span class="sparkle s1" aria-hidden="true"></span>
     <span class="sparkle s2" aria-hidden="true"></span>
 
-    <!-- ============ 左：项目自我介绍（大字 + 荧光笔划 + 光标） ============ -->
+    <!-- ============ 左：项目自我介绍 ============ -->
     <section class="hero">
-      <p class="hero-eyebrow"><span class="hero-dot"></span>文档 AI 处理平台</p>
+      <!-- 品牌位：大 logo + 双色字标。原先这行是"文档 AI 处理平台"的说明，
+           但说明交给下面的标题去做，这里只留品牌本身 -->
+      <div class="hero-brand">
+        <BrandMark :size="40" />
+        <span class="hero-wordmark"><b>File</b><i>Agent</i></span>
+      </div>
 
       <h1 class="hero-title">
-        把你的 Prompt<br />
-        变成<span class="hl">红笔批注</span><span class="caret"></span>
+        给文档配一条<br />
+        <span class="hl">AI 流水线</span><span class="caret"></span>
       </h1>
 
       <p class="hero-desc">
-        上传 <code>.docx</code> 或文字型 <code>.pdf</code>，写清楚你要怎么改——
-        AI 按你的话逐条动手，交回一份红字 diff 和能点着定位的问题清单。
+        上传 <code>.docx</code> 或文字型 <code>.pdf</code>，用一段你自己写的 Prompt
+        定义要做什么——批改、润色、摘要、翻译，或者把 PDF 整成一份 PPT，走的都是同一条链路。
       </p>
+      <p class="hero-note">文档类型与操作会随能力接入继续增加。</p>
 
       <ul class="hero-points">
         <li>
           <span class="point-icon">
-            <!-- 自定义 Prompt：钢笔尖 -->
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+            <!-- 你说标准：钢笔尖 -->
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
               <path d="M12 19l7-7 3 3-7 7-4 1 1-4Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
               <path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
               <path d="M2 2l7.586 7.586" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
               <circle cx="11" cy="11" r="2" stroke="currentColor" stroke-width="2"/>
             </svg>
           </span>
-          Prompt 自己写，不套模板
+          <span><b>你说标准</b><i>Prompt 就是处理规范，不套模板</i></span>
         </li>
         <li>
           <span class="point-icon">
-            <!-- 逐条定位：放大镜 -->
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+            <!-- 它给结果：一份输入扇出多种产出 -->
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
+              <path d="M2 12h6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+              <path d="M8 12l4-6h8M8 12h10M8 12l4 6h8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </span>
+          <span><b>它给结果</b><i>同一条链路，可以有多种产出形态</i></span>
+        </li>
+        <li>
+          <span class="point-icon">
+            <!-- 可追溯：放大镜 -->
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
               <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/>
               <path d="M20 20l-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
             </svg>
           </span>
-          每处修改都能点回原文定位
+          <span><b>全程可追溯</b><i>每条意见都带原文位置，点一下就跳过去</i></span>
         </li>
         <li>
           <span class="point-icon">
-            <!-- 长文分块 / PDF→PPT：层叠页 -->
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
-              <path d="M8 4H18a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z" stroke="currentColor" stroke-width="2"/>
-              <path d="M4 7v12a2 2 0 0 0 2 2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-              <path d="M10 10h6M10 14h4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            <!-- 会长大：方框里的加号 -->
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
+              <rect x="3" y="3" width="18" height="18" rx="5.5" stroke="currentColor" stroke-width="2"/>
+              <path d="M12 8v8M8 12h8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
             </svg>
           </span>
-          长文分块批改，PDF 还能出一份 PPT
+          <span><b>能力会长大</b><i>新的文档类型与操作会持续接入</i></span>
         </li>
       </ul>
     </section>
 
-    <!-- ============ 右：登录框（只留图标，文字交给左侧） ============ -->
+    <!-- ============ 右：登录表单 ============ -->
+    <!-- 品牌展示点统一交给左侧，卡片里不再放第二个 logo -->
     <div class="login-card">
-      <div class="login-header">
-        <div class="logo-icon">
-          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M14 2H6C5.46957 2 4.96086 2.21071 4.58579 2.58579C4.21071 2.96086 4 3.46957 4 4V20C4 20.5304 4.21071 21.0391 4.58579 21.4142C4.96086 21.7893 5.46957 22 6 22H18C18.5304 22 19.0391 21.7893 19.4142 21.4142C19.7893 21.0391 20 20.5304 20 20V8L14 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-            <path d="M14 2V8H20" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-            <path d="M8 13H16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-            <path d="M8 17H13" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-          </svg>
-        </div>
-      </div>
-
       <el-tabs v-model="tab" stretch @tab-change="switchTab">
         <el-tab-pane label="登录" name="login" />
         <el-tab-pane label="注册" name="register" />
@@ -247,25 +253,54 @@ function switchTab(name: string | number) {
   animation: fadeInUp var(--fa-duration-enter) var(--fa-ease-spring) both;
 }
 
-.hero-eyebrow {
+/* 品牌位：大 logo + 双色字标，取代原先那行"文档 AI 处理平台"的说明 */
+.hero-brand {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin: 0 0 var(--space-lg);
-  font-size: 13px;
-  letter-spacing: 0.22em;
-  color: var(--el-text-color-secondary);
+  gap: 14px;
+  margin: 0 0 var(--space-xl);
+  color: var(--fa-ink);
 }
 
-.hero-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--fa-accent-pop);
-  animation: dotBreath var(--fa-duration-pulse) ease-in-out infinite;
+.hero-wordmark {
+  font-size: var(--fa-text-2xl);
+  letter-spacing: -0.03em;
+  line-height: 1;
 }
 
-/* dotBreath 用全局 style.css 那一份，不在这里重复定义 */
+.hero-wordmark b {
+  font-weight: 800;
+  color: var(--fa-ink);
+}
+
+.hero-wordmark i {
+  position: relative;
+  z-index: 0;
+  font-style: normal;
+  font-weight: 700;
+  padding: 0 3px;
+  color: var(--fa-accent);
+}
+
+.hero-wordmark i::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 7px;
+  z-index: -1;
+  border-radius: 3px;
+  background: color-mix(in oklab, var(--fa-accent-pop) 38%, transparent);
+  transform: rotate(-1.4deg);
+}
+
+/* 扩展说明刻意压到次要层级，不跟主叙事抢注意力 */
+.hero-note {
+  margin: 0 0 var(--space-xl);
+  font-size: var(--fa-text-xs);
+  color: var(--el-text-color-placeholder);
+}
 
 .hero-title {
   margin: 0 0 var(--space-lg);
@@ -328,10 +363,10 @@ function switchTab(name: string | number) {
 }
 
 .hero-desc {
-  margin: 0 0 var(--space-xl);
+  margin: 0 0 var(--space-sm);
   max-width: 46ch;
-  font-size: 15px;
-  line-height: 1.95;
+  font-size: var(--fa-text-md);
+  line-height: 1.85;
   color: var(--el-text-color-regular);
 }
 
@@ -339,7 +374,7 @@ function switchTab(name: string | number) {
   padding: 1px 6px;
   border-radius: 4px;
   font-family: 'Consolas', 'Courier New', monospace;
-  font-size: 13px;
+  font-size: var(--fa-text-sm);
   color: var(--fa-ink);
   background: color-mix(in oklab, var(--fa-accent) 18%, var(--fa-bg));
 }
@@ -351,15 +386,14 @@ function switchTab(name: string | number) {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  font-size: 14px;
+  gap: 14px;
   color: var(--el-text-color-regular);
 }
 
 .hero-points li {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 14px;
   transition: transform var(--fa-duration-fast) var(--fa-ease-spring);
 }
 
@@ -367,14 +401,29 @@ function switchTab(name: string | number) {
   transform: translateX(6px);
 }
 
+/* 每条能力点分两级：粗体小标题 + 灰色说明，避免四条一样重 */
+.hero-points b {
+  display: block;
+  font-size: var(--fa-text-base);
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+}
+
+.hero-points i {
+  display: block;
+  font-style: normal;
+  font-size: var(--fa-text-sm);
+  color: var(--el-text-color-secondary);
+}
+
 .point-icon {
-  width: 28px;
-  height: 28px;
+  width: 34px;
+  height: 34px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 9px;
+  border-radius: 11px;
   color: var(--fa-ink);
   background: color-mix(in oklab, var(--fa-ink) 6%, var(--fa-bg));
   border: 1px solid color-mix(in oklab, var(--fa-ink) 8%, transparent);
@@ -402,38 +451,6 @@ function switchTab(name: string | number) {
 .login-card:hover {
   box-shadow: var(--fa-shadow-xl);
   transform: translateY(-3px);
-}
-
-.login-header {
-  text-align: center;
-  margin-bottom: var(--space-lg);
-}
-
-/* Logo 图标容器：墨底白形，右下角一枚暖橙点当品牌记忆 */
-.logo-icon {
-  width: 60px;
-  height: 60px;
-  margin: 0 auto;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 18px;
-  background: var(--fa-ink);
-  color: #fff;
-  position: relative;
-  box-shadow: var(--fa-shadow-lg);
-}
-
-.logo-icon::after {
-  content: '';
-  position: absolute;
-  right: -3px;
-  bottom: -3px;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: var(--fa-accent);
-  border: 2px solid var(--fa-surface);
 }
 
 /* Tab 切换：去渐变，激活态用墨色细条 */
@@ -640,7 +657,7 @@ function switchTab(name: string | number) {
   }
 
   .hero-desc {
-    font-size: 14px;
+    font-size: var(--fa-text-base);
     margin-bottom: var(--space-lg);
   }
 
@@ -665,7 +682,7 @@ function switchTab(name: string | number) {
   }
 
   .hero-points {
-    font-size: 13px;
+    font-size: var(--fa-text-sm);
   }
 }
 
@@ -674,7 +691,6 @@ function switchTab(name: string | number) {
   .mark-circle,
   .sparkle,
   .caret,
-  .hero-dot,
   .hl::before {
     animation: none;
   }

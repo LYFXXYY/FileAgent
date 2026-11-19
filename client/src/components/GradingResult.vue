@@ -121,7 +121,7 @@ function selectIssue(idx: number) {
   flex-direction: column;
   gap: 6px;
   padding: var(--space-md);
-  font-size: 14px;
+  font-size: var(--fa-text-base);
   color: var(--el-text-color-primary);
   background: color-mix(in oklab, var(--fa-ink) 3%, var(--fa-bg));
   border: 1px solid color-mix(in oklab, var(--fa-ink) 7%, transparent);
@@ -130,7 +130,7 @@ function selectIssue(idx: number) {
 }
 
 .grading-empty-note {
-  font-size: 12px;
+  font-size: var(--fa-text-xs);
   line-height: 1.6;
   color: var(--el-text-color-secondary);
 }
@@ -180,27 +180,27 @@ function selectIssue(idx: number) {
 }
 
 .issue-confidence {
-  font-size: 12px;
+  font-size: var(--fa-text-xs);
   color: var(--el-text-color-secondary);
 }
 
 .issue-unlocated {
   padding: 1px 6px;
-  font-size: 12px;
+  font-size: var(--fa-text-xs);
   color: var(--el-text-color-secondary);
   background: color-mix(in oklab, var(--fa-ink) 5%, var(--fa-bg));
   border-radius: 3px;
 }
 
 .issue-original {
-  font-size: 14px;
+  font-size: var(--fa-text-base);
   color: var(--el-text-color-primary);
   word-break: break-word;
 }
 
 .issue-suggestion {
   margin-top: 4px;
-  font-size: 14px;
+  font-size: var(--fa-text-base);
   color: var(--fa-ink);
   font-weight: 500;
   word-break: break-word;
@@ -208,7 +208,7 @@ function selectIssue(idx: number) {
 
 .issue-reason {
   margin-top: 4px;
-  font-size: 12px;
+  font-size: var(--fa-text-xs);
   color: var(--el-text-color-secondary);
 }
 
@@ -217,7 +217,7 @@ function selectIssue(idx: number) {
   max-height: 320px;
   overflow-y: auto;
   padding: var(--space-md);
-  font-size: 13px;
+  font-size: var(--fa-text-sm);
   line-height: 1.9;
   color: var(--el-text-color-primary);
   background: color-mix(in oklab, var(--fa-ink) 3%, var(--fa-bg));

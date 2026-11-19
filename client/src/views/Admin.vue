@@ -13,6 +13,7 @@ import { adminApi } from '@/api/admin'
 import { extractErrorMessage } from '@/api/client'
 import type { AdminUserRow, UserRole } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
+import TableEmpty from '@/components/TableEmpty.vue'
 
 const auth = useAuthStore()
 const users = ref<AdminUserRow[]>([])
@@ -85,7 +86,7 @@ function formatDate(raw: string): string {
     <div class="table-wrapper">
       <el-table v-loading="loading" :data="users" stripe>
         <template #empty>
-          <el-empty description="暂无用户数据" :image-size="80" />
+          <TableEmpty title="还没有用户" hint="注册入口开放后，新用户会出现在这里" />
         </template>
         <el-table-column prop="id" label="ID" width="70" />
         <el-table-column prop="username" label="用户名" min-width="140" />

@@ -12,6 +12,7 @@ import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'elem
 import { extractErrorMessage } from '@/api/client'
 import { providerApi } from '@/api/providers'
 import type { Capability, Provider, ProviderCreatePayload } from '@/api/types'
+import TableEmpty from '@/components/TableEmpty.vue'
 import { useAuthStore } from '@/stores/auth'
 
 const auth = useAuthStore()
@@ -220,6 +221,14 @@ async function toggleActive(row: Provider) {
     <!-- 表格卡片包裹 -->
     <div class="table-wrapper">
       <el-table v-loading="loading" :data="providers" stripe>
+        <template #empty>
+          <TableEmpty
+            title="还没有可用的模型提供商"
+            hint="填一个 OpenAI 兼容端点的地址与密钥，AI 处理才有模型可调"
+            action-text="新建提供商"
+            @action="openCreate"
+          />
+        </template>
         <el-table-column prop="name" label="名称" min-width="120">
           <template #default="{ row }">
             <span class="provider-name">{{ row.name }}</span>
@@ -250,7 +259,7 @@ async function toggleActive(row: Provider) {
         <el-table-column label="温度" width="80">
           <template #default="{ row }">{{ row.temperature.toFixed(2) }}</template>
         </el-table-column>
-        <el-table-column label="启用" width="80">
+        <el-table-column label="启用" width="120">
           <template #default="{ row }">
             <!-- 别人名下的公共提供商：只读展示，启用/编辑/删除归 owner（admin） -->
             <el-switch
@@ -258,7 +267,9 @@ async function toggleActive(row: Provider) {
               v-model="row.is_active"
               @change="toggleActive(row as Provider)"
             />
-            <span v-else class="model-tag">由管理员维护</span>
+            <!-- 只读提示不该用强调色（原先借 .model-tag 的暖橙，读起来像"选中"），
+                 列宽也要够，否则六个字竖着折成一行一个字 -->
+            <span v-else class="readonly-hint">由管理员维护</span>
           </template>
         </el-table-column>
         <el-table-column v-if="auth.isAdmin || providers.some((p) => !p.is_public)" label="操作" width="140" fixed="right">
@@ -389,8 +400,15 @@ async function toggleActive(row: Provider) {
   background: color-mix(in oklab, var(--fa-accent) 14%, var(--fa-bg));
   color: var(--fa-accent);
   border-radius: var(--fa-radius-field);
-  font-size: 13px;
+  font-size: var(--fa-text-sm);
   font-family: 'Consolas', 'Courier New', monospace;
+}
+
+/* 只读说明：灰调、不折行，与"可操作"的强调色明确区分 */
+.readonly-hint {
+  font-size: var(--fa-text-xs);
+  color: var(--el-text-color-secondary);
+  white-space: nowrap;
 }
 
 /* 能力标签：表格里并排显示，留间距防粘一起 */
@@ -406,7 +424,7 @@ async function toggleActive(row: Provider) {
 /* 表单项下方的浅色说明 */
 .form-hint {
   margin-top: 4px;
-  font-size: 12px;
+  font-size: var(--fa-text-xs);
   line-height: 1.5;
   color: var(--el-text-color-secondary);
 }
@@ -422,7 +440,7 @@ async function toggleActive(row: Provider) {
   border-radius: var(--fa-radius-field);
   color: var(--el-text-color-primary);
   font-weight: 500;
-  font-size: 14px;
+  font-size: var(--fa-text-base);
 }
 
 /* 对话框标题分隔线：hairline，与其它页一致 */
@@ -437,7 +455,7 @@ async function toggleActive(row: Provider) {
 /* 响应式 */
 @media (max-width: 768px) {
   .add-btn {
-    font-size: 13px;
+    font-size: var(--fa-text-sm);
   }
 }
 </style>

@@ -15,6 +15,7 @@ import { extractErrorMessage } from '@/api/client'
 import { logsApi } from '@/api/logs'
 import { processApi } from '@/api/process'
 import type { LogEntry } from '@/api/types'
+import TableEmpty from '@/components/TableEmpty.vue'
 
 const items = ref<LogEntry[]>([])
 const total = ref(0)
@@ -204,18 +205,22 @@ async function retryProcess(row: LogEntry) {
 
     <div class="table-wrapper">
       <el-table v-loading="loading" :data="items" stripe>
-        <!-- 空状态 -->
+        <!-- 空状态：紧凑且带出口（原先 el-empty 的 120px 插图把表格撑到 439px 高） -->
         <template #empty>
-          <el-empty description="暂无操作记录" :image-size="120">
-            <template v-if="filterStatus || filterFilename">
-              <p class="empty-tip">没有匹配筛选条件的记录</p>
-              <el-button type="primary" size="small" @click="onResetFilters">清除筛选</el-button>
-            </template>
-            <template v-else>
-              <p class="empty-tip">去工作台上传文件开始处理吧</p>
-              <el-button type="primary" size="small" @click="$router.push('/')">前往工作台</el-button>
-            </template>
-          </el-empty>
+          <TableEmpty
+            v-if="filterStatus || filterFilename"
+            title="没有符合条件的记录"
+            hint="换个状态或文件名再试一次"
+            action-text="清除筛选"
+            @action="onResetFilters"
+          />
+          <TableEmpty
+            v-else
+            title="还没有处理记录"
+            hint="去工作台上传一份文档，跑完的结果都会留在这里"
+            action-text="前往工作台"
+            @action="$router.push('/')"
+          />
         </template>
         <el-table-column prop="id" label="ID" width="80" />
         <el-table-column prop="original_filename" label="文件" min-width="180" show-overflow-tooltip />
@@ -313,24 +318,17 @@ async function retryProcess(row: LogEntry) {
   background: color-mix(in oklab, var(--fa-accent) 14%, var(--fa-bg));
   color: var(--fa-accent);
   border-radius: var(--fa-radius-field);
-  font-size: 13px;
+  font-size: var(--fa-text-sm);
   font-family: 'Consolas', 'Courier New', monospace;
 }
 
 .error-text {
   color: var(--el-color-danger);
-  font-size: 13px;
+  font-size: var(--fa-text-sm);
 }
 
 .text-muted {
   color: var(--el-text-color-placeholder);
-}
-
-/* 空状态提示文字 */
-.empty-tip {
-  color: var(--el-text-color-secondary);
-  font-size: 13px;
-  margin: 0 0 8px;
 }
 
 /* 分页器 */
