@@ -58,3 +58,35 @@ def test_task_response_roundtrips_output_format():
         updated_at=datetime(2026, 11, 16),
     )
     assert resp.output_format == "pptx"
+
+
+def test_output_format_accepts_md():
+    body = TaskCreate(**_minimal_payload(output_format="md"))
+    assert body.output_format == "md"
+
+
+def test_md_with_grading_rejected():
+    """md 转换零 LLM、没有修订文可 diff，与批改互斥"""
+    with pytest.raises(ValidationError, match="批改"):
+        TaskCreate(**_minimal_payload(output_format="md", is_grading=True))
+
+
+def test_md_without_grading_ok():
+    body = TaskCreate(**_minimal_payload(output_format="md", is_grading=False))
+    assert body.is_grading is False
+
+
+def test_task_response_roundtrips_md():
+    resp = TaskResponse(
+        id=1,
+        user_id=1,
+        provider_id=None,
+        name="t",
+        description=None,
+        prompt_template="x",
+        is_grading=False,
+        output_format="md",
+        created_at=datetime(2026, 11, 20),
+        updated_at=datetime(2026, 11, 20),
+    )
+    assert resp.output_format == "md"

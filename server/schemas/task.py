@@ -3,11 +3,11 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # 与 models/task.py 的 output_format 列取值集合一致。加新格式时同步改
-OUTPUT_FORMATS = ("docx", "pptx")
-OutputFormat = Literal["docx", "pptx"]
+OUTPUT_FORMATS = ("docx", "pptx", "md")
+OutputFormat = Literal["docx", "pptx", "md"]
 
 
 class TaskCreate(BaseModel):
@@ -18,6 +18,13 @@ class TaskCreate(BaseModel):
     provider_id: int | None = None
     # 默认 docx 是为了让阶段 0–4 期间建的任务行为不变；前端表单会显式带值
     output_format: OutputFormat = "docx"
+
+    @model_validator(mode="after")
+    def _md_not_grading(self):
+        # md 转换零 LLM、产物是 markdown，没有修订文可供 diff 标红
+        if self.output_format == "md" and self.is_grading:
+            raise ValueError("md 转换任务不能同时是批改类任务")
+        return self
 
 
 class TaskUpdate(BaseModel):

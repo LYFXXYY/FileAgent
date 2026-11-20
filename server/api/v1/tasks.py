@@ -71,6 +71,12 @@ def update_task(
         if provider is None or not provider_usable_by(provider, current):
             raise HTTPException(400, "指定的模型提供商不存在或不可用")
 
+    # md + 批改的互斥要在合并后的值上判：单改其中一个字段也可能凑出非法组合
+    merged_format = updates.get("output_format", task.output_format)
+    merged_grading = updates.get("is_grading", task.is_grading)
+    if merged_format == "md" and merged_grading:
+        raise HTTPException(400, "md 转换任务不能同时是批改类任务")
+
     for key, value in updates.items():
         setattr(task, key, value)
     db.commit()

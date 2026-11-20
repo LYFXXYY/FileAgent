@@ -67,6 +67,11 @@ class PdfError(Exception):
     """PDF 无法处理时抛出，让路由层转成 400 而不是 500"""
 
 
+class ScannedPdfError(PdfError):
+    """扫描件（无文字层 / 文字层过薄）。与加密、损坏区分开：
+    配了 MINERU_TOKEN 时上传路由可放行走 OCR 兜底，其余 PdfError 一律拒收"""
+
+
 def _join_block_lines(text: str) -> str:
     """
     把 block 内的视觉换行拼回一个段落
@@ -190,7 +195,8 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
     从 PDF 字节流提取纯文本，段落之间用 \\n 分隔（与 docx 提取结果同构）。
 
     抛 PdfError 的三种情况：文件打不开、设了打开密码、没有文字层。
-    最后一种最常见于扫描件，必须说清楚，而不是回一段空文本让用户以为文档是空的。
+    最后一种最常见于扫描件，抛子类 ScannedPdfError（上传路由可据此走 MinerU 兜底），
+    必须说清楚，而不是回一段空文本让用户以为文档是空的。
     """
     try:
         doc = pymupdf.open(stream=file_bytes, filetype="pdf")
@@ -215,7 +221,7 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
 
     body_chars = sum(len(p.strip()) for p in paragraphs)
     if not body_chars:
-        raise PdfError(
+        raise ScannedPdfError(
             "PDF 里没有可提取的文字层（多半是扫描件或纯图片导出）。"
             "当前不支持图片型 PDF，请先转成带文字层的 PDF，或改用 .docx"
         )
@@ -229,7 +235,7 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
         and body_chars < _MIN_CHARS_PER_PAGE * page_count
         and image_count >= page_count
     ):
-        raise PdfError(
+        raise ScannedPdfError(
             f"PDF 文字层过薄（{page_count} 页仅 {body_chars} 字符、{image_count} 张图），"
             "正文应当都在图片里，属于扫描件。当前不支持 OCR，"
             "请先转成带完整文字层的 PDF，或改用 .docx"

@@ -18,8 +18,10 @@ import io
 import logging
 import os
 import uuid
+import zipfile
 from dataclasses import dataclass
 
+import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
@@ -38,6 +40,7 @@ from models.user import User
 from schemas.grading import GRADING_JSON_SCHEMA, GradingIssue, GradingResult
 from schemas.ppt_outline import PptOutline, deserialize_outline, serialize_outline
 from schemas.process import ChunkProgressResponse, ProcessResponse, UploadResponse
+from services.docx_md import docx_to_markdown
 from services.grading import (
     build_messages,
     deserialize_issues,
@@ -57,7 +60,9 @@ from services.llm import (
     record_llm_call,
     resolve_provider,
 )
-from services.pdf import PdfError, extract_text_from_pdf
+from services.mineru import MinerUError, parse_pdf_via_mineru
+from services.ocr import markdown_to_plain_text, save_structured
+from services.pdf import PdfError, ScannedPdfError, extract_text_from_pdf
 from services.pptx_builder import PptxError, build_pptx
 from services.spec_retrieval import SpecContext, collect_spec_context
 from services.word import create_diff_docx, create_plain_docx, extract_text_from_docx
@@ -115,12 +120,25 @@ async def upload(
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(400, f"只允许 {ALLOWED_EXTENSIONS}，当前 {ext!r}")
 
+    # md 任务的 PDF 一律走 MinerU（文字型也要版面→md），没配 token 就在上传时
+    # 响亮拒绝，而不是让用户等到处理阶段才失败。docx 走本地转换不受此限
+    if task.output_format == "md" and ext == ".pdf" and not settings.mineru_token:
+        raise HTTPException(400, "PDF 转 Markdown 需要服务端配置 MINERU_TOKEN")
+
     # 3. 读取字节 + 按扩展名派发到对应的提取器
     file_bytes = await file.read()  # UploadFile.read() 是 async
+    ocr_pending = False
     try:
         text = TEXT_EXTRACTORS[ext](file_bytes)
+    except ScannedPdfError as e:
+        # 扫描件兜底：配了 MinerU token 才受理，正文推迟到处理阶段 OCR。
+        # 没配 token 时行为与接入前逐字一致（400 + 原文案）
+        if not settings.mineru_token:
+            raise HTTPException(400, str(e)) from e
+        text = None
+        ocr_pending = True
     except PdfError as e:
-        # PdfError 的文案本身就是给用户看的（扫描件、加密等情况），直接透出
+        # 加密 / 损坏等 PdfError 的文案本身就是给用户看的，直接透出
         raise HTTPException(400, str(e)) from e
     except Exception as e:
         raise HTTPException(400, f"文档解析失败：{e}") from e
@@ -132,13 +150,16 @@ async def upload(
     with open(os.path.join(_resolve_dir(settings.upload_dir), stored_name), "wb") as f:  # noqa: ASYNC230
         f.write(file_bytes)
 
-    # 5. 建 pending 日志（provider_name 稍后 process 时补齐）
+    # 5. 建 pending 日志（provider_name 稍后 process 时补齐）。
+    # 扫描件受理时 original_content 留 NULL + needs_ocr=True，处理阶段先 OCR 写回
     log = OperationLog(
         user_id=current.id,
         task_id=task.id,
         task_name=task.name,
         original_filename=file.filename or stored_name,
+        stored_filename=stored_name,
         original_content=text,
+        needs_ocr=ocr_pending,
         status=LogStatus.PENDING,
     )
     db.add(log)
@@ -148,8 +169,9 @@ async def upload(
     return UploadResponse(
         log_id=log.id,
         original_filename=log.original_filename,
-        content_length=len(text),
-        extracted_text=text,
+        content_length=len(text) if text else 0,
+        extracted_text=text or "",
+        ocr_pending=ocr_pending,
         status=log.status,
         uploaded_at=log.uploaded_at,
     )
@@ -210,6 +232,7 @@ async def process(
         processed_at=None,
         error_message=None,
         processed_content=None,
+        ocr_pending=log.needs_ocr,
     )
 
 
@@ -230,6 +253,49 @@ async def _run_processing(log_id: int) -> None:
         if task is None:
             _mark_failed(db, log, "关联的任务已被删除")
             return
+
+        # md 转换：零 LLM，在选 provider / OCR 兜底之前分流。
+        # 扫描件 md 任务上传时也带 needs_ocr=True，由本分支自己走 MinerU，
+        # 不进下面那条"OCR 后还要调 LLM"的批改兜底路径
+        if task.output_format == "md":
+            await _run_md_conversion(db, log)
+            return
+
+        # 扫描件兜底：正文还在 MinerU 云端没取回来，先 OCR 写回再走 LLM。
+        # 放在选 provider 之前：OCR 失败时错误信息更直接（不用先查一圈模型）。
+        # parse_pdf_via_mineru 是同步阻塞（含轮询 sleep），必须丢线程池
+        if log.needs_ocr:
+            if not log.stored_filename:
+                _mark_failed(db, log, "扫描件落盘记录缺失，请重新上传")
+                return
+            stored_path = os.path.join(_resolve_dir(settings.upload_dir), log.stored_filename)
+            try:
+                with open(stored_path, "rb") as f:  # noqa: ASYNC230
+                    pdf_bytes = f.read()
+                result = await run_in_threadpool(
+                    parse_pdf_via_mineru, pdf_bytes, log.original_filename
+                )
+            except (MinerUError, OSError) as e:
+                _mark_failed(db, log, f"扫描件识别失败：{e}"[:2000])
+                return
+            except (httpx.HTTPError, httpx.InvalidURL) as e:
+                # 传输层异常（代理配置非法 / 连接中断等）文案对用户不可行动，
+                # 归一成 MinerU 口径；细节进日志供排查
+                logger.warning("MinerU 传输层异常 log_id=%s：%r", log.id, e)
+                _mark_failed(db, log, "扫描件识别失败：无法连接 MinerU 服务，请检查网络后重试")
+                return
+            plain = markdown_to_plain_text(result.markdown)
+            if not plain.strip():
+                _mark_failed(db, log, "扫描件识别结果为空，请确认文档内容清晰可辨")
+                return
+            log.original_content = plain
+            log.needs_ocr = False
+            db.commit()
+            # structured 留存是旁路：写盘失败只告警，不把已拿到的正文判成失败
+            save_structured(
+                result,
+                os.path.join(_resolve_dir(settings.output_dir), "mineru", str(log.id)),
+            )
 
         # 选 provider：任务指定 > 当前用户的默认 active（按 text 能力筛）
         try:
@@ -331,6 +397,68 @@ def _mark_failed(db: Session, log: OperationLog, message: str) -> None:
     log.error_message = message[:2000]
     # 时间列全站由 DB 时钟生成（uploaded_at 是 func.now()）。这里若用应用侧 now()，
     # 容器与宿主机的钟差会让 processed_at 反而早于 uploaded_at，耗时算出负数
+    log.processed_at = func.now()
+    db.commit()
+    db.refresh(log)
+
+
+async def _run_md_conversion(db: Session, log: OperationLog) -> None:
+    """
+    md 转换任务的后台处理：docx 走本地转换（免费），PDF 一律走 MinerU。
+
+    零 LLM：不选 provider、不写 llm_calls（同 MinerU/embedding 的成本边界）。
+    processed_content 存 markdown 原文（含表格与图片引用）；PDF 路径同时把
+    归一化纯文本写回 original_content，前端预览与批改路径同源。
+    """
+    if not log.stored_filename:
+        _mark_failed(db, log, "文件落盘记录缺失，请重新上传")
+        return
+    stored_path = os.path.join(_resolve_dir(settings.upload_dir), log.stored_filename)
+    try:
+        with open(stored_path, "rb") as f:  # noqa: ASYNC230
+            file_bytes = f.read()
+    except OSError as e:
+        _mark_failed(db, log, f"读取上传文件失败：{e}")
+        return
+
+    ext = os.path.splitext(log.stored_filename)[1].lower()
+    if ext == ".docx":
+        try:
+            markdown = await run_in_threadpool(docx_to_markdown, file_bytes)
+        except Exception as e:
+            _mark_failed(db, log, f"Word 转 Markdown 失败：{e}"[:2000])
+            return
+        if not markdown.strip():
+            _mark_failed(db, log, "文档没有可转换的正文内容")
+            return
+        log.processed_content = markdown
+    else:
+        # 上传白名单保证这里只剩 .pdf；文字型也走 MinerU——要的是版面→md，
+        # 不是纯文本（pymupdf 给不出标题层级/表格/图片引用）
+        try:
+            result = await run_in_threadpool(
+                parse_pdf_via_mineru, file_bytes, log.original_filename
+            )
+        except (MinerUError, OSError) as e:
+            _mark_failed(db, log, f"PDF 转 Markdown 失败：{e}"[:2000])
+            return
+        except (httpx.HTTPError, httpx.InvalidURL) as e:
+            logger.warning("MinerU 传输层异常 log_id=%s：%r", log.id, e)
+            _mark_failed(db, log, "PDF 转 Markdown 失败：无法连接 MinerU 服务，请检查网络后重试")
+            return
+        if not result.markdown.strip():
+            _mark_failed(db, log, "识别结果为空，请确认文档内容清晰可辨")
+            return
+        log.processed_content = result.markdown
+        log.original_content = markdown_to_plain_text(result.markdown)
+        # structured 留存是旁路（图片给下载 zip 与后续 PPT 带图用），写盘失败只告警
+        save_structured(
+            result,
+            os.path.join(_resolve_dir(settings.output_dir), "mineru", str(log.id)),
+        )
+
+    log.needs_ocr = False
+    log.status = LogStatus.DONE
     log.processed_at = func.now()
     db.commit()
     db.refresh(log)
@@ -584,7 +712,36 @@ async def process_status(
         spec_refs=deserialize_refs(log.structured_output) if graded else None,
         spec_note=read_spec_note(log.structured_output) if graded else None,
         progress=progress,
+        ocr_pending=bool(log.needs_ocr and log.status == LogStatus.PROCESSING),
+        original_content=log.original_content if done else None,
     )
+
+
+def _build_md_download(log: OperationLog, stem: str) -> tuple[io.BytesIO, str, str]:
+    """
+    拼 md 交付件（同步，调用方丢线程池）：有 MinerU 图片就打 zip，否则裸 .md。
+
+    zip 内布局 {stem}.md + images/xxx，与 full.md 里的相对图片引用一致，
+    解压后 md 渲染器能直接找到图。
+    """
+    md_text = log.processed_content or ""
+    img_dir = os.path.join(_resolve_dir(settings.output_dir), "mineru", str(log.id), "images")
+    images: dict[str, bytes] = {}
+    if os.path.isdir(img_dir):
+        for name in sorted(os.listdir(img_dir)):
+            path = os.path.join(img_dir, name)
+            if os.path.isfile(path):
+                with open(path, "rb") as f:
+                    images[name] = f.read()
+    if images:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(f"{stem}.md", md_text)
+            for name, data in images.items():
+                zf.writestr(f"images/{name}", data)
+        buf.seek(0)
+        return buf, f"转换_{stem}.zip", "application/zip"
+    return io.BytesIO(md_text.encode("utf-8")), f"转换_{stem}.md", "text/markdown; charset=utf-8"
 
 
 @router.get("/download/{log_id}")
@@ -610,8 +767,12 @@ async def download(
 
     stem = os.path.splitext(log.original_filename or "文档")[0]
 
-    # PPT 任务走 pptx 二进制；structured_output 必须是 ppt_outline 形态才能拼
-    if output_format == "pptx":
+    # md 转换任务：交付 markdown；MinerU 路径带图时打 zip（md + images/，
+    # 与 full.md 里的相对引用一致），无图直接给 .md
+    if output_format == "md":
+        buf, filename, media = await run_in_threadpool(_build_md_download, log, stem)
+    elif output_format == "pptx":
+        # PPT 任务走 pptx 二进制；structured_output 必须是 ppt_outline 形态才能拼
         outline = deserialize_outline(log.structured_output)
         if outline is None:
             raise HTTPException(400, "PPT 大纲缺失或不是 ppt_outline 形态，无法拼装")
@@ -649,7 +810,8 @@ async def download(
     from urllib.parse import quote
 
     disposition = (
-        f"attachment; filename=\"result.{output_format}\"; filename*=UTF-8''{quote(filename)}"
+        f'attachment; filename="result{os.path.splitext(filename)[1]}"; '
+        f"filename*=UTF-8''{quote(filename)}"
     )
     headers = {"Content-Disposition": disposition}
 

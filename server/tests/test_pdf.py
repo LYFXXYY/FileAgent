@@ -9,6 +9,7 @@ import pytest
 
 from services.pdf import (
     PdfError,
+    ScannedPdfError,
     _is_page_number,
     _join_block_lines,
     _merge_blocks,
@@ -178,6 +179,35 @@ def test_extract_rejects_thin_text_layer_scanned_pdf():
     """整页是图片、只被 OCR 出一层图注的扫描件：有文字层也不等于能处理"""
     with pytest.raises(PdfError, match="过薄"):
         extract_text_from_pdf(_thin_pdf(3, with_images=True))
+
+
+# ---------- 扫描件分类（MinerU 兜底的分流依据） ----------
+def test_scanned_rejections_are_scanned_subclass():
+    """两条扫描件判据都必须抛 ScannedPdfError：上传路由靠它决定放行走 OCR，
+    混用父类 PdfError 会让扫描件被当普通损坏拒收"""
+    doc = pymupdf.open()
+    doc.new_page()
+    no_layer = doc.tobytes()
+    doc.close()
+    with pytest.raises(ScannedPdfError):
+        extract_text_from_pdf(no_layer)
+    with pytest.raises(ScannedPdfError):
+        extract_text_from_pdf(_thin_pdf(3, with_images=True))
+
+
+def test_corrupt_and_encrypted_are_not_scanned():
+    """损坏 / 加密不是扫描件：OCR 救不了它们，必须继续走拒收而不是白烧 MinerU 配额"""
+    with pytest.raises(PdfError) as e:
+        extract_text_from_pdf(b"definitely not a pdf")
+    assert not isinstance(e.value, ScannedPdfError)
+
+    doc = pymupdf.open()
+    doc.new_page().insert_text((72, 72), "secret body text")
+    data = doc.tobytes(encryption=pymupdf.PDF_ENCRYPT_AES_256, user_pw="pw", owner_pw="pw")
+    doc.close()
+    with pytest.raises(PdfError) as e:
+        extract_text_from_pdf(data)
+    assert not isinstance(e.value, ScannedPdfError)
 
 
 def test_thin_text_without_images_is_not_rejected():

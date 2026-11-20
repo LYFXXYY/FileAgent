@@ -81,7 +81,7 @@ export type ProviderUpdatePayload = Partial<ProviderCreatePayload & { is_active:
 
 // ========== 任务 ==========
 // 与后端 schemas/task.py 的 OUTPUT_FORMATS 同步：加值时两处一起改
-export type OutputFormat = 'docx' | 'pptx'
+export type OutputFormat = 'docx' | 'pptx' | 'md'
 
 export interface Task {
   id: number
@@ -113,6 +113,8 @@ export interface UploadResponse {
   original_filename: string
   content_length: number
   extracted_text: string
+  /** true = 扫描件已受理，正文将在处理时由 MinerU 识别；此时 extracted_text 为空是预期 */
+  ocr_pending?: boolean
   status: 'pending' | 'processing' | 'done' | 'failed'
   uploaded_at: string
 }
@@ -159,6 +161,10 @@ export interface ProcessResponse {
   spec_note?: string | null
   /** 长文档分块进度；短文、非批改任务、以及还没切块时为 null */
   progress?: ChunkProgress | null
+  /** true = 扫描件正在 MinerU 识别（还没进 LLM） */
+  ocr_pending?: boolean
+  /** 原文正文，仅 status 接口 done 时回填：扫描件上传时没有预览文本，高亮定位靠它补上 */
+  original_content?: string | null
 }
 
 /** 一条被引用的规范条款 */

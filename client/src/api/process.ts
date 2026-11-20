@@ -27,9 +27,9 @@ export const processApi = {
   },
 
   /**
-   * 下载结果 .docx
+   * 下载结果文件（docx / pptx / md / zip，由任务的结果格式决定）
    * 用 responseType: 'blob' 告诉 axios 期望的是二进制文件，不是 JSON
-   * 前端拿到后走 URL.createObjectURL 触发浏览器下载
+   * 前端拿到后走 URL.createObjectURL 触发浏览器下载，文件名取 Content-Disposition
    */
   download(logId: number) {
     return http.get<Blob>(`/download/${logId}`, { responseType: 'blob' })

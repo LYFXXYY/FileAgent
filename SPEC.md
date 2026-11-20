@@ -1447,6 +1447,80 @@ s5.8 ✅ 文档收口（s5.4 推后续）
 - 引用条款点击回跳规范原文（要新增规范条文查看界面，成本大于收益）
 - `format_tier` 落进 `llm_calls`（改表，做前要先问）
 
+### 9.15 MinerU 扫描件 OCR 兜底交付情况（2026-11-20，A–E 全部落地）
+
+**范围**：扫描件 PDF（无文字层 / 薄文字层两条判据）在配了 `MINERU_TOKEN` 时走官方云 v4 batch 解析，OCR 文本写回后照常进批改链路。**文字型 PDF / docx 不受影响**；表格不进批改正文（用户拍板）；本地 OCR 推理不做。这是 §9.12 预留的 OCR 扩展口子的第一次兑现，也是拓展路线"① md 转换 → ② PPT 带图"的前置地基（structured 产物给它们消费）。
+
+【五个切片】
+
+| 切片 | 内容 | 关键取舍 |
+|---|---|---|
+| A | `services/mineru.py` 传输层 + `config.py` 五字段 + `.env` 空位 | 不碰 DB、不重试、不降级、不写 `llm_calls`（按页计费无 token，同 embedding 边界）；token 由用户自己填，不经助手 |
+| B | `services/ocr.py` 双轨：`markdown_to_plain_text` + `save_structured` | plain_text 守 §3.8 同构不变式；表格（`\|` 行 + HTML 表格行）/图片不进正文；structured 落盘是旁路，OSError 只告警 |
+| C | `ScannedPdfError` 子类 + `needs_ocr`/`stored_filename` 两列 + 上传/处理分流 | OCR 放处理阶段（上传是同步预览，塞不下分钟级异步流程）；不加状态枚举；`stored_filename` 顺带补上磁盘副本不可回溯的历史缺口 |
+| D | 前端 `ocr_pending` 提示 + status 回填 `original_content` | 扫描件不显示空白预览；高亮底本由 `applyResult` 在 extracted_text 为空时补上 |
+| E | 单测 32 条 + 假 MinerU 端点 19002 + `test_e2e_mineru.py` 41 项 | e2e 后端由脚本自起（`run_backend.py` 新增 `FA_PORT`），注入假 MinerU 环境而不改日常 `.env`；全程零真实费用 |
+
+【协议要点（2026-11-20 核实官方云 v4）】
+POST `/file-urls/batch`（Bearer + `files:[{name,is_ocr:true}]`）→ PUT 预签名地址（**不带 Content-Type**，签名不含它）→ 服务端自动提交 → 轮询 `/extract-results/batch/{id}`（waiting-file/pending/running/done/failed）→ 下载 `full_zip_url`（不带 Authorization）→ zip 内 full.md / content_list.json / images/。业务错误是 HTTP 200 + code 非 0，两层都要查；解包只取 basename，`..` 条目跳过（zip-slip）。
+
+【被实现澄清的旧记载】
+- §9.12 的 `extract_text_from_pdf(fallback_to_ocr=False)` 参数**没有加**：OCR 兜底落在路由层（受理 `needs_ocr` + 处理阶段调 MinerU），提取器签名不变、自己不偷跑——与"由调用方决定要不要 OCR"的语义一致。
+- "operation_logs 没有落盘名列"已不成立：`stored_filename`（nullable）让处理阶段能读回 PDF 字节，e2e 清理也能精确删本次落盘文件；历史行为 NULL，OCR 路径遇 NULL 直接 failed 并提示重新上传。
+
+【门禁基线（2026-11-20）】
+
+| 项 | 数字 | 增量来源 |
+|---|---|---|
+| `pytest` | **322 passed** | 290 → +15 MinerU 传输层 + 15 OCR 归一化与落盘 + 2 扫描件分类 |
+| `test_e2e_mineru.py` | **41/0（新增）** | 两条扫描件判据受理→OCR 写回→定位照常→structured 三件套→文字型不触发→failed 文案→计量边界 |
+| `test_e2e.py` / `test_e2e_structural.py` | 31/0 / 60/0 | 新代码上复跑无回归 |
+| `npm run build` / `npm test` | 通过 / 33 passed | ocr_pending 提示与原文回填 |
+| `ruff check / format` | 全绿 / 96 files | — |
+| `uv lock` | 84 包 | 无新依赖（复用 httpx） |
+
+【显式没做 / 待用户】
+- **真实 API 冒烟等用户填 `MINERU_TOKEN`**：合成扫描件走假端点已全绿，真实云端的格式/配额表现未验证；绝不拿用户真实文档做云端测试。
+- md 转换任务（①）：动手前先用真实 token 核实云 API 支持的输入格式与档位；docx→md 走本地免费方案，不上 MinerU。
+- PPT 带图（②）：消费本次留存的 structured 图片，填 `build_pptx(image_refs=…)` 口子。
+- 表格进正文、扫描件入规范库、PDF 原生批注：按需另议，不在本次范围。
+
+### 9.16 ① md 转换任务交付情况（2026-11-20，零 LLM）
+
+**范围**：新增 `output_format='md'` 任务，把上传文档转成 Markdown 下载，**全程不调大模型**。docx→md 走本地 python-docx 转换（免费）；PDF→md 一律走 MinerU 版面识别（文字型 PDF 也走，因为要标题层级/表格/图片引用，本地 blocks 提取给不出 md 结构）。这是拓展路线"① md 转换 → ② PPT 带图"的第一站，复用 §9.15 的 MinerU 传输层与 structured 产物。
+
+【设计决策】
+
+| 点 | 取舍 |
+|---|---|
+| md 与批改互斥 | md 没有修订文做不了红字 diff。创建 pydantic 422、更新按合并值 400；前端 watch 选中 md 即强制归位并 disable 批改/模型/Prompt |
+| 零 LLM 硬不变式 | 不解析 provider、不写 `llm_calls`、`provider_name=NULL`；`_run_md_conversion` 独立于 LLM 分支 |
+| 正文双轨 | `processed_content`=markdown 原文；PDF 路径 `original_content`=`markdown_to_plain_text`，docx 路径保持上传纯文本不动 |
+| 下载形态 | 有图→zip（`{stem}.md`+`images/`），无图→纯 `.md`（text/markdown）；文件名 RFC 5987，前端从 Content-Disposition 解析 |
+| PDF 没配 token | 上传即 400 fail-fast（docx 不需要 token 照常受理） |
+
+【真实云端核实（2026-11-20，用户自填 token）】
+- 云 v4 zip 内 content_list 带 **UUID 前缀**（`{uuid}_content_list.json` / `_v2.json`），md 是裸 `full.md`，图在 `images/{sha256}.jpg`。`_unzip_result` 改后缀匹配 + v2 优先 + v2 损坏回落 v1；假端点 `test_mineru_server.py` 已镜像这套命名。
+- 合成 2 页扫描件全链路冒烟 **21/21**（59s）：OCR 写回 + 批改定位 100% + structured 三件套落盘 + 计量只有 grading 无 MinerU 行。
+- 浏览器走查：docx→md（本地 4s，标题/表格转 md，文件名 `转换_sample.md`）、PDF→md（真实 MinerU，纯 .md 无图）均 done；扫描件上传提示"属扫描件，正文将在处理时由 MinerU 识别"正确。**只发合成件**。
+- 观察项：MinerU 对拉丁字符串可能插空格（"P DF 转 M ar k d o w n"，中文段落干净），是云端识别特性，管道如实透传，非缺陷。
+
+【门禁基线（2026-11-20）】
+
+| 项 | 数字 | 增量来源 |
+|---|---|---|
+| `pytest` | **363 passed, 1 skipped** | 322 → +10 docx→md + 20 md 路由 + 4 schema 互斥 + 4 真实 zip 命名 + 5 NO_PROXY；skip=win32 测不了小写 no_proxy 键 |
+| `test_e2e_mineru.py` | **67/0** | 41 → +26（第 12–15 节：md 互斥 / docx→md / PDF→md / 零 LLM） |
+| `test_e2e.py` / `structural` / `ppt` / `rag` | 31/0 / 60/0 / 28/0 / 46/0 | 新代码上复跑无回归 |
+| `npm run build` / `npm test` | 通过 / 33 passed | Tasks md 约束 + Home md 文案/下载 |
+| `ruff check / format` | 全绿 / 100 files | — |
+| `uv lock` | 84 包 | 无新依赖 |
+
+【显式没做 / 待用户】
+- PPT 带图（②）：消费 MinerU 的 images/ 产物，填 `build_pptx(image_refs=…)` 口子（§3.11 签名已留）。
+- md 转换的表格/图片进批改正文、扫描件入规范库：不在本次范围。
+- 真实文档的云端转换：绝不拿用户真实文档做云端测试，走查只用合成件。
+
 ## 10. 缺陷修复总结
 
 
@@ -1614,6 +1688,13 @@ LONGDOC_CHUNK_CHARS=6000
 LONGDOC_ENABLED=true
 CHECKPOINT_PATH=checkpoints/grading.sqlite3
 
+# MinerU 扫描件 OCR 兜底（2026-11-20，见 §9.15）
+MINERU_TOKEN=
+MINERU_BASE_URL=https://mineru.net/api/v4
+MINERU_POLL_INTERVAL=3
+MINERU_MAX_WAIT=600
+MINERU_HTTP_TIMEOUT=60
+
 LOG_LEVEL=INFO
 ```
 
@@ -1624,7 +1705,8 @@ LOG_LEVEL=INFO
 > `JWT_EXPIRE_HOURS` 文档口径是 2（也是 `config.py` 的默认值），本机 `.env` 可能为了开发方便设成 24。`.env` 不入库，以本机为准。
 >
 > **分块批改口径**：`LONGDOC_CHUNK_CHARS` 是每块字符预算（中文约 1 字 ≈ 1 token），整篇不超过它就不进图；`LONGDOC_ENABLED=false` 把长文档也压回单发路径，用来跟分块结果做 A/B（评测台的 `--prompt-file` 只管提示词，切不切块得靠这个开关）。`CHECKPOINT_PATH` 是图状态文件，按块缓存自动用同目录的 `.chunks` 兄弟文件——两个连接写同一个 sqlite 会撞库锁。两者都在 `server/checkpoints/`，已 gitignore，**只增不自缩**，属定期清理项。
-
+>
+> **MinerU 口径**：`MINERU_TOKEN` 留空 = 功能关闭，扫描件照旧 400（官方云 token 在 mineru.net/apiManage 申请，**有效期 90 天**，过期表现为 HTTP 200 + 业务码报错）。`MINERU_MAX_WAIT` 是单份文档的轮询总预算，超时落 failed 可重试；`MINERU_POLL_INTERVAL` 是轮询间隔。真实端点在境外，client 是 `trust_env=True`（要能走系统代理），与 embedding 的 `trust_env=False` 刻意不同。
 
 ---
 

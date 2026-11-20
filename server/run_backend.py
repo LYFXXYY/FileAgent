@@ -30,6 +30,7 @@ psycopg3 异步模式默认 `connect_timeout=None`，Windows 上 TCP 握手会�
 """
 
 import asyncio
+import os
 import sys
 
 
@@ -59,6 +60,8 @@ if __name__ == "__main__":
     uvicorn.run(
         "main:app",
         host=["127.0.0.1", "::1"],
-        port=8000,
+        # FA_PORT 给 e2e 用：test_e2e_mineru.py 要带 MinerU 环境变量另起一个后端，
+        # 不占用日常开发的 8000
+        port=int(os.environ.get("FA_PORT", "8000")),
         log_level="info",
     )

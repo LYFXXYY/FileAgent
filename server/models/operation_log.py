@@ -66,6 +66,9 @@ class OperationLog(Base):
 
     # ---------- 文件信息 ----------
     original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    # 落盘名（uuid4().hex + ext）。历史行为 NULL（旧数据不可回溯）；
+    # 扫描件兜底要靠它找回上传的 PDF，新上传一律记录
+    stored_filename: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     # ---------- 正文内容 ----------
     # 权威副本在库里，磁盘文件只是审计留存；diff 要靠 original_content 逐字匹配定位
@@ -74,6 +77,11 @@ class OperationLog(Base):
     # 结构化批改的问题清单 JSON，仅批改任务写入。
     # NULL = 非批改任务或历史数据；有值但 degraded=true = 模型没按格式出货，已退回自由文本
     structured_output: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # 扫描件兜底标记：上传时判定为扫描件且配置了 MinerU，正文留 NULL，
+    # 处理阶段先跑 OCR 写回 original_content 再走 LLM。成功后置回 False，
+    # 失败重试时仍为 True → 重新 OCR（解析幂等，重跑比留半成品便宜）
+    needs_ocr: Mapped[bool] = mapped_column(default=False, nullable=False)
 
     # ---------- 时间戳 ----------
     uploaded_at: Mapped[datetime] = mapped_column(

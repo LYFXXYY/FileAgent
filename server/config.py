@@ -17,6 +17,26 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENV_FILE = os.path.join(BASE_DIR, ".env")
 
 
+def normalize_no_proxy_env() -> list[str]:
+    """
+    摘掉 NO_PROXY 里的裸 [::1]：httpx 解析它时抛 InvalidURL: Invalid port，
+    所有 trust_env=True 的客户端（MinerU / 走系统代理的 LLM）构造即炸。
+    本机 NO_PROXY 同时含 ::1 与 [::1]，去掉带括号的那份不改变豁免语义。
+    只改进程内环境变量，不动系统设置。返回被改过的键名（供启动日志用）。
+    """
+    changed = []
+    for key in ("NO_PROXY", "no_proxy"):
+        value = os.environ.get(key)
+        if not value:
+            continue
+        entries = [e.strip() for e in value.split(",")]
+        cleaned = [e for e in entries if e and e != "[::1]"]
+        if len(cleaned) != len([e for e in entries if e]):
+            os.environ[key] = ",".join(cleaned)
+            changed.append(key)
+    return changed
+
+
 class Settings(BaseSettings):
     """
     配置类 —— 字段名和 .env 的 key 对应（大小写不敏感）
@@ -131,6 +151,17 @@ class Settings(BaseSettings):
     ppt_render_dpi: int = 100
     # soffice 单次转换超时（秒）。冷启动 + 中文字体加载实测 3–8s/份，留足余量
     ppt_render_timeout: float = 90.0
+
+    # ---------- MinerU 扫描件兜底 ----------
+    # 官方云 API token（mineru.net/apiManage 申请，有效期 90 天）。
+    # 留空 = 功能关闭：扫描件照旧 400 拒收，行为与接入前逐字一致
+    mineru_token: str = ""
+    mineru_base_url: str = "https://mineru.net/api/v4"
+    # 轮询间隔与最长等待（秒）。云 API 是异步任务制，排队 + 解析可达分钟级
+    mineru_poll_interval: float = 3.0
+    mineru_max_wait: float = 600.0
+    # 单次 HTTP 请求超时（秒）：上传/下载 zip 用，与轮询总时长是两回事
+    mineru_http_timeout: float = 60.0
 
     # ---------- 日志 ----------
     # root logger 级别。排查重试/并发问题时调成 DEBUG

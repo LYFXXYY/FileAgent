@@ -6,7 +6,7 @@
  * - v-model:dialogVisible 用 Element Plus 的双向绑定语法
  * - template #default="{ row }" 是插槽语法，从 el-table-column 拿到当前行数据
  */
-import { onActivated, onMounted, reactive, ref } from 'vue'
+import { computed, onActivated, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 
 import { extractErrorMessage } from '@/api/client'
@@ -29,6 +29,7 @@ interface PresetTask {
   description: string
   prompt_template: string
   is_grading: boolean
+  output_format: OutputFormat
 }
 
 const PRESET_TASKS: PresetTask[] = [
@@ -39,6 +40,7 @@ const PRESET_TASKS: PresetTask[] = [
     prompt_template:
       '你是一位资深语文老师，请批改下面的学生作文。要求：\n1. 指出错别字与标点错误；\n2. 指出语法和用词不当之处；\n3. 分析文章结构是否清晰；\n4. 给出总体评价与具体修改建议。\n\n作文内容：\n{{content}}',
     is_grading: true,
+    output_format: 'docx',
   },
   {
     name: '文本润色',
@@ -47,6 +49,7 @@ const PRESET_TASKS: PresetTask[] = [
     prompt_template:
       '请对以下文本进行润色，使表达更流畅、更专业、更自然。要求保留原文的核心意思、语气和结构，只优化措辞与句式。\n\n原文：\n{{content}}',
     is_grading: false,
+    output_format: 'docx',
   },
   {
     name: '内容摘要',
@@ -54,6 +57,7 @@ const PRESET_TASKS: PresetTask[] = [
     prompt_template:
       '请阅读以下文档，提炼核心观点与关键信息，生成一份结构清晰、重点突出、逻辑通顺的内容摘要。\n\n文档内容：\n{{content}}',
     is_grading: false,
+    output_format: 'docx',
   },
   {
     name: '中英翻译',
@@ -61,6 +65,7 @@ const PRESET_TASKS: PresetTask[] = [
     prompt_template:
       '请将以下中文文档翻译成英文。要求表达准确、专业、通顺，并尽量保留原文的段落结构。\n\n中文原文：\n{{content}}',
     is_grading: false,
+    output_format: 'docx',
   },
   {
     name: '关键词提取',
@@ -68,6 +73,15 @@ const PRESET_TASKS: PresetTask[] = [
     prompt_template:
       '请从以下文档中提取最重要的关键词与主题词，按重要程度排序并简要说明每个关键词的含义。\n\n文档内容：\n{{content}}',
     is_grading: false,
+    output_format: 'docx',
+  },
+  {
+    name: '文档转 Markdown',
+    description:
+      '把 Word / PDF 转成 Markdown，不调用大模型：Word 本地免费转换；PDF 走 MinerU 版面识别，保留标题层级、表格与图片引用，带图时打包 zip（md + images/）下载。',
+    prompt_template: '{{content}}',
+    is_grading: false,
+    output_format: 'md',
   },
 ]
 
@@ -101,6 +115,31 @@ const rules: FormRules = {
   name: [{ required: true, message: '请输入任务名称', trigger: 'blur' }],
   prompt_template: [{ required: true, message: '请输入 Prompt 模板', trigger: 'blur' }],
 }
+
+// md 转换零 LLM：批改、模型、Prompt 都不参与。选中 md 即强制归位，
+// 与后端 schemas/task.py 的互斥校验同向，避免用户填完才被 422 打回
+watch(
+  () => form.output_format,
+  (fmt) => {
+    if (fmt === 'md') {
+      form.is_grading = false
+      form.provider_id = null
+      form.prompt_template = '{{content}}'
+    }
+  },
+)
+
+const isMd = computed(() => form.output_format === 'md')
+
+const formatHint = computed(() => {
+  if (form.output_format === 'md') {
+    return '零大模型：Word 本地免费转；PDF 走 MinerU 版面识别（需服务端配置 MINERU_TOKEN）'
+  }
+  if (form.output_format === 'pptx') {
+    return 'PPT 走"大纲 → 拼装 → 视觉批评"图，目前仅文字型 PDF 输入'
+  }
+  return '批改类下载红字 diff 标注，其余任务输出处理后的 Word'
+})
 
 async function load() {
   loading.value = true
@@ -168,11 +207,12 @@ function onTemplateChange(index: number | string | null | undefined) {
   const tpl = PRESET_TASKS[index as number]
   if (!tpl) return
 
-  // 一键填充：名称 + 只读说明 + Prompt 模板 + 是否批改
+  // 一键填充：名称 + 只读说明 + Prompt 模板 + 是否批改 + 结果格式
   form.name = tpl.name
   form.description = tpl.description
   form.prompt_template = tpl.prompt_template
   form.is_grading = tpl.is_grading
+  form.output_format = tpl.output_format
   // 换模板后把说明切回「只读」，避免用户误改开发者预设内容
   descriptionEditable.value = false
 }
@@ -290,12 +330,16 @@ function providerName(id: number | null): string {
             <el-tag v-if="row.output_format === 'pptx'" type="primary" size="small" effect="plain">
               .pptx
             </el-tag>
+            <el-tag v-else-if="row.output_format === 'md'" type="primary" size="small" effect="plain">
+              .md
+            </el-tag>
             <span v-else class="text-muted">.docx</span>
           </template>
         </el-table-column>
         <el-table-column label="使用模型" width="140">
           <template #default="{ row }">
-            <span class="model-name">{{ providerName(row.provider_id) }}</span>
+            <span v-if="row.output_format === 'md'" class="text-muted">无需模型</span>
+            <span v-else class="model-name">{{ providerName(row.provider_id) }}</span>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="140" fixed="right">
@@ -377,11 +421,19 @@ function providerName(id: number | null): string {
             v-model="form.prompt_template"
             type="textarea"
             :rows="6"
+            :disabled="isMd"
             placeholder="用 {{ '{{content}}' }} 作为文档内容占位符"
           />
+          <p v-if="isMd" class="field-hint">md 转换不调用模型，Prompt 不参与处理（已自动占位，无需填写）。</p>
         </el-form-item>
         <el-form-item label="使用模型">
-          <el-select v-model="form.provider_id" clearable placeholder="默认使用第一个启用的提供商" style="width: 100%">
+          <el-select
+            v-model="form.provider_id"
+            clearable
+            :disabled="isMd"
+            placeholder="默认使用第一个启用的提供商"
+            style="width: 100%"
+          >
             <el-option
               v-for="p in providers"
               :key="p.id"
@@ -389,21 +441,21 @@ function providerName(id: number | null): string {
               :value="p.id"
             />
           </el-select>
+          <p v-if="isMd" class="field-hint">md 转换零大模型外呼，不需要选择模型。</p>
         </el-form-item>
         <el-form-item label="批改类任务">
-          <el-switch v-model="form.is_grading" />
+          <el-switch v-model="form.is_grading" :disabled="isMd" />
           <span class="text-muted" style="margin-left: 8px">
-            开启后下载结果会用红字标注 diff
+            {{ isMd ? 'md 转换没有修订文，不能做红字 diff 批改' : '开启后下载结果会用红字标注 diff' }}
           </span>
         </el-form-item>
         <el-form-item label="结果格式">
           <el-radio-group v-model="form.output_format">
             <el-radio value="docx">Word (.docx)</el-radio>
             <el-radio value="pptx">PPT (.pptx)</el-radio>
+            <el-radio value="md">Markdown (.md)</el-radio>
           </el-radio-group>
-          <span class="text-muted" style="margin-left: 8px">
-            PPT 走阶段 5 的"大纲 → 拼装 → 视觉批评"图，目前仅文字型 PDF 输入
-          </span>
+          <p class="field-hint">{{ formatHint }}</p>
         </el-form-item>
       </el-form>
       <template #footer>

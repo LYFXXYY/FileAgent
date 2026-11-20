@@ -27,7 +27,7 @@ from sqlalchemy import func
 import database
 import models  # noqa: F401    （导入触发 models/__init__.py 里的所有 ORM 类注册）
 from api.v1 import api_router  # 汇总好的 v1 路由
-from config import get_settings
+from config import get_settings, normalize_no_proxy_env
 from services.llm import LLMError, close_client, get_client
 
 logger = logging.getLogger("fileagent")
@@ -53,6 +53,11 @@ def _setup_logging() -> None:
 
 
 _setup_logging()
+
+# trust_env=True 的 httpx 客户端构造前必须清掉裸 [::1]（见 config 函数注释）。
+# mineru._get_client 也会调一次（独立脚本不经过 main），幂等无副作用
+for _key in normalize_no_proxy_env():
+    logger.info("已从 %s 移除裸 [::1]（httpx 无法解析）", _key)
 
 
 @asynccontextmanager

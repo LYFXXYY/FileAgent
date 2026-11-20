@@ -18,6 +18,9 @@ class UploadResponse(BaseModel):
     original_filename: str
     content_length: int
     extracted_text: str
+    # true = 扫描件已受理但正文还没提取：处理阶段先走 MinerU OCR。
+    # 此时 extracted_text 为空是预期行为，前端要显示提示而不是空白预览
+    ocr_pending: bool = False
     status: LogStatus
     uploaded_at: datetime
 
@@ -53,6 +56,12 @@ class ProcessResponse(BaseModel):
     grading_degraded: bool = False
     # 分块进度。非分块任务（短文、摘要类）恒为 None
     progress: ChunkProgressResponse | None = None
+    # true = 扫描件正在 MinerU 识别（needs_ocr 还没写回）。与 progress 互不冲突：
+    # OCR 阶段还没进 LLM，分块进度自然是 None
+    ocr_pending: bool = False
+    # 原文正文。只在 status 接口 done 时回填：扫描件上传时 extracted_text 为空，
+    # 前端高亮定位需要 OCR 写回后的原文；普通上传前端已有预览，不必重复传
+    original_content: str | None = None
     # 本次批改真正进过 prompt 的规范条款（阶段 6）。None = 非批改/历史数据；
     # 空列表 = 没用规范库（没建库、开关关掉、或没召回相关条款）
     spec_refs: list[dict] | None = None

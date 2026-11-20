@@ -62,6 +62,29 @@ const activeProviderCount = computed(() =>
   providers.value.filter((p) => p.is_active).length
 )
 
+// 当前选中的任务：md 转换零模型，提示文案与下载按钮都要按它分流
+const selectedTask = computed(
+  () => tasks.value.find((t) => t.id === selectedTaskId.value) ?? null
+)
+const isMdTask = computed(() => selectedTask.value?.output_format === 'md')
+
+const downloadLabel = computed(() => {
+  const fmt = selectedTask.value?.output_format
+  if (fmt === 'md') return '下载 Markdown'
+  if (fmt === 'pptx') return '下载结果 .pptx'
+  return '下载结果 .docx'
+})
+
+const processHint = computed(() => {
+  if (isMdTask.value) {
+    return 'Word 本地转换很快；PDF 走 MinerU 版面识别，可能需要 1–3 分钟'
+  }
+  if (uploadResult.value?.ocr_pending) {
+    return '扫描件识别 + 模型处理，可能需要几分钟'
+  }
+  return '处理时间取决于文档长度和模型响应速度，可能需要几十秒'
+})
+
 // ---------- 轮询机制 ----------
 // 处理中如果浏览器刷新或 axios 超时，后端可能仍在处理
 // 通过定期查询 status 接口，完成后自动推进到下载步骤
@@ -141,12 +164,23 @@ function applyResult(resp: {
   grading_degraded: boolean
   spec_refs?: SpecRef[] | null
   spec_note?: string | null
+  original_content?: string | null
 }) {
   processedContent.value = resp.processed_content
   gradingIssues.value = resp.issues
   gradingDegraded.value = resp.grading_degraded
   specRefs.value = resp.spec_refs ?? null
   specNote.value = resp.spec_note ?? null
+  // 扫描件上传时没有预览文本，OCR 写回后由 status 响应补上原文，
+  // 否则 GradingResult 的原文高亮没有底本。普通上传已有预览，不重复覆盖
+  if (resp.original_content && uploadResult.value && !uploadResult.value.extracted_text) {
+    uploadResult.value = {
+      ...uploadResult.value,
+      extracted_text: resp.original_content,
+      content_length: resp.original_content.length,
+      ocr_pending: false,
+    }
+  }
 }
 
 // 分块进度的唯一铺值入口（和 applyResult 同理：三处状态读取都要走它，别各自赋值）
@@ -324,11 +358,19 @@ async function doDownload() {
   downloading.value = true
   try {
     const resp = await processApi.download(uploadResult.value.log_id)
+    // 文件名以服务端 Content-Disposition 为准（批改_x.docx / 演示_x.pptx /
+    // 转换_x.md 或 .zip）。自己拼 original_filename 会把 PDF 输入的结果
+    // 命名成 .pdf 的 docx，md 任务更是连扩展名都对不上
+    const disp = resp.headers['content-disposition'] as string | undefined
+    const match = disp?.match(/filename\*=UTF-8''([^;]+)/i)
+    const filename = match
+      ? decodeURIComponent(match[1])
+      : `result_${uploadResult.value.original_filename}`
     // 浏览器 blob 下载：造 URL + 挂 <a> + 触发点击
     const url = URL.createObjectURL(resp.data)
     const a = document.createElement('a')
     a.href = url
-    a.download = `result_${uploadResult.value.original_filename}`
+    a.download = filename
     a.click()
     URL.revokeObjectURL(url) // 释放内存
   } catch (err) {
@@ -452,7 +494,7 @@ function reset() {
             还没有任务，先去 <router-link to="/tasks">任务管理</router-link> 创建一个
           </p>
           <el-alert
-            v-if="tasks.length > 0 && activeProviderCount === 0"
+            v-if="tasks.length > 0 && activeProviderCount === 0 && !isMdTask"
             type="warning"
             :closable="false"
             show-icon
@@ -476,7 +518,7 @@ function reset() {
             </svg>
           </div>
           <h3>上传文档</h3>
-          <p class="card-desc">当前支持 .docx / .pdf 文字型文档，拖拽或点击上传</p>
+          <p class="card-desc">支持 .docx / .pdf 文档，扫描件 PDF 处理时由 MinerU 识别（需服务端配置）</p>
           <el-upload
             drag
             accept=".docx,.pdf"
@@ -530,10 +572,9 @@ function reset() {
               <path d="M2 12L12 17L22 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
           </div>
-          <h3>调用 LLM 处理</h3>
+          <h3>{{ isMdTask ? '转换处理' : '调用 LLM 处理' }}</h3>
           <p class="card-desc">
-            文件 <code>{{ uploadResult?.original_filename }}</code> 已上传，
-            提取到 {{ uploadResult?.content_length }} 字符
+            文件 <code>{{ uploadResult?.original_filename }}</code> 已上传<template v-if="uploadResult?.ocr_pending">，属扫描件，正文将在处理时由 MinerU 识别</template><template v-else>，提取到 {{ uploadResult?.content_length }} 字符</template>
           </p>
           <!-- 提取文本预览 -->
           <el-collapse v-if="uploadResult?.extracted_text" style="margin-bottom: 16px; text-align: left;">
@@ -547,7 +588,7 @@ function reset() {
               <path d="M12 8V12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
               <path d="M12 16H12.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
             </svg>
-            处理时间取决于文档长度和模型响应速度，可能需要几十秒
+            {{ processHint }}
           </p>
           <el-alert
             v-if="processingError"
@@ -617,7 +658,7 @@ function reset() {
                 <path d="M7 10L12 15L17 10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                 <path d="M12 15V3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
               </svg>
-              下载结果 .docx
+              {{ downloadLabel }}
             </el-button>
           </div>
         </div>
