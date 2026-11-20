@@ -28,8 +28,8 @@ class LoginRequest(BaseModel):
 class TokenResponse(BaseModel):
     """登录成功返回的 JWT + 身份标记
 
-    role / can_use_default 随登录一起下发：前端靠 role 决定要不要显示管理入口，
-    靠 can_use_default 决定 Providers 页是否展示"官方"条目——不用再开 /auth/me。
+    role / can_use_default 随登录一起下发，供前端首屏展示；启动时 /auth/me
+    刷新一次快照，管理员改授权后无需重登。
     """
 
     access_token: str

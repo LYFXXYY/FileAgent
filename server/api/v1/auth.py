@@ -68,9 +68,8 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
         )
 
     token = create_access_token(user.id, user.username)
-    # role / can_use_default 随登录下发：前端据此决定管理入口与"官方"条目的展示，
-    # 省一个 /auth/me 往返。这两个值改了要重新登录才生效——可接受，
-    # 因为变更授权本来就是低频管理操作。
+    # role / can_use_default 随登录下发，供前端首屏展示；启动时 /auth/me 再刷一次
+    # 快照（见 me()），管理员改授权后无需重登。
     return TokenResponse(
         access_token=token,
         username=user.username,

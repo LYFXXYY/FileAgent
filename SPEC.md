@@ -1553,6 +1553,43 @@ s5.8 ✅ 文档收口（s5.4 推后续）
 
 **回归验证（本轮）**：pytest 139 passed；`test_e2e_structural.py` 52/52（后端需带 `LONGDOC_CHUNK_CHARS=60`）；`test_e2e.py` 33/33；ruff check / format 全绿；`uv lock --check` 一致（减肥后 75 包）；`npm run build` 通过。
 
+### 第六轮：阶段 4 ~ 6（Postgres 基建、PPT 流水线、规范库 RAG，2026-11-16 ~ 11-20）
+
+只列缺陷本体与解法，机理见 9.10 / 9.12 / 9.13 / 9.14；防复发约定已沉淀进 AGENTS.md §2 / §3 / §4。
+
+| ID | 优先级 | 问题（含根因） | 修复方案 | 验证 |
+|---|---|---|---|---|
+| p1 | 高 | Windows 上分块批改跑到第 10 块必炸 "Psycopg cannot use the 'ProactorEventLoop'"：uvicorn 在 win32 非子进程模式硬编码 Proactor，与 psycopg3 异步（AsyncPostgresSaver/Store）冲突，只切 policy 压不住 | 统一入口 `run_backend.py`：先切 `WindowsSelectorEventLoopPolicy` 再 monkey-patch uvicorn 的 `asyncio_loop_factory`；与 `--reload` 互斥（reload 走子进程入口不重跑补丁） | `test_e2e_structural.py` 第 10 节 60/0 |
+| p2 | 高 | 每个请求凭空慢 ~220ms：只绑 `127.0.0.1` 时浏览器与 Vite 代理解析 `localhost` 先试 `::1` 吃一次连接拒绝再回退 | host 改双栈 `["127.0.0.1", "::1"]` | 实测 health 0.23s → 0.004s；诊断法：同端点分别用 localhost 与 127.0.0.1 计时 |
+| p3 | 高 | `processed_at < uploaded_at` 倒挂、"处理耗时"为负：该列用应用侧 `datetime.now(UTC)`，其余时间列走 DB `func.now()`，容器钟比宿主快 3–4s | 成功路径、`_mark_failed`、启动 reaper 三处统一 `func.now()`，commit 后 `db.refresh(log)` 读回真实值 | SQL 按倒挂分组计数：仅 2 条修复前历史行仍倒挂（预期），无新增 |
+| p4 | 中 | 连库失败时挂数十秒才报错：psycopg `connect_timeout` 默认 None，Windows TCP 握手等到内核超时 | `_open_pg_conn` 强制 `connect_timeout=5` 手工建连接喂给 saver/store（`from_conn_string` 不透传 timeout） | e2e 正常路径；超时分支未做故障注入（如实标注） |
+| p5 | 高 | 非批改任务的工作台冒出一句"批改完成，未发现问题"：status 把 `structured_output` 的 NULL 经 `deserialize_issues` 压成 `[]` | `if done and log.structured_output` 才透清单，NULL 继续透 None | 2026-11-17 普通用户真机走查 + e2e |
+| p6 | 中 | 管理员改角色/授权后用户必须重登才生效：role / can_use_default 是登录瞬间冻结的快照 | 新增 `GET /auth/me`，AppLayout 挂载调 `refreshProfile`（失败静默，不拖死启动） | 前端 `auth.test.ts` 覆盖刷新与静默失败；真机 `/auth/me` 返回最新快照 |
+| p7 | 中 | MySQL 时代三个幂等迁移脚本在 Postgres 上全跑不了：`SHOW COLUMNS` 等方言语法 | 新库 `create_all()` 一次建齐、外键与 ORM 逐字匹配；脚本 `git rm`（历史可找回） | `pg_constraint.confdeltype` 8/8 匹配 |
+| p8 | 高 | 条款号被读成 `doc3-#0` 且模型照假编号写进 reason：`clause_id` 只扫块头 2 行，真实规范第 0 块是"标题/章/条款"三行 | 扫至 4 行 + 遇 `【` 正文标记即停，行首锚定不变 | 同份规范重传 66 块 0 误读；recall 重测（见下方度量教训） |
+| p9 | 中 | 滑窗查询抽样永远落不到末段：`int(i*step)` 向下取整，10 段抽 4 个只到第 7 段，文档尾巴的条款静默查不到 | 改 `round(i*last/(n-1))`，首段末段必落窗 | `tests/test_spec_retrieval.py` 末段断言 |
+| p10 | 中 | RRF 融合把 score 覆盖成后到臂的：余弦与 Dice 两个标尺混进同一字段，前端无法解释 | 保留首臂 score、标 `via=both`；前端只显示来源（语义/错例/双路）不显示数字 | 单测 + 真机引用条 |
+| p11 | 中 | 每臂取 2k 时 hybrid@10 反而从 0.778 掉到 0.741：向量臂名次靠后的占坑，挤掉词法高置信条款 | 每臂各取 k | `eval.retrieval` 三臂对拍 |
+| p12 | 中 | 检索前缀默认值照 bge-large-zh 经验抄：bge-m3 训练不带指令，加前缀 recall@5 从 0.491 掉到 0.380 | `embedding_query_prefix` 默认空串；加词法臂后 hybrid 对前缀不敏感（带不带都 0.815） | `eval.retrieval` 带/不带前缀对拍 |
+| p13 | 高 | 58 字短文纯向量 top-5 五条全不相干（真机跑）：缺"文档照抄规范错例"这类表面重合信号 | 加词法臂（字二元组 Dice）+ RRF 融合，默认 hybrid 取抗故障而非单臂最高分 | hybrid recall@5 0.815 / hit@5 1.000；夹具偏词法的效度边界见 9.14 |
+| p14 | 中 | 分块重跑命中缓存但引用消失：refs 没跟着结果进按块缓存 | refs / spec_note 随 outcome 一起存缓存，命中照报 | `tests/test_grading_graph.py` 缓存重放引用断言 |
+| p15 | 中 | "退出"文字链接被刷成实心色块：`el-button--primary` 组件级外观规则误伤 link 变体 | 规则加 `:not(.is-link):not(.is-text)`；`el-step__head` 染背景落到 `.el-step__icon.is-text` | 2026-11-17 浏览器走查 |
+| p16 | 低 | 空态说明断成"两行居中阶梯"：`max-width:42ch` 强制换行叠加 EP 居中 | 去掉宽度上限（11-19）；11-20 块内改居中 + 字号升一档（标题 20 / 说明 16） | 真浏览器几何：四子元素中轴与容器中轴相等、说明单行 |
+| p17 | 低 | 导航菜单项不上下居中：EP 水平菜单交叉轴 stretch + 项固定高度 | ul `align-items:center` + 项 `inline-flex` | 实测各组中线 48 |
+| p18 | 低 | 列表页白框缩到 420px、下方露大片背景：11-19 因留白投诉把 min-height 改成跟内容走 | 11-20 用户拍板恢复铺满 `calc(100vh - 136px)`（136 = 导航 104 + 底 32），接受留白；推翻理由写进注释 | 逐页 min-height 规则生效实测 |
+| p19 | 中 | e2e RAG 交付件断言误报：mock LLM 把整份 prompt 回显进 revised_text，全文断言命中 prompt 文本 | 断言限定到 `body.split("本次批改依据的规范条款",1)[1]` 的条款页 | `test_e2e_rag.py` 46/0 |
+| p20 | 中 | e2e structural 第 10/11 节重处理 done 日志（后端正确拒绝）且不带 /status 轮询（405）：脚本自己违反状态机 | 改新鲜上传 + `_poll` 带 http 状态诊断 | `test_e2e_structural.py` 60/0 |
+| p21 | 中 | Windows↔WSL 文件交换走 `\\wsl.localhost` UNC 互相看不见：两个 WSL 视图各自独立 | 统一走 `/mnt/<盘>` NTFS 挂载 | 真渲染 e2e 28/0 |
+| p22 | 低 | 注释与已上线行为矛盾：login 注释与 TokenResponse docstring 仍写"改了要重登 / 不用再开 /auth/me"，而 me() 与 refreshProfile 已上线 | 两处注释改写为与 me() 一致（首屏快照 + 启动刷新） | 读码核对；加接口时同批 grep 否定它存在的旧注释 |
+
+**度量教训（本轮最值得学的一条）**：recall 从 0.491 跳到 0.722 不是检索变好了，是 p8 修好了**度量本身**——期望条款号此前永远对不上。数字跳变时先怀疑量法、再怀疑被测物。同类：单轮数字会漂（同夹具 recall 1.0 与 0.8333 两轮），别拿单轮差值下 A/B 结论。
+
+**设计推翻的代价**：留白与铺满被相反方向投诉两次（11-19 缩、11-20 恢复），空态左对齐与居中也是一对。推翻理由必须写进注释或台账，否则下一个会话会按旧投诉把它"修"回去。p18 的注释与本轮台账就是为此存在。
+
+**回归验证（本轮）**：pytest 290 passed；`npm test` 33；e2e 31 / 60 / 28 / 46 全 0；ruff check / format 全绿；`uv lock --check` 一致（84 包）；`npm run build` 通过。p16 / p18 于 11-20 真浏览器复验（临时账号测空态，测完即删）。
+
+**仍未验证**：p4 超时分支未故障注入；移动端断点未在浏览器跑（深色模式明确不做）。
+
 ---
 
 ## 11. 环境变量 (.env)
