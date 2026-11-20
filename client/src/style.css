@@ -61,9 +61,9 @@ body {
   border: 1px solid color-mix(in oklab, var(--fa-ink) 7%, transparent);
   box-shadow: var(--fa-shadow-lg);
   padding: var(--space-lg);
-  /* 只给一个下限，不再强行撑满一屏：原先 min-height: 100vh-120px 让内容少的页面
-     拖出一大片空卡面（留白投诉的主因之一）。现在卡片跟着内容走 */
-  min-height: 420px;
+  /* 铺满剩余视口（136 = app-main 上 104 + 下 32）：内容少的页面也撑到视口底，
+     与工作台观感一致；留白接受（2026-11-20 用户要求恢复铺满） */
+  min-height: calc(100vh - 136px);
 }
 
 .page-header {

@@ -52,9 +52,8 @@ const emit = defineEmits<{ action: [] }>()
 .table-empty {
   display: flex;
   flex-direction: column;
-  /* 整块仍由表格居中，但块内左对齐：长说明占满自己的宽度排成一行，
-     标题/按钮贴它的左缘，避免出现"两行居中阶梯"（2026-11-19 反馈） */
-  align-items: flex-start;
+  /* 整块由表格居中，块内图标/文字/按钮也居中；说明不限宽，桌面宽度下排成一行 */
+  align-items: center;
   gap: 10px;
   padding: var(--space-lg) 0;
 }
@@ -73,16 +72,16 @@ const emit = defineEmits<{ action: [] }>()
 
 .empty-title {
   margin: 4px 0 0;
-  font-size: var(--fa-text-md);
+  font-size: var(--fa-text-lg);
   font-weight: 600;
   color: var(--el-text-color-primary);
 }
 
 .empty-hint {
   margin: 0;
-  font-size: var(--fa-text-sm);
+  font-size: var(--fa-text-base);
   line-height: 1.7;
   color: var(--el-text-color-secondary);
-  text-align: left;
+  text-align: center;
 }
 </style>
