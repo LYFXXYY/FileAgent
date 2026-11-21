@@ -151,6 +151,11 @@ class Settings(BaseSettings):
     ppt_render_dpi: int = 100
     # soffice 单次转换超时（秒）。冷启动 + 中文字体加载实测 3–8s/份，留足余量
     ppt_render_timeout: float = 90.0
+    # ---------- PPT 版面检查循环（② 片3，services/ppt_layout.py）----------
+    # 关掉后即使配了 vision 提供商也不跑版面循环（只剩片2 坏块修复）
+    ppt_layout_enabled: bool = True
+    # 批评 VLM 调用次数上限（语义同 §3.11：pass 早停时实际更少；硬上限 5 在代码里）
+    ppt_layout_max_rounds: int = 2
 
     # ---------- MinerU 扫描件兜底 ----------
     # 官方云 API token（mineru.net/apiManage 申请，有效期 90 天）。

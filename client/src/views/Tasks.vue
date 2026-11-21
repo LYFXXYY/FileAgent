@@ -116,12 +116,12 @@ const rules: FormRules = {
   prompt_template: [{ required: true, message: '请输入 Prompt 模板', trigger: 'blur' }],
 }
 
-// md 转换零 LLM：批改、模型、Prompt 都不参与。选中 md 即强制归位，
+// md/pptx 转换零 LLM：批改、模型、Prompt 都不参与。选中即强制归位，
 // 与后端 schemas/task.py 的互斥校验同向，避免用户填完才被 422 打回
 watch(
   () => form.output_format,
   (fmt) => {
-    if (fmt === 'md') {
+    if (fmt === 'md' || fmt === 'pptx') {
       form.is_grading = false
       form.provider_id = null
       form.prompt_template = '{{content}}'
@@ -129,14 +129,14 @@ watch(
   },
 )
 
-const isMd = computed(() => form.output_format === 'md')
+const isConversion = computed(() => form.output_format === 'md' || form.output_format === 'pptx')
 
 const formatHint = computed(() => {
   if (form.output_format === 'md') {
     return '零大模型：Word 本地免费转；PDF 走 MinerU 版面识别（需服务端配置 MINERU_TOKEN）'
   }
   if (form.output_format === 'pptx') {
-    return 'PPT 走"大纲 → 拼装 → 视觉批评"图，目前仅文字型 PDF 输入'
+    return '忠实转换（不用文本模型）：PDF 经 MinerU 版面块转可编辑 PPT（文本框/原生表格/图片），只收 PDF，需服务端配置 MINERU_TOKEN；配置视觉模型后还会自动修复解析坏块（标注"LLM 修复"）并做版面校对'
   }
   return '批改类下载红字 diff 标注，其余任务输出处理后的 Word'
 })
@@ -338,7 +338,10 @@ function providerName(id: number | null): string {
         </el-table-column>
         <el-table-column label="使用模型" width="140">
           <template #default="{ row }">
-            <span v-if="row.output_format === 'md'" class="text-muted">无需模型</span>
+            <span
+              v-if="row.output_format === 'md' || row.output_format === 'pptx'"
+              class="text-muted"
+            >无需模型</span>
             <span v-else class="model-name">{{ providerName(row.provider_id) }}</span>
           </template>
         </el-table-column>
@@ -421,16 +424,16 @@ function providerName(id: number | null): string {
             v-model="form.prompt_template"
             type="textarea"
             :rows="6"
-            :disabled="isMd"
+            :disabled="isConversion"
             placeholder="用 {{ '{{content}}' }} 作为文档内容占位符"
           />
-          <p v-if="isMd" class="field-hint">md 转换不调用模型，Prompt 不参与处理（已自动占位，无需填写）。</p>
+          <p v-if="isConversion" class="field-hint">转换任务不调用模型，Prompt 不参与处理（已自动占位，无需填写）。</p>
         </el-form-item>
         <el-form-item label="使用模型">
           <el-select
             v-model="form.provider_id"
             clearable
-            :disabled="isMd"
+            :disabled="isConversion"
             placeholder="默认使用第一个启用的提供商"
             style="width: 100%"
           >
@@ -441,12 +444,12 @@ function providerName(id: number | null): string {
               :value="p.id"
             />
           </el-select>
-          <p v-if="isMd" class="field-hint">md 转换零大模型外呼，不需要选择模型。</p>
+          <p v-if="isConversion" class="field-hint">转换任务零大模型外呼，不需要选择模型。</p>
         </el-form-item>
         <el-form-item label="批改类任务">
-          <el-switch v-model="form.is_grading" :disabled="isMd" />
+          <el-switch v-model="form.is_grading" :disabled="isConversion" />
           <span class="text-muted" style="margin-left: 8px">
-            {{ isMd ? 'md 转换没有修订文，不能做红字 diff 批改' : '开启后下载结果会用红字标注 diff' }}
+            {{ isConversion ? '转换没有修订文，不能做红字 diff 批改' : '开启后下载结果会用红字标注 diff' }}
           </span>
         </el-form-item>
         <el-form-item label="结果格式">

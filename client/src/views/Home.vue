@@ -62,22 +62,27 @@ const activeProviderCount = computed(() =>
   providers.value.filter((p) => p.is_active).length
 )
 
-// 当前选中的任务：md 转换零模型，提示文案与下载按钮都要按它分流
+// 当前选中的任务：md/pptx 转换零模型，提示文案与下载按钮都要按它分流
 const selectedTask = computed(
   () => tasks.value.find((t) => t.id === selectedTaskId.value) ?? null
 )
-const isMdTask = computed(() => selectedTask.value?.output_format === 'md')
+const isConversionTask = computed(
+  () => selectedTask.value?.output_format === 'md' || selectedTask.value?.output_format === 'pptx'
+)
 
 const downloadLabel = computed(() => {
   const fmt = selectedTask.value?.output_format
   if (fmt === 'md') return '下载 Markdown'
-  if (fmt === 'pptx') return '下载结果 .pptx'
+  if (fmt === 'pptx') return '下载 PPT (.pptx)'
   return '下载结果 .docx'
 })
 
 const processHint = computed(() => {
-  if (isMdTask.value) {
+  if (selectedTask.value?.output_format === 'md') {
     return 'Word 本地转换很快；PDF 走 MinerU 版面识别，可能需要 1–3 分钟'
+  }
+  if (selectedTask.value?.output_format === 'pptx') {
+    return 'PDF 走 MinerU 版面识别后本地拼装 PPT，可能需要 1–3 分钟；配置了视觉模型时还会修复坏块并校对版面'
   }
   if (uploadResult.value?.ocr_pending) {
     return '扫描件识别 + 模型处理，可能需要几分钟'
@@ -494,7 +499,7 @@ function reset() {
             还没有任务，先去 <router-link to="/tasks">任务管理</router-link> 创建一个
           </p>
           <el-alert
-            v-if="tasks.length > 0 && activeProviderCount === 0 && !isMdTask"
+            v-if="tasks.length > 0 && activeProviderCount === 0 && !isConversionTask"
             type="warning"
             :closable="false"
             show-icon
@@ -572,7 +577,7 @@ function reset() {
               <path d="M2 12L12 17L22 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
           </div>
-          <h3>{{ isMdTask ? '转换处理' : '调用 LLM 处理' }}</h3>
+          <h3>{{ isConversionTask ? '转换处理' : '调用 LLM 处理' }}</h3>
           <p class="card-desc">
             文件 <code>{{ uploadResult?.original_filename }}</code> 已上传<template v-if="uploadResult?.ocr_pending">，属扫描件，正文将在处理时由 MinerU 识别</template><template v-else>，提取到 {{ uploadResult?.content_length }} 字符</template>
           </p>

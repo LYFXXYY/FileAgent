@@ -31,14 +31,12 @@ from sqlalchemy.orm import Session
 from config import get_settings
 from database import SessionLocal, get_db
 from graphs.grading_graph import grade_long_document, read_progress
-from graphs.ppt_graph import run_ppt_pipeline
 from middleware.auth import get_current_user
 from models.operation_log import LogStatus, OperationLog
 from models.provider import ModelProvider
 from models.task import Task
 from models.user import User
 from schemas.grading import GRADING_JSON_SCHEMA, GradingIssue, GradingResult
-from schemas.ppt_outline import PptOutline, deserialize_outline, serialize_outline
 from schemas.process import ChunkProgressResponse, ProcessResponse, UploadResponse
 from services.docx_md import docx_to_markdown
 from services.grading import (
@@ -63,7 +61,9 @@ from services.llm import (
 from services.mineru import MinerUError, parse_pdf_via_mineru
 from services.ocr import markdown_to_plain_text, save_structured
 from services.pdf import PdfError, ScannedPdfError, extract_text_from_pdf
-from services.pptx_builder import PptxError, build_pptx
+from services.ppt_convert import PptConvertError, render_blocks_with_meta
+from services.ppt_layout import run_layout_loop
+from services.ppt_repair import find_defects, repair_defective_blocks
 from services.spec_retrieval import SpecContext, collect_spec_context
 from services.word import create_diff_docx, create_plain_docx, extract_text_from_docx
 
@@ -124,6 +124,13 @@ async def upload(
     # 响亮拒绝，而不是让用户等到处理阶段才失败。docx 走本地转换不受此限
     if task.output_format == "md" and ext == ".pdf" and not settings.mineru_token:
         raise HTTPException(400, "PDF 转 Markdown 需要服务端配置 MINERU_TOKEN")
+
+    # PPT 转换只收 PDF（docx 没有版面块可搬），且全量走 MinerU——同 md 的 fail-fast
+    if task.output_format == "pptx":
+        if ext != ".pdf":
+            raise HTTPException(400, "PDF 转 PPT 只支持 .pdf 输入")
+        if not settings.mineru_token:
+            raise HTTPException(400, "PDF 转 PPT 需要服务端配置 MINERU_TOKEN")
 
     # 3. 读取字节 + 按扩展名派发到对应的提取器
     file_bytes = await file.read()  # UploadFile.read() 是 async
@@ -210,8 +217,9 @@ async def process(
         raise HTTPException(400, "关联的任务已被删除")
 
     # 任务指定了 provider 时提前校验（防越权 + 防静默用错模型）：
-    # 让问题在返回 processing 之前就以 400 暴露，而不是后台跑一半才失败
-    if task.provider_id is not None:
+    # 让问题在返回 processing 之前就以 400 暴露，而不是后台跑一半才失败。
+    # md/pptx 转换零 LLM，不解析 provider，跳过此校验
+    if task.provider_id is not None and task.output_format not in ("md", "pptx"):
         try:
             resolve_provider(db, current.id, task.provider_id, "text")
         except LLMError as e:
@@ -261,6 +269,12 @@ async def _run_processing(log_id: int) -> None:
             await _run_md_conversion(db, log)
             return
 
+        # PPT 转换：同样零 LLM（片1），MinerU 版面块 → 块驱动渲染器。
+        # 文字型 PDF 也走 MinerU——要的是标题层级/表格/图片块，不是纯文本
+        if task.output_format == "pptx":
+            await _run_ppt_conversion(db, log)
+            return
+
         # 扫描件兜底：正文还在 MinerU 云端没取回来，先 OCR 写回再走 LLM。
         # 放在选 provider 之前：OCR 失败时错误信息更直接（不用先查一圈模型）。
         # parse_pdf_via_mineru 是同步阻塞（含轮询 sleep），必须丢线程池
@@ -307,27 +321,16 @@ async def _run_processing(log_id: int) -> None:
         # 快照成普通值：计量写入要丢线程池，不能跨线程用这个 session 的 ORM 对象
         provider_ref = (provider.id, provider.name)
 
-        # PPT 任务的批评环节需要 vision 提供商。没配也不报错——s5.6 设计允许跳过
-        # 批评直接交付，至少大纲+PPTX 仍然可用
-        critic_provider = None
-        critic_provider_ref: tuple[int, str] | None = None
-        if task.output_format == "pptx":
-            try:
-                critic_provider = resolve_provider(db, log.user_id, None, "vision")
-                critic_provider_ref = (critic_provider.id, critic_provider.name)
-            except LLMError:
-                logger.info("用户 %s 没有 vision 提供商，PPT 批评循环跳过", log.user_id)
-
         original_text = log.original_content or ""
 
-        # 规范条款召回（阶段 6）。只在"批改 + 非 PPT"时尝试，且两条路径分开：
+        # 规范条款召回（阶段 6）。只在批改任务时尝试，且两条路径分开：
         # - 单发：整篇查一次，条款进那一条 user 消息
         # - 分块：按块查（长文档各段涉及的条款不同，全局 top-k 等于只按开头检索），
         #   查询能力以闭包传进图，节点自己不碰 DB
         # 检索失败不把已能跑通的批改判成失败：collect_spec_context 内部兜住并回传 note
         spec = _NO_SPEC
         spec_lookup = None
-        if task.is_grading and task.output_format != "pptx":
+        if task.is_grading:
             if _should_chunk(original_text):
                 spec_lookup = _open_spec_lookup(log.user_id)
             else:
@@ -345,7 +348,6 @@ async def _run_processing(log_id: int) -> None:
                 task.prompt_template,
                 original_text,
                 log.id,
-                critic_provider=critic_provider,
                 spec=spec,
                 spec_lookup=spec_lookup,
             )
@@ -361,13 +363,7 @@ async def _run_processing(log_id: int) -> None:
             return
 
         for call in output.calls:
-            # 批评外呼归 critic 提供商，其他归文本/大纲提供商
-            ref = (
-                critic_provider_ref
-                if critic_provider_ref and call.purpose.startswith("critic")
-                else provider_ref
-            )
-            await _meter(log, ref, purpose=call.purpose, result=call.result)
+            await _meter(log, provider_ref, purpose=call.purpose, result=call.result)
 
         log.processed_content = output.revised_text
         log.structured_output = output.structured
@@ -464,6 +460,138 @@ async def _run_md_conversion(db: Session, log: OperationLog) -> None:
     db.refresh(log)
 
 
+async def _run_ppt_conversion(db: Session, log: OperationLog) -> None:
+    """
+    PDF→PPT 忠实转换的后台处理：MinerU 版面块 → （片2 VLM 坏块修复）→ 渲染 →（片3 版面循环）。
+
+    零**文本** LLM 不变式保留：不解析 text provider、structured_output=NULL
+    （重试时顺带清掉历史大纲信封）。VLM 只在两种旁路增强里出现——坏块修复（ppt_repair）
+    与版面批评循环（ppt_critic），都要求"有坏块/循环开启 且 配了 vision 提供商"；
+    否则 llm_calls 依旧为 0。交付是处理阶段落盘的 pptx 二进制
+    （outputs/pptx/{log_id}.pptx，片3 修订后就地覆盖），下载路由直接读；
+    processed_content 存 markdown 供预览/审计。
+    """
+    if not log.stored_filename:
+        _mark_failed(db, log, "文件落盘记录缺失，请重新上传")
+        return
+    stored_path = os.path.join(_resolve_dir(settings.upload_dir), log.stored_filename)
+    try:
+        with open(stored_path, "rb") as f:  # noqa: ASYNC230
+            pdf_bytes = f.read()
+    except OSError as e:
+        _mark_failed(db, log, f"读取上传文件失败：{e}")
+        return
+
+    try:
+        result = await run_in_threadpool(parse_pdf_via_mineru, pdf_bytes, log.original_filename)
+    except (MinerUError, OSError) as e:
+        _mark_failed(db, log, f"PDF 转 PPT 失败：{e}"[:2000])
+        return
+    except (httpx.HTTPError, httpx.InvalidURL) as e:
+        logger.warning("MinerU 传输层异常 log_id=%s：%r", log.id, e)
+        _mark_failed(db, log, "PDF 转 PPT 失败：无法连接 MinerU 服务，请检查网络后重试")
+        return
+    if not result.content_list:
+        _mark_failed(db, log, "识别结果为空，请确认文档内容清晰可辨")
+        return
+
+    # vision 提供商有两个消费者：片2 坏块修复 + 片3 版面循环。
+    # 先本地判坏（零成本）；无坏块且版面循环关闭时根本不查找。
+    # 两者都是旁路增强——没配 vision、VLM 挂了、产出没过校验，都保留片1 兜底继续交付
+    defects = find_defects(result.content_list)
+    layout_wanted = settings.ppt_layout_enabled
+    pages_for_render = result.content_list
+    repair_calls: list = []
+    vision_ref: tuple[int | None, str | None] | None = None
+    vision_provider = None
+    if defects or layout_wanted:
+        try:
+            vision_provider = resolve_provider(db, log.user_id, None, "vision")
+        except LLMError:
+            vision_provider = None
+            logger.info("用户 %s 没有 vision 提供商，PPT 坏块修复与版面循环跳过", log.user_id)
+        if vision_provider is not None:
+            # 快照成普通值：计量写线程池不能跨线程用 ORM 对象（§3.6 边界）
+            vision_ref = (vision_provider.id, vision_provider.name)
+            if defects:
+                pages_for_render, repair_calls = await repair_defective_blocks(
+                    pdf_bytes, result.content_list, result.page_sizes, vision_provider, log.id
+                )
+
+    try:
+        pptx_bytes, slide_meta = await run_in_threadpool(
+            render_blocks_with_meta, pages_for_render, result.images, result.page_sizes
+        )
+    except PptConvertError as e:
+        _mark_failed(db, log, f"PPT 渲染失败：{e}"[:2000])
+        return
+
+    # 片3 版面检查循环：只调分流/字号两个旋钮，文字一字不动。
+    # 循环内部已兜住外呼与渲染失败，这里的 try 只防"循环自身有 bug"这种事故
+    layout_calls: list = []
+    if vision_provider is not None and layout_wanted:
+        try:
+            pptx_bytes, _final_meta, layout_calls = await run_layout_loop(
+                pages_for_render,
+                result.images,
+                result.page_sizes,
+                vision_provider,
+                log.id,
+                first_data=pptx_bytes,
+                first_meta=slide_meta,
+                max_rounds=settings.ppt_layout_max_rounds,
+            )
+        except Exception:
+            logger.exception("版面循环内部异常 log_id=%s，交付当前版本", log.id)
+            layout_calls = []
+
+    out_dir = _resolve_dir(os.path.join(settings.output_dir, "pptx"))
+    try:
+        with open(os.path.join(out_dir, f"{log.id}.pptx"), "wb") as f:  # noqa: ASYNC230
+            f.write(pptx_bytes)
+    except OSError as e:
+        _mark_failed(db, log, f"PPT 交付文件写入失败：{e}")
+        return
+
+    # 修复/批评外呼逐笔记账（成功/降级/失败都有行），计量本身仍是旁路不影响交付
+    for call in repair_calls:
+        await _meter(
+            log,
+            vision_ref,
+            purpose="ppt_repair_degraded" if call.degraded else "ppt_repair",
+            result=call.result,
+            error=call.error,
+            attempts=call.attempts,
+        )
+    for call in layout_calls:
+        await _meter(
+            log,
+            vision_ref,
+            purpose="ppt_critic_degraded" if call.degraded else "ppt_critic",
+            result=call.result,
+            error=call.error,
+            attempts=call.attempts,
+        )
+
+    log.processed_content = result.markdown
+    # 扫描件上传时没有预览文本，用归一化纯文本补底本；文字型保留上传时的提取结果
+    if not log.original_content:
+        log.original_content = markdown_to_plain_text(result.markdown)
+    log.structured_output = None
+    # 只有真发生过 VLM 外呼才记模型名——"无需模型"的语义对没坏块也没跑循环的文档仍然成立
+    log.provider_name = vision_ref[1] if (repair_calls or layout_calls) else None
+    log.needs_ocr = False
+    log.status = LogStatus.DONE
+    log.processed_at = func.now()
+    db.commit()
+    db.refresh(log)
+    # structured 留存是旁路（片2 坏块修复要拿区域原图 grounding），写盘失败只告警
+    save_structured(
+        result,
+        os.path.join(_resolve_dir(settings.output_dir), "mineru", str(log.id)),
+    )
+
+
 async def _meter(
     log: OperationLog,
     provider_ref: tuple[int | None, str | None],
@@ -516,8 +644,6 @@ class _ModelOutput:
 
 def _error_purpose_for(task: Task) -> str:
     """LLMError 也要按任务种类归类，否则评测台按 purpose 分组时分不清"""
-    if task.output_format == "pptx":
-        return "outline"
     return "grading" if task.is_grading else "chat"
 
 
@@ -530,29 +656,6 @@ def _should_chunk(original_text: str) -> bool:
     """
     budget = settings.longdoc_chunk_chars
     return bool(settings.longdoc_enabled) and len(original_text) > budget
-
-
-def _render_outline_as_text(outline: PptOutline) -> str:
-    """
-    s5.2 的过渡产物：把大纲渲染成可读纯文本塞进 processed_content
-
-    真实交付是 s5.3 的 PPTX 二进制。这条文本只是让下载路由在 s5.3 之前不至于空响应，
-    也方便单测断言"至少能看到大纲内容"。
-    """
-    if not outline.slides:
-        return "（大纲为空，未生成任何幻灯片页）"
-    parts = []
-    if outline.title:
-        parts.append(outline.title)
-        parts.append("")
-    for i, slide in enumerate(outline.slides, start=1):
-        parts.append(f"第 {i} 页：{slide.title}")
-        for b in slide.bullets:
-            parts.append(f"  - {b}")
-    if outline.degraded:
-        parts.append("")
-        parts.append("（注意：模型未按大纲契约输出，已退化为按行切页；可在评测台核查）")
-    return "\n".join(parts)
 
 
 def _open_spec_lookup(user_id: int):
@@ -585,33 +688,16 @@ async def _run_model(
     original_text: str,
     log_id: int,
     *,
-    critic_provider: ModelProvider | None = None,
     spec: SpecContext | None = None,
     spec_lookup=None,
 ) -> _ModelOutput:
     """
-    三条路径：pptx 走 PPT 流水线（含批评循环）、批改走结构化（含分块）、其他走纯 chat
+    两条路径：批改走结构化（含分块）、其他走纯 chat
 
-    结构化失败不改变任务结局：`parse_grading_output` / `parse_outline_output` 都会
-    退回自由文本，下载照旧，只是少了结构化清单 / 大纲契约。把用户的文档判失败从来不是
-    一个好选项。
-
-    `critic_provider=None` 时 PPT 流水线跳过批评，s5.2 行为保持不变；
-    PPT 调用方传了 critic_provider 才会进入 s5.6 的批评循环。
+    结构化失败不改变任务结局：`parse_grading_output` 会退回自由文本，
+    下载照旧，只是少了结构化清单。把用户的文档判失败从来不是一个好选项。
+    md/pptx 转换不走这里（零 LLM，在 _run_processing 前段分流）。
     """
-    if task.output_format == "pptx":
-        run = await run_ppt_pipeline(
-            original_text,
-            provider,
-            prompt_template,
-            thread_id=f"log-{log_id}",
-            critic_provider=critic_provider,
-        )
-        plain = _render_outline_as_text(run.outline)
-        # 每笔外呼转成 _MeteredCall；purpose 由 PptCall 自带（区分 critic / outline / 降级）
-        calls = tuple(_MeteredCall(c.result, c.purpose) for c in run.calls)
-        return _ModelOutput(plain, serialize_outline(run.outline), calls)
-
     if not task.is_grading:
         result = await chat(
             [{"role": "user", "content": prompt_template.replace("{{content}}", original_text)}],
@@ -717,6 +803,15 @@ async def process_status(
     )
 
 
+def _read_pptx_delivery(log_id: int) -> bytes | None:
+    """读落盘的 PPT 交付件（同步，调用方丢线程池）；缺失返回 None 由路由转 400"""
+    path = os.path.join(_resolve_dir(settings.output_dir), "pptx", f"{log_id}.pptx")
+    if not os.path.isfile(path):
+        return None
+    with open(path, "rb") as f:
+        return f.read()
+
+
 def _build_md_download(log: OperationLog, stem: str) -> tuple[io.BytesIO, str, str]:
     """
     拼 md 交付件（同步，调用方丢线程池）：有 MinerU 图片就打 zip，否则裸 .md。
@@ -772,20 +867,12 @@ async def download(
     if output_format == "md":
         buf, filename, media = await run_in_threadpool(_build_md_download, log, stem)
     elif output_format == "pptx":
-        # PPT 任务走 pptx 二进制；structured_output 必须是 ppt_outline 形态才能拼
-        outline = deserialize_outline(log.structured_output)
-        if outline is None:
-            raise HTTPException(400, "PPT 大纲缺失或不是 ppt_outline 形态，无法拼装")
-        try:
-            buf = io.BytesIO(
-                build_pptx(
-                    outline,
-                    image_refs=None,  # s5.3 文字-only；图片轮启用时这里换成图字典
-                )
-            )
-        except PptxError as e:
-            raise HTTPException(400, f"PPTX 拼装失败：{e}") from e
-        filename = f"演示_{stem}.pptx"
+        # PPT 交付物是处理阶段落盘的二进制（片3 版面修订后就地覆盖），下载直接读
+        data = await run_in_threadpool(_read_pptx_delivery, log.id)
+        if data is None:
+            raise HTTPException(400, "PPT 交付文件缺失，请重新处理")
+        buf = io.BytesIO(data)
+        filename = f"转换_{stem}.pptx"
         media = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
     else:
         # 结果永远是 .docx，所以文件名取原名去掉扩展再补 .docx——

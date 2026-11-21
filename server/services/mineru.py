@@ -49,9 +49,13 @@ class MinerUResult:
     markdown: str
     content_list: list | None = None
     images: dict[str, bytes] = field(default_factory=dict)
+    # 每页 (宽pt, 高pt)，取自 layout.json 的 page_size。content_list 的 bbox 是
+    # 归一化到 1000×1000 的坐标，PPT 渲染要靠这里的真实宽高比还原页面 aspect。
+    page_sizes: list[tuple[float, float]] = field(default_factory=list)
 
 
 _client: httpx.Client | None = None
+_download_client: httpx.Client | None = None
 
 
 def _get_client() -> httpx.Client:
@@ -70,12 +74,34 @@ def _get_client() -> httpx.Client:
     return _client
 
 
+def _get_download_client() -> httpx.Client:
+    """产物 zip 下载专用直连 client（trust_env=False）。
+
+    CDN（cdn-mineru.openxlab.org.cn）是国内端点，走系统代理会被掐断 TLS
+    （实测 SSL UNEXPECTED_EOF_WHILE_READING），必须绕开代理直连；
+    API 端点（mineru.net）仍走 _get_client 的代理通道。预签名 URL 自带鉴权。
+    """
+    global _download_client
+    if _download_client is None:
+        normalize_no_proxy_env()
+        settings = get_settings()
+        _download_client = httpx.Client(
+            timeout=settings.mineru_http_timeout,
+            trust_env=False,
+            follow_redirects=True,
+        )
+    return _download_client
+
+
 def close_client() -> None:
     """释放共享 client（测试隔离 / 进程退出用）"""
-    global _client
+    global _client, _download_client
     if _client is not None:
         _client.close()
         _client = None
+    if _download_client is not None:
+        _download_client.close()
+        _download_client = None
 
 
 def _check_payload(resp: httpx.Response, action: str) -> dict:
@@ -106,6 +132,7 @@ def _unzip_result(zip_bytes: bytes) -> MinerUResult:
     content_list: list | None = None
     content_list_v2: list | None = None
     images: dict[str, bytes] = {}
+    layout_raw: bytes | None = None
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
         logger.info("MinerU 产物 zip 条目：%s", zf.namelist())
         for name in zf.namelist():
@@ -117,6 +144,8 @@ def _unzip_result(zip_bytes: bytes) -> MinerUResult:
                 continue
             if base == "full.md":
                 markdown = zf.read(name).decode("utf-8")
+            elif base == "layout.json":
+                layout_raw = zf.read(name)
             elif base.endswith(("content_list_v2.json", "content_list.json")):
                 try:
                     parsed = json.loads(zf.read(name).decode("utf-8"))
@@ -135,7 +164,28 @@ def _unzip_result(zip_bytes: bytes) -> MinerUResult:
         markdown=markdown,
         content_list=content_list_v2 if content_list_v2 is not None else content_list,
         images=images,
+        page_sizes=_extract_page_sizes(layout_raw),
     )
+
+
+def _extract_page_sizes(layout_raw: bytes | None) -> list[tuple[float, float]]:
+    """从 layout.json 的 pdf_info[].page_size 取每页真实宽高（pt），按 page_idx 排序。
+
+    content_list 的 bbox 归一化到 1000×1000，PPT 渲染靠这里的宽高比还原页面 aspect。
+    layout.json 缺失或损坏（如假端点 zip）时回空列表，渲染器退默认页面比。
+    """
+    if layout_raw is None:
+        return []
+    try:
+        info = json.loads(layout_raw.decode("utf-8")).get("pdf_info") or []
+        sizes: list[tuple[float, float]] = []
+        for page in sorted(info, key=lambda p: p.get("page_idx", 0)):
+            ps = page.get("page_size")
+            if isinstance(ps, (list, tuple)) and len(ps) == 2:
+                sizes.append((float(ps[0]), float(ps[1])))
+        return sizes
+    except (ValueError, UnicodeDecodeError, TypeError, AttributeError):
+        return []
 
 
 def parse_pdf_via_mineru(pdf_bytes: bytes, filename: str) -> MinerUResult:
@@ -203,8 +253,9 @@ def parse_pdf_via_mineru(pdf_bytes: bytes, filename: str) -> MinerUResult:
             )
         time.sleep(settings.mineru_poll_interval)
 
-    # 4. 下载产物 zip（签名 URL 自带鉴权，不带 Authorization 头）
-    zip_resp = client.get(zip_url)
+    # 4. 下载产物 zip（签名 URL 自带鉴权，不带 Authorization 头）。
+    # 走独立的直连 client：CDN 是国内端点，系统代理会掐断它的 TLS（见 _get_download_client）。
+    zip_resp = _get_download_client().get(zip_url)
     if zip_resp.status_code != 200:
         raise MinerUError(f"MinerU 结果下载失败（HTTP {zip_resp.status_code}）")
     result = _unzip_result(zip_resp.content)

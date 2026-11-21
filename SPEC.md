@@ -174,15 +174,15 @@ cd server
 # uv 自动创建虚拟环境 + 初始化 pyproject.toml（类比 Maven 的 pom.xml）
 uv init
 
-# 添加核心依赖
-uv add fastapi "uvicorn[standard]" sqlalchemy pymysql python-docx \
-    "python-jose[cryptography]" "passlib[bcrypt]" python-multipart \
-    httpx pydantic-settings pytest httpx
-
 # 生产依赖 vs 开发依赖（对标 Maven 的 scope）
-# uv add pytest --dev  # 开发依赖安装在 [dev-dependencies] 下
-# uv add uvicorn       # 生产依赖安装在 [project.dependencies] 下
+uv add fastapi                 # 生产依赖进 [project.dependencies]
+uv add pytest --dev            # 开发依赖进 [dependency-groups].dev（老写法 [tool.uv].dev-dependencies）
+uv sync                        # 按锁装齐（改完 pyproject 后还要 uv lock）
 ```
+
+⚠ **依赖清单不在本文维护**——权威只有一份，在 `server/pyproject.toml`。本节曾经抄了一份清单，里面还写着 `pymysql` 和 `passlib[bcrypt]`：前者随阶段 4 换 Postgres 退役，后者**任何时候都不要装**（passlib 1.7.4 与 bcrypt 4.1+ 不兼容，直接用 `bcrypt`，见 AGENTS §3.5）。抄第二份事实的代价就是这种"文档教你装项目已经不要的包"。
+
+同理，**当前真实依赖分三组**（看文件即可，不必背）：Web 层 fastapi/uvicorn[standard]、DB 层 sqlalchemy + psycopg2-binary + psycopg[binary,pool]（异步图状态用）+ pgvector、文档层 python-docx + pymupdf + python-pptx，编排层 langgraph 三件套，外加 pydantic-settings / httpx / python-jose / python-multipart / bcrypt。
 
 ### 4.3 前端初始化
 
@@ -222,6 +222,8 @@ cd server
 uv run uvicorn main:app --reload --port 8000
 # 访问 http://localhost:8000/docs 看到 Swagger 即成功
 ```
+
+> 这一步只验 health 端点，还没有异步图状态，`--reload` 无害。**等业务代码接上 LangGraph / psycopg3 异步后就不能这么起了**——必须走 `uv run python run_backend.py`，原因见 §8 与 AGENTS §2。
 
 ```bash
 # 启动前端
@@ -263,7 +265,7 @@ FileAgent/
 
 ### 5.1 认证系统（auth）
 
-核心三步：密码哈希 (passlib+bcrypt) → JWT 签发 (python-jose) → Depends 注入校验
+核心三步：密码哈希（**直接用 `bcrypt`，不要引 passlib**——1.7.4 与 bcrypt 4.1+ 不兼容）→ JWT 签发 (python-jose) → Depends 注入校验
 
 路由：`POST /register` + `POST /login`，登录成功返回 `{access_token, token_type: "bearer"}`。JWT payload 存 `sub`(user_id) + `exp`。
 
@@ -406,8 +408,8 @@ SQLAlchemy 连接池配置：`pool_size=10, max_overflow=20, pool_pre_ping=True`
 
 ```bash
 uv run uvicorn test_llm_server:app --port 19000   # 另开一个终端
-uv run uvicorn main:app --port 8000               # 或另选端口
-uv run python test_e2e_structural.py              # 40 项断言
+uv run python run_backend.py                      # 后端必须走这个入口，见 §8
+uv run python test_e2e_structural.py              # 断言条数以跑命令为准
 ```
 
 ### 5.10 文档提取层（阶段 1.5：输入格式扩到 PDF）
@@ -432,6 +434,8 @@ uv run python test_e2e_structural.py              # 40 项断言
 - 跨页高频装饰：短文本（≤20 字符）、在 ≥60% 的页面原样出现、且不带句末标点、且文档 ≥3 页。用频次是因为换模板装饰词就变了，但"每页都有一模一行"不变；带标点的重复行是内容（诗词副歌、免责声明），宁可留噪声也不能丢字。
 
 **三条失败路径都是 400，不是 500**（`PdfError` 由路由层转）：打不开（坏文件）、有打开密码、没有文字层。最后一条最常见——扫描件必须明确告诉用户"当前不支持图片型 PDF"，回一段空文本会让人以为文档本来就是空的。
+
+> 本段是 2026-11-15 的边界。**该边界已于 2026-11-20 改变**：无文字层 / 薄文字层两条判据现在抛子类 `ScannedPdfError`，配了 `MINERU_TOKEN` 时上传受理、处理阶段走云 OCR 兜底，没配才照旧 400。损坏与加密仍走父类拒收。现役口径见 §9.15 与 AGENTS §3.15。
 
 **已知边界**：多栏长段落跨栏仍会被切开（文本层只给坐标不给阅读顺序，几何合并刻意不跨栏）；不做 OCR；不读表格结构。这些和 docx 那边一致，属功能边界不是缺陷。
 
@@ -637,6 +641,7 @@ CREATE TABLE llm_calls (
 |---|---|---|---|
 | POST | /api/v1/auth/register | 否 | 注册 |
 | POST | /api/v1/auth/login | 否 | 登录，返回 JWT |
+| GET | /api/v1/auth/me | 是 | 身份快照（前端启动时刷新 role / can_use_default） |
 | GET | /api/v1/providers | 是 | 提供商列表 |
 | POST | /api/v1/providers | 是 | 添加提供商 |
 | PUT | /api/v1/providers/:id | 是 | 更新 |
@@ -645,11 +650,21 @@ CREATE TABLE llm_calls (
 | POST | /api/v1/tasks | 是 | 创建 |
 | PUT | /api/v1/tasks/:id | 是 | 更新 |
 | DELETE | /api/v1/tasks/:id | 是 | 删除 |
-| POST | /api/v1/upload | 是 | 上传 Word（返回 log_id + extracted_text） |
-| POST | /api/v1/process/:id | 是 | 调 LLM 处理（pending/failed 可重试） |
-| GET | /api/v1/process/:id/status | 是 | 查询处理状态（只读，返回 processed_content） |
-| GET | /api/v1/download/:id | 是 | 下载 Word 结果 |
+| POST | /api/v1/upload | 是 | 上传 `.docx` / `.pdf`（返回 log_id + extracted_text） |
+| POST | /api/v1/process/:id | 是 | 触发处理（pending/failed 可重试；立即返回 processing） |
+| GET | /api/v1/process/:id/status | 是 | 查询处理状态（只读；带结果、问题清单、规范引用） |
+| GET | /api/v1/download/:id | 是 | 下载结果（`.docx` / `.pptx` / `.md` / 含图时 `.zip`，由 `output_format` 定） |
 | GET | /api/v1/logs | 是 | 操作日志（分页 + 状态筛选 + 文件名搜索） |
+| GET | /api/v1/logs/:id | 是 | 单条日志详情 |
+| POST | /api/v1/specs/upload | 是 | 规范文档入库（切块 + 编码，不可变） |
+| GET | /api/v1/specs | 是 | 规范库列表 |
+| GET | /api/v1/specs/:id/chunks | 是 | 某份规范的条款 |
+| DELETE | /api/v1/specs/:id | 是 | 删除规范（批改随之不再召回它的条款） |
+| GET | /api/v1/admin/users | 管理员 | 全站用户 + 用量（`require_admin`） |
+| PATCH | /api/v1/admin/users/:id/role | 管理员 | 升 / 降角色（不能改自己、不能降最后一个 admin） |
+| PATCH | /api/v1/admin/users/:id/default-access | 管理员 | 授权 / 撤销"可用默认模型" |
+
+> **这张表不是权威清单**，只是导航。路由声明在 `server/api/v1/*.py`（前缀见 `api/v1/__init__.py`），运行时权威是 FastAPI 自带的 `http://localhost:8000/docs`。上表 2026-11-21 按装饰器逐条核对过（24 个端点）；**改接口时改代码即可，docs 自动跟着变**，本表只在新增/删除一整组路由时顺手补。
 
 > 阶段 0 **没有新增接口**。变化只有两处：
 >
@@ -666,41 +681,57 @@ CREATE TABLE llm_calls (
 
 ## 8. 部署
 
+⚠ **本节是"还没做的事"**。项目至今只在开发机跑（`run_backend.py` + Vite dev server），没有 Docker 化、没有多 worker、没有反代。下表是**目标形态**，动手前必须先解决下面三条已知冲突，否则照抄必炸。
+
 ### 开发环境
 
 ```bash
-# 后端
-cd server && uv run uvicorn main:app --reload --port 8000
+# 后端：**必须走这个入口**，不能 uv run uvicorn main:app
+cd server && uv run python run_backend.py
 # 前端（Vite 代理到 8000）
 cd client && npm run dev
 ```
 
-### 生产环境
+Windows 上直接 `uv run uvicorn main:app` 会让 psycopg3 异步模式撞上 ProactorEventLoop，长文档分块批改必炸；`run_backend.py` 先切 Selector policy 再 monkey-patch uvicorn 的 loop 工厂。详见 AGENTS §2 与 §9.10.2。
+
+### 生产形态（目标，未实施）
 
 ```yaml
-# docker-compose.yml — MySQL + FastAPI
+# docker-compose.yml —— 数据库用 Postgres + pgvector，不是 MySQL
 services:
-  mysql:
-    image: mysql:8.0
+  postgres:
+    image: pgvector/pgvector:pg16      # 本机容器名 fileagent-postgres，宿主端口 5434
     environment:
-      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
-      MYSQL_DATABASE: fileagent
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: file_agent
   server:
     build: ./server
     ports: ["8000:8000"]
-    depends_on: [mysql]
+    depends_on: [postgres]
 ```
 
-Nginx 反代：前端静态文件直接 serve，`/api/` 代理到 `127.0.0.1:8000`。uvicorn 生产用 `--workers 4` + systemd 守护。
+Nginx 反代：前端静态文件直接 serve，`/api/` 代理到 `127.0.0.1:8000`。
+
+**上多 worker 之前必须先改的三处**（都是"进程内状态"，写第一版时是刻意的轻量选择，见 AGENTS §3.3）：
+
+| 冲突点 | 现状 | 多 worker 下的后果 |
+|---|---|---|
+| `main.py:lifespan` 的僵尸 processing reaper | 启动时把 processing 一律重置为 failed | 每个 worker 各自重置一遍，别的 worker 正在跑的任务会被判死 |
+| `services/llm.py` 并发闸 | `asyncio.Semaphore(llm_max_concurrency)` 进程内 | 上限变成 `workers × N`，不是全局约束 |
+| LangGraph 检查点与按块缓存 | 已迁 Postgres（阶段 4） | 这一项没问题，另两项才是拦路的 |
+
+**没有消息队列**：处理走 FastAPI `BackgroundTasks`，进程死了任务就丢。真要上生产，第一件该补的是任务队列，不是 worker 数量。
 
 ---
 
 ## 9. 实现路线与当前状态
 
+> **怎么读这一章**：§9.1 与 §9.2 是**现状**（要改就改这两节）；§9.3–§9.17 是**按日期冻结的交付台账**，每节记的是"那一天做了什么、门禁跑成什么样"。台账里的环境描述（"连真实 MySQL"）、断言条数、模型数字都是**当时的**事实，不代表现状——看到"MySQL""扫描件不支持""28/0"这类字样先核对日期，别当现行结论。**要验证现状就跑命令**（清单见 AGENTS §2 / §7.2）。
+
 ### 9.1 已完成基线
 
-1. ✅ 后端骨架：FastAPI + MySQL 连接 + 建表
-2. ✅ 认证模块：注册/登录 + JWT 中间件
+1. ✅ 后端骨架：FastAPI + DB 连接 + 建表（阶段 0 起是 MySQL，**阶段 4 已换 Postgres**）
+2. ✅ 认证模块：注册/登录 + JWT 中间件（+ `/auth/me` 启动刷新身份快照）
 3. ✅ 提供商 CRUD + LLM 调用服务
 4. ✅ 任务 CRUD
 5. ✅ Word 读写 + diff 批注服务
@@ -717,9 +748,17 @@ Nginx 反代：前端静态文件直接 serve，`/api/` 代理到 `127.0.0.1:800
 16. ✅ **阶段 2 最小版：评测台**（见 9.6；完整形态的真实夹具留到需要时再补）
 17. ✅ **阶段 3 主体：长文档分块批改图（LangGraph）**（见 9.7）
 18. ✅ **依赖与产物减肥**：pymupdf 死重摘除 + Element Plus 按需引入（见 9.8）
-19. ⬜ 联调 + Docker 部署（推迟到阶段 4 与 Postgres 一起做）
+19. ✅ **阶段 4：Postgres 基建**（业务表 + LangGraph saver/store + 规范库两张表，见 9.10）
+20. ✅ **任务 2：管理员 + 默认模型授权**（简单版，见 9.11）
+21. ✅ **阶段 5：PDF→PPT 大纲流水线**（见 9.13；**11-21 已被 ② 片1 忠实转换替换**，见 9.17）
+22. ✅ **阶段 6：向量能力接入**（本地 bge-m3 + pgvector + 混合召回 + 条款注入，见 9.14）
+23. ✅ **MinerU 扫描件 OCR 兜底**（云 v4，仅扫描件，见 9.15）
+24. ✅ **① md 转换任务**（零 LLM，见 9.16）
+25. ✅ **② PDF→PPT 忠实转换 片1**（块驱动渲染器，零 LLM，见 9.17）
+26. ⬜ 部署（Docker / 多 worker / 任务队列）——见 §8，上多 worker 前有三处进程内状态要先改
+27. ⬜ 前端组件级测试（现在只测纯逻辑，没装 @vue/test-utils）
 
-### 9.2 Agent 化演进路线（阶段 0–6）
+### 9.2 Agent 化演进路线（阶段 0–6 + 三段拓展）
 
 学习目标是 LangGraph、RAG、Agent 调优。路线按**学习性价比**排，不按成就感排：PDF→PPT 是最重的一站，放最后当组装活。**2026-11-16 用户重新拆分阶段 4/5/6**：原来一锅炖的 RAG 拆成"先建基建（Postgres + 文档入库）"和"后接向量"，中间夹进 PDF→PPT——避免被 embedding 选型卡住交付节奏，也让 LangGraph 图编排练手期紧接阶段 5 复用。
 
@@ -731,8 +770,16 @@ Nginx 反代：前端静态文件直接 serve，`/api/` 代理到 `127.0.0.1:800
 | **2** | 评测台：golden set + rubric + LLM-as-judge + prompt 版本管理 + 回归对比 | 1.5 | 🟡 **最小版已完成** 2026-11-15（合成夹具 + 确定性指标 + `--prompt-file` A/B + 同源自判）。缺：真实文档夹具、第二厂商当裁判、档位落库、重复轮次 |
 | **3** | LangGraph 首练**长文档分块批改**：fan-out/fan-in + 检查点 + 按块幂等续跑。顺带突破单次上下文上限 | 2 | 🟡 **主体已完成** 2026-11-16。缺 `interrupt` 人工确认分块方案（要先做 UI） |
 | **4** | **Postgres 基建 + 规范文档入库**：业务表全量迁 Postgres（pgvector 镜像，MySQL 退役）、LangGraph 检查点从 SQLite 迁到 Postgres、规范文档上传与分块存表。**不做检索**——把存储和图状态这一层做扎实。 | 3 | ✅ **2026-11-16 全部完成**：业务表 + LangGraph saver/store + spec_docs/spec_chunks + e2e 双跑（31/0 + 52/0） |
-| **5** | PDF→PPT：把确定性 PDF 几何处理移植成 service，LLM 只接管大纲规划与视觉批评修订循环 | 4 + VLM | ✅ **2026-11-17 全部 8 切片交付**：真渲染走 WSL LibreOffice（双后端 stub/soffice），e2e_ppt 28/0，详见 §9.13 |
+| **5** | PDF→PPT：把确定性 PDF 几何处理移植成 service，LLM 只接管大纲规划与视觉批评修订循环 | 4 + VLM | ⚠ **2026-11-17 全部 8 切片交付**（真渲染走 WSL LibreOffice，见 §9.13），**但 2026-11-21 该路线整体替换为"块驱动忠实转换"**：ppt_graph / pptx_builder / ppt_outline 已从处理链路摘除，现役见 9.17 |
 | **6** | **向量能力接入**：本地 embedding 模型（RTX 4060 跑 bge-m3 或 bge-large-zh）+ pgvector 检索 + 规范条款注入批改 prompt 并带引用溯源 | 5 | ✅ **2026-11-19 全部交付（A1–A7）**：本地 bge-m3 + pgvector 精确扫描 + 向量/词法 RRF 混合召回 + 单发与分块两条注入路径 + recall@5 0.722 / hit@5 1.000，详见 §9.14 |
+
+阶段 6 之后不在原路线表里、由用户逐步追加的三站（**表只到 6，这三行才是现状**）：
+
+| 拓展 | 内容 | 前置 | 状态 |
+|---|---|---|---|
+| **MinerU** | 扫描件 PDF 走官方云 v4 做 OCR 兜底（仅扫描件；`MINERU_TOKEN` 留空即关闭），并落 structured 三件套给下游消费 | 6 | ✅ **2026-11-20 A–E 全落地**，见 §9.15 / AGENTS §3.15 |
+| **① md 转换** | 新 `output_format='md'`：docx→md 本地转换、PDF→md 全量走 MinerU 版面，**零 LLM 是硬不变式** | MinerU | ✅ **2026-11-20 交付**，见 §9.16 / AGENTS §3.16 |
+| **② PDF→PPT 忠实转换** | 块驱动渲染器（B 阅读顺序重排为主、A 整页忠实兜底），产出可编辑 pptx；片1 零 LLM | ① + MinerU | 🟡 **片1 已交付 2026-11-21**（见 §9.17 / AGENTS §3.17）；片2 VLM 坏块修复、片3 版面检查循环待做 |
 
 **为什么 2.5（Postgres）从"并入 4"变成"就是 4 的第一步"**：原计划"等 RAG 真需要 pgvector 时再迁"听起来节省，但把 Postgres 和 RAG 捆一起交付意味着 RAG 任何选型问题（embedding 来源、检索精度）都会拖着 Postgres 落地。拆开后 Postgres 是纯基建活、风险可控；RAG 的向量部分独立成阶段 6，可以慢慢挑模型。
 
@@ -973,7 +1020,7 @@ Nginx 反代：前端静态文件直接 serve，`/api/` 代理到 `127.0.0.1:800
 
 **明确不建议删的**：`test_chunking.py` 11 项 + `test_grading_graph.py` 10 项。它们锁的三条不变式（块能逐字拼回、偏移成对平移、重跑不重复计费）错了**没有任何用户可见信号**，只会让批注悄悄指到别的句子。
 
-**e2e 的运维摩擦**：两个脚本（85 项断言 / 606 行）需起两个进程 + 真 MySQL + 轮询等待，分钟级。现已加自清理（跑完删自己的账号/日志/计量/任务/提供商/checkpoints），落盘文件因 UUID 存储名无法精确定位，偶尔手工清。
+**e2e 的运维摩擦**：两个脚本需起两个进程 + 真库（阶段 4 起是 **Postgres**，早期记为 MySQL）+ 轮询等待，分钟级。现已加自清理（跑完删自己的账号/日志/计量/任务/提供商/checkpoints），落盘文件自 2026-11-20 起可按 `stored_filename` 精确回溯（历史行该列为 NULL，只能按 UUID 命名规则清）。现役 e2e 已有五套，清单与前置见 AGENTS §7.2。
 
 ### 9.10 阶段 4 计划：Postgres 基建迁移（2026-11-16 定）
 
@@ -1151,7 +1198,7 @@ ALTER TABLE model_providers ADD COLUMN is_public BOOLEAN NOT NULL DEFAULT false;
 | # | 决策点 | 选定方案 |
 |---|---|---|
 | 1 | VLM 来源 | **先离线 mock VLM**（仿 `test_llm_server.py` 套路），架构必须留口子中后期切云端 / 本地（见 9.12.2 扩展点 A） |
-| 2 | PDF 输入范围 | **仅文字型**，扫描件 OCR 推到阶段 5 之后（扩展点 B） |
+| 2 | PDF 输入范围 | **仅文字型**，扫描件 OCR 推到阶段 5 之后（扩展点 B）——⚠ 该边界 11-20 已被 MinerU 云兜底突破，见 §9.15 |
 | 3 | PPTX 生成路线 | **纯文字幻灯片先做**，图片提取后补（扩展点 C） |
 | 4 | 任务模型扩展 | `tasks.output_format` 列（`docx` / `pptx`，默认 `docx`）；不新增 endpoint，沿用 upload → process → download 三段 |
 | 5 | 视觉批评循环预算 | 默认 2 轮，用户可调；硬上限 5 轮 |
@@ -1180,7 +1227,7 @@ ALTER TABLE model_providers ADD COLUMN is_public BOOLEAN NOT NULL DEFAULT false;
 
 **B. OCR 扫描件口子**
 
-当前 `services/pdf.py` 行为：检测到 PDF 没有文字层 → `PdfError("扫描件不支持")` → 路由 400。这条**必须保留**——扫描件 OCR 是个完整子系统（预处理 + 版面分析 + 中文识别），不能被一个 fallback 偷偷承担。
+当时 `services/pdf.py` 行为：检测到 PDF 没有文字层 → `PdfError("扫描件不支持")` → 路由 400。这条**当时必须保留**——扫描件 OCR 是个完整子系统（预处理 + 版面分析 + 中文识别），不能被一个 fallback 偷偷承担。（后来按预留的扩展点落地：11-20 起两条扫描件判据改抛子类 `ScannedPdfError`，由**路由层**决定要不要走 MinerU，提取器自己不偷跑，见 §9.15。）
 
 阶段 5 要做：
 1. `services/pdf.py:extract_text_from_pdf` 改成 `extract_text_from_pdf(pdf_bytes, *, fallback_to_ocr: bool = False)`。当前所有调用方传 `False`，行为不变。
@@ -1521,6 +1568,69 @@ POST `/file-urls/batch`（Bearer + `files:[{name,is_ocr:true}]`）→ PUT 预签
 - md 转换的表格/图片进批改正文、扫描件入规范库：不在本次范围。
 - 真实文档的云端转换：绝不拿用户真实文档做云端测试，走查只用合成件。
 
+### 9.17 ② PDF→PPT 忠实转换 片1 交付情况（2026-11-21，零 LLM）
+
+**范围**：pptx 任务从"大纲 LLM 重组"整体切换为"MinerU 版面块 → 块驱动忠实转换渲染器"（`services/ppt_convert.py:render_blocks_to_pptx`）。定位是**转换不是修改**：不重组、不改写、不摘要，产出以可编辑为目标（文字进文本框、表格进原生 PPT 表、图贴图）。这是 2026-11-21 用户拍板的方向（"哪来的 2 种模式？不是先 mineru 处理 pdf 吗"），阶段5 大纲流水线（ppt_graph / pptx_builder / ppt_outline）从处理链路摘除、模块后于 11-21 整体删除（见 §9.17.2 遗留段）。
+
+【设计决策】
+
+| 点 | 取舍 |
+|---|---|
+| 路由 | 所有 PDF（含纯图扫描件、文字型）统一走 MinerU，单一渲染路径，不留 VLM 直转分支（用户拍板"MinerU OCR 统一走"） |
+| 布局双模 | B 阅读顺序重排为主 / A 整页忠实兜底（用户批注原文："转换目的是做成能用的 PPT，按阅读顺序重排图文为主，整页原样搬只作兜底"）。auto 逐页分流：横向页（幻灯导出件）或密集页（视觉面积 ≥0.45 / 块数 >30）→ A，其余 → B |
+| 完整性不变式 | 超长段落切**连续子串**跨页（拼接逐字相等）；超高表无跨格按行拆原生表、有跨格回落整表渲染图；A 模靠 bbox 不重叠 + 字号装框保证不压盖 |
+| 零 LLM（片1） | 不解析 provider、不写 llm_calls、provider_name/structured_output=NULL；重试顺带清旧大纲信封 |
+| 输入约束 | 只收 PDF（docx 上传 400）；无 MINERU_TOKEN 上传即 400；与批改互斥（创建 422 / 更新合并值 400 / 前端同向归位） |
+| 交付 | 处理时落 `outputs/pptx/{log_id}.pptx`，下载直接读二进制（`转换_{stem}.pptx`）；片3 版面修订就地覆盖，接口不变 |
+| VLM 后续 | 片2 坏块修复必须以区域原图 grounding（防幻觉，产出标记"LLM修复"）；片3 版面检查循环只修版面不改文字 |
+
+【真实文档核实（2026-11-21，MinerU 产物本地缓存零重复云调用）】
+- 压力性损伤护理要点.pdf：9 页全横向 842×474（幻灯导出件）→ 全 A 模，9 页对 9 页，页眉即页标题被保留、页码跳过；soffice 渲染目检无压盖。
+- 成人肠造口护理指南.pdf：8 页纵向 595×841、29 图、视觉面积 ≤0.21/页 → 全 B 模。实拍两个版面缺陷并修复：整高贴图致 56 碎片页 → 图限高 0.6 内容高；低分辨率 logo 放大糊边 → 放大上限 1.5pt/px。修复后 35 页，**丢字问题 0**（脚本逐块断言每块文本逐字可在产物文本流中命中）。
+- 云端使用限制已于 2026-11-21 由用户解除（"之后要用 mineru 不管上不上云了"），真实文档可进 MinerU 云。
+
+【假端点升级】`test_mineru_server.py` 的 zip 从"平铺 v1 形状 + 假 jpeg 字节"升级为镜像真实 v2：页嵌套块列表、bbox 归一化 0..1000、layout.json（page_size）、合法 PNG（假 jpeg 会让 python-pptx add_picture 直接炸）。`test_e2e_ppt.py` 整套重写为转换路径端到端（自起后端 8011 + 假 MinerU 19002，零 LLM，断言见 AGENTS §7.2）。
+
+【门禁基线（2026-11-21）】pytest / ruff / format / lock / npm build / npm test 全绿；e2e：ppt 40/0（新）、mineru 67/0（假 zip 升级后回归无破坏）。条数以跑命令为准（AGENTS §7.1 约定）。
+
+【显式没做 / 下一步】
+- 片2：VLM 修复解析坏块（区域裁剪图 grounding + "LLM修复"标记 + 降级不抛）。
+- 片3：VLM 版面检查循环（只修版面不改字；`ppt_render_backend=soffice` 真渲染对图挑刺；届时处置三个保留模块）。
+- B 模表格样式（边框/底纹）未还原源文档；chart 块按图片搬运。
+
+#### 9.17.1 片2 交付：VLM 坏块修复（2026-11-21）
+
+**范围**：`services/ppt_repair.py` 修两类**机械可判**的坏块——title/paragraph 文本为空、table 的 html 缺失/解析不出网格。`_run_ppt_conversion` 在渲染前接入：先本地判坏（零成本），真有坏块才 `resolve_provider(user, None, "vision")`；没配 vision / VLM 失败 / 产出过不了结构校验，一律保留片1 兜底继续交付，**修复是旁路增强，绝不把能跑的转换判失败**。
+
+【关键不变式】
+- **防幻觉**：VLM 只看 `crop_region` 从原 PDF 按 bbox 裁出的 144dpi 区域图，提示词只许逐字转录；裁不出就不修。假 VLM 端点对**不带 image_url 的修复请求直接 400**，把 grounding 契约钉进 e2e。
+- **不可变装配**：`_apply_repair` 整块复制后替换并打 `repaired`；原 content_list 不动（单测钉住）。
+- **透明度**：渲染器对 `repaired` 块标"LLM 修复"（B 模块后注记 / A 模框下标签）——用户拍板要求。
+- **成本闸**：单份最多 20 块（`MAX_REPAIR_BLOCKS`），超出只修前 20 并 warning。
+- **计量**：`llm_calls.purpose` 新增 `ppt_repair` / `ppt_repair_degraded`，归 vision provider；`log.provider_name` 仅在真发生修复时写 vision 名，无坏块文档仍零 llm_calls、"无需模型"语义不变。
+
+【验证】新增 `tests/test_ppt_repair.py`（17 项：判据/装配/降级/不抛/成本闸/裁图/渲染标记，假 chat_json 零出网）；`test_e2e_ppt.py` 新增第 9 节（defective 假 zip → 修复计数 2 + 产物含修复文字与原生表 + "LLM 修复"标记 + 计量归属断言），全套 52/0；mineru e2e 67/0 回归无破坏。门禁全绿（条数以跑命令为准）。
+
+#### 9.17.2 片3 交付：VLM 版面检查循环（2026-11-21，只修版面不改字）
+
+**范围**：`services/ppt_layout.py:run_layout_loop`——渲染幻灯片（`pptx_renderer`，e2e 走 stub、生产走 soffice）→ VLM 只评版面（压盖/溢出/竖排堆叠/过小/失衡）→ 按 slide_index 映射到两个确定性旋钮重渲染。用户拍板边界：**文字一字不改**，所以修订路径里没有任何触碰文本内容的口子。
+
+【设计决策】
+
+| 点 | 取舍 |
+|---|---|
+| 修订旋钮只有两个 | 被点名的 A 幻灯片 → 源页强制改走 B 重排（治压盖/竖排堆叠的结构性手段）；被点名的 B 幻灯片 → 全局字号 ×0.85（下限 0.7）。旋钮少 = 行为可预测、可单测 |
+| slide→page 映射 | 渲染器新增 `render_blocks_with_meta`，meta 与幻灯片顺序一致 `{pages, mode}`；`render_blocks_to_pptx` 保持原签名做兼容包装 |
+| 轮次 | 语义=批评调用次数，默认 2（`PPT_LAYOUT_MAX_ROUNDS`）、硬上限 5；pass 早停；末轮仍 needs_revision 直接交付现版不白渲染 |
+| 失败哲学 | 解析失败/外呼失败/渲染失败 → degraded 记账 + 交付当前版，**绝不把"没听清"当通过**，也绝不让循环把转换判 failed（process 侧再兜一层 Exception） |
+| 送样 | 单轮至多 12 张均匀抽样、首尾必送；thread 标记 `[ppt-layout-thread:log-N]` 跨轮稳定，轮次写在标记外 |
+| 计量/开关 | 新增 purpose `ppt_critic` / `ppt_critic_degraded` 归 vision provider；`PPT_LAYOUT_ENABLED=false` 整体关闭 |
+
+【验证】`tests/test_ppt_layout.py` 11 项（pass 早停、A→flow 切换、B 缩字号、末轮不白渲染、降级不抛、渲染异常降级、硬上限钳制、越界脏项安全、抽样、0 轮关闭）；`test_e2e_ppt.py` 第 10 节（批评 2 轮 + 2 行 ppt_critic 计量 + 被点名横向页重排后页眉消失、正文与其余文字逐字未变），全套 60/0；mineru e2e 67/0、pytest/ruff/format/lock/npm 全绿。**至此 ② PDF→PPT 忠实转换片1/片2/片3 全部交付。**
+
+【遗留】B 模表格样式（边框/底纹）未还原源文档；真 VLM/真 soffice 端到端质量已由浏览器走查实证一轮（公共"默认全能模型"带 vision 能力，2 轮 ppt_critic success，交付件文字逐字完整）。**2026-11-21 用户拍板：阶段5 大纲流水线模块（graphs/ppt_graph.py、services/pptx_builder.py、schemas/ppt_outline.py、schemas/vlm_critique.py）及其 5 个单测整体 git rm**——现役 pptx 链路（§3.17–§3.19）对它们零引用，`render_pptx_to_images` 所在的 services/pptx_renderer.py 保留（片3 在用）；历史可从 git 找回，见 AGENTS §3.11。
+
+
 ## 10. 缺陷修复总结
 
 
@@ -1668,45 +1778,23 @@ POST `/file-urls/batch`（Bearer + `files:[{name,is_ocr:true}]`）→ PUT 预签
 
 ## 11. 环境变量 (.env)
 
-```
-DATABASE_URL=mysql+pymysql://root:password@localhost:3306/file_agent
-JWT_SECRET_KEY=your-secret-key-change-me
-JWT_EXPIRE_HOURS=2
-UPLOAD_DIR=uploads
-OUTPUT_DIR=outputs
-CORS_ORIGINS=http://localhost:5173
+⚠ **变量清单不在本文维护**。权威只有两份，且必须同步：`server/config.py` 的 `Settings`（代码侧唯一读取入口）与 `server/.env.example`（部署侧模板，入库）。**新增配置项必须同时改这两处**——只写 `Settings` 则新环境起不来，只写 `.env.example` 则是死配置（pydantic-settings 只注入 Settings 对象，**不写 `os.environ`**，`os.getenv` 永远读不到 `.env`，这是缺陷 s10 的成因）。
 
-# LLM 传输层（阶段 0）
-LLM_TIMEOUT_CONNECT=10
-LLM_TIMEOUT_READ=120
-LLM_MAX_RETRIES=2
-LLM_MAX_CONCURRENCY=4
-LLM_TRUST_ENV_PROXY=true
+抄一份清单在本文的历史代价：这一节曾长期写着 `DATABASE_URL=mysql+pymysql://…`（阶段 4 起是 Postgres）、`LLM_TIMEOUT_READ=120`（现默认 180）、`CHECKPOINT_PATH=checkpoints/grading.sqlite3`（**该配置项已撤销**，图状态与按块缓存随阶段 4 迁进 Postgres），而阶段 6 / MinerU / PPT 渲染新增的 17 个变量一个都没补进来。所以下面只留**读代码看不出来的口径**，取值与默认值一律现查。
 
-# 长文档分块批改（阶段 3）
-LONGDOC_CHUNK_CHARS=6000
-LONGDOC_ENABLED=true
-CHECKPOINT_PATH=checkpoints/grading.sqlite3
+按组的口径（组内变量名见 `.env.example`）：
 
-# MinerU 扫描件 OCR 兜底（2026-11-20，见 §9.15）
-MINERU_TOKEN=
-MINERU_BASE_URL=https://mineru.net/api/v4
-MINERU_POLL_INTERVAL=3
-MINERU_MAX_WAIT=600
-MINERU_HTTP_TIMEOUT=60
-
-LOG_LEVEL=INFO
-```
-
-> `CORS_ORIGINS` 必须在 `config.py` 的 `Settings` 里声明成字段才能生效：pydantic-settings 只把 `.env` 的值注入 Settings 对象，**不会写入 `os.environ`**，因此 `os.getenv("CORS_ORIGINS")` 永远读不到 `.env` 里的配置（这是 s10 的成因）。多个源用逗号分隔。**新增任何配置项都要先在 `Settings` 里加字段，再同步进 `.env.example`**，两条都是硬约定。
->
-> **LLM 相关取值口径**：`LLM_TIMEOUT_CONNECT` 只管建连，`LLM_TIMEOUT_READ` 等响应收完（长文档调大这一个）；`LLM_MAX_RETRIES` 只对网络错误 / 超时 / 429 / 5xx 生效；`LLM_MAX_CONCURRENCY` 是进程内上限；`LLM_TRUST_ENV_PROXY=false` 用来绕开 `NO_PROXY` 含非法条目（如裸 `[::1]`）时 httpx 构造即报 `InvalidURL: Invalid port` 的问题——需要走系统代理访问境外端点时**不要关它**。
->
-> `JWT_EXPIRE_HOURS` 文档口径是 2（也是 `config.py` 的默认值），本机 `.env` 可能为了开发方便设成 24。`.env` 不入库，以本机为准。
->
-> **分块批改口径**：`LONGDOC_CHUNK_CHARS` 是每块字符预算（中文约 1 字 ≈ 1 token），整篇不超过它就不进图；`LONGDOC_ENABLED=false` 把长文档也压回单发路径，用来跟分块结果做 A/B（评测台的 `--prompt-file` 只管提示词，切不切块得靠这个开关）。`CHECKPOINT_PATH` 是图状态文件，按块缓存自动用同目录的 `.chunks` 兄弟文件——两个连接写同一个 sqlite 会撞库锁。两者都在 `server/checkpoints/`，已 gitignore，**只增不自缩**，属定期清理项。
->
-> **MinerU 口径**：`MINERU_TOKEN` 留空 = 功能关闭，扫描件照旧 400（官方云 token 在 mineru.net/apiManage 申请，**有效期 90 天**，过期表现为 HTTP 200 + 业务码报错）。`MINERU_MAX_WAIT` 是单份文档的轮询总预算，超时落 failed 可重试；`MINERU_POLL_INTERVAL` 是轮询间隔。真实端点在境外，client 是 `trust_env=True`（要能走系统代理），与 embedding 的 `trust_env=False` 刻意不同。
+| 组 | 关键口径 | 细则 |
+|---|---|---|
+| `DATABASE_URL` | Postgres 连接串；密码里的 `@ : / #` 必须百分号编码。本机是 Docker `pgvector/pgvector:pg16`，宿主端口 **5434** | §9.10 |
+| `JWT_*` | 文档口径 `JWT_EXPIRE_HOURS=2`（也是默认值），本机常为 24；`.env` 不入库，以本机为准。无刷新 token | AGENTS §3.5 |
+| `UPLOAD_DIR` / `OUTPUT_DIR` / `CORS_ORIGINS` / `LOG_LEVEL` | 相对 `server/` 的路径首次启动自动建；CORS 多源逗号分隔 | AGENTS §3.4 |
+| `LLM_*` | `TIMEOUT_CONNECT` 只管建连、`TIMEOUT_READ` 等响应收完（思考模型要放宽）；`MAX_RETRIES` 只对网络错误/超时/429/5xx；`MAX_CONCURRENCY` 是**进程内**闸；`TRUST_ENV_PROXY=false` 用来绕开 `NO_PROXY` 含裸 `[::1]` 时 httpx 构造即 `InvalidURL: Invalid port`——**要翻代理访问境外端点时别关它**；`ENABLE_THINKING` 留空 = 请求体不带该字段，只有显式配置才注入 | AGENTS §3.6 |
+| `LONGDOC_*` | `CHUNK_CHARS` 是每块字符预算（中文约 1 字 ≈ 1 token），整篇不超它不进图；`ENABLED=false` 把长文档压回单发路径，用来跟分块做 A/B | AGENTS §3.10 |
+| `EMBEDDING_*` | **没有默认值**：`BASE_URL` / `MODEL` 留空即报"未配置"。本机 LM Studio 端口随上次启动漂移，写死一个"看着能用"的默认值换来的是静默打到别的模型上。`DIMENSIONS` 必须与模型实际输出、`spec_chunks.embedding` 列宽三处一致；`QUERY_PREFIX` 按模型训练方式配（bge-m3 **不加**，bge-large-zh 那批才加） | AGENTS §3.12 / §3.13 |
+| `SPEC_*` | `CHUNK_CHARS` 语义是"**单条条款上限**"，不是装箱目标；`RETRIEVAL_MODE` 是消融开关（hybrid/vector/lexical），别当装饰；`RAG_ENABLED=false` 时批改链路与阶段 6 之前逐字一致；`QUERY_WINDOW_CHARS` / `MAX_WINDOWS` 是为绕开 bge 静默截断而存在的滑窗 | AGENTS §3.13 / §3.14 |
+| `PPT_RENDER_*` | `BACKEND=stub` 出 1×1 占位 PNG（零依赖）/ `soffice` 经 WSL LibreOffice 真渲染（要装 libreoffice-impress）；`TIMEOUT` 首次冷启动慢 | AGENTS §3.11 |
+| `MINERU_*` | `TOKEN` 留空 = 扫描件功能关闭，行为与接入前逐字一致。token 在 mineru.net/apiManage 申请，**有效期 90 天**，过期表现为 HTTP 200 + 业务码报错。`MAX_WAIT` 是单份文档的轮询总预算，`HTTP_TIMEOUT` 是单次请求超时，两回事。真实端点在境外，client `trust_env=True`，与 embedding 的 `trust_env=False` 刻意不同 | AGENTS §3.15 |
 
 ---
 

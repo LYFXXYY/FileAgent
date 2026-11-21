@@ -3,10 +3,23 @@
 本文件只记录**本项目特有、读代码不容易立刻发现**的约定与陷阱。
 设计背景、Java→Python 对照、完整 API 表、DDL、缺陷修复台账见 [SPEC.md](SPEC.md)（权威设计文档），此处不重复。
 
+**引用代码位置的写法**：用符号名（`api/v1/process.py:_run_processing`、`schemas/grading.py:_TYPE_ALIASES`），**不写行号**。实测全文 16 处 `file.py:NN` 引用里抽查 8 处已有 4 处指偏——行号随任何一次改动腐烂，符号名不会。
+
 ## 1. 项目速览
 
-文档 AI 处理平台：上传文档 → 按用户自定义 Prompt 调 LLM → 下载结果。**当前输入支持 `.docx` 与 `.pdf`**（派发表 `api/v1/process.py:TEXT_EXTRACTORS`，白名单由它派生）；文字型 PDF 走本地提取，**扫描件 PDF 在配了 `MINERU_TOKEN` 时于处理阶段走 MinerU 云 OCR 兜底**（见 §3.15），没配则照旧 400。批改类任务输出红字 diff 标注 + 可定位的问题清单。**结果格式由 `task.output_format` 决定：`docx`（默认，批改/润色/摘要等）/ `pptx`（阶段 5 PDF→PPT）/ `md`（① md 转换，零 LLM，见 §3.16）**——别再写"结果永远是 .docx"。
+文档 AI 处理平台：上传文档 → 按用户自定义 Prompt 调 LLM → 下载结果。**当前输入支持 `.docx` 与 `.pdf`**（派发表 `api/v1/process.py:TEXT_EXTRACTORS`，白名单由它派生）；文字型 PDF 走本地提取，**扫描件 PDF 在配了 `MINERU_TOKEN` 时于处理阶段走 MinerU 云 OCR 兜底**（见 §3.15），没配则照旧 400。**但这条只描述批改/编辑链路**：md 转换任务里所有 PDF（含文字型）都走 MinerU，见下方依赖表和 §3.16。批改类任务输出红字 diff 标注 + 可定位的问题清单。**结果格式由 `task.output_format` 决定：`docx`（默认，批改/润色/摘要等）/ `pptx`（② PDF→PPT 忠实转换，见 §3.17）/ `md`（① md 转换，零 LLM，见 §3.16）**——别再写"结果永远是 .docx"。
 平台定位已不止 Word，但表格不进批改正文、OCR 不做本地推理——改文案前先认清这一点，别把 UI 写成"任意文档全能处理"。
+
+**三个功能各自的依赖**（别按功能名猜，按这张表；判据在 `api/v1/process.py`）：
+
+| 功能 | LLM | RAG（embedding + pgvector） | MinerU |
+|---|---|---|---|
+| 批改 / 编辑（`output_format=docx`） | 必需 | 仅 `task.is_grading` 时召回条款（转换类已由互斥排除）；长文**按块各查一次** | 仅扫描件 PDF：OCR 出的 markdown **剥成纯文本**当正文，交付物仍是 diff docx |
+| PDF→PPT（`pptx`） | 不用文本 LLM；VLM 仅两处旁路——坏块修复（`ppt_repair`）与版面批评循环（`ppt_critic`），都要"有坏块/开启循环 且 配了 vision 提供商"（§3.18/§3.19） | 不用 | **同 md，所有 PDF（含文字型）都走**；产物喂块驱动忠实转换渲染器（§3.17） |
+| md 转换（`md`） | **零 LLM 是硬不变式**（不解析 provider、不写 `llm_calls`） | 不用 | **所有 PDF（含文字型）都走**；`docx→md` 走本地 python-docx，零外呼 |
+
+⚠ 扫描件 PDF 一律进 MinerU，但**只有 md / pptx 任务把 MinerU 版面产物当交付原料**；批改任务拿的是 `markdown_to_plain_text()` 之后的纯文本（守 §3.8 与 docx 同构的不变式），那份 markdown 只作为 structured 三件套落盘留存。
+
 **批改类长文档**（> `LONGDOC_CHUNK_CHARS`，默认 6000 字）走 LangGraph 分块图扇出批改，见 §3.10；非批改类任务不分块。
 前后端分离单体，当前阶段无消息队列、无 Redis；数据库走 Docker（`pgvector/pgvector:pg16` 容器）。
 
@@ -16,7 +29,7 @@
 | 前端 | `client/` | Vue 3 `<script setup>` + TS + Vite + Element Plus + Pinia |
 | 数据库 | Postgres `localhost:5434/file_agent`（Docker `pgvector/pgvector:pg16`） | 业务 5 表 + 规范库 2 表（`spec_docs` / `spec_chunks`）+ LangGraph 6 表，共 13 张 |
 
-⚠ **阶段 4 主体已落（2026-11-16）**：业务表 + LangGraph saver/store + `spec_docs`/`spec_chunks` 都已就位，MySQL 退役。剩下唯一项是 "在 Postgres 上跑 e2e 回归"，见 SPEC §9.10。Docker 容器名 `fileagent-postgres`，数据卷在 `D:\docker\fileagent-postgres`。LangGraph 表 6 张：`checkpoints` / `checkpoint_blobs` / `checkpoint_writes` / `checkpoint_migrations` / `store` / `store_migrations`，由 `setup()` 自动建。**Windows 硬约束**：psycopg3 异步模式 + 默认 ProactorEventLoop 直接卡死，`main.py` 顶部已切 `WindowsSelectorEventLoopPolicy`；任何独立脚本若用 `AsyncPostgresSaver/Store` 必须自己加这段。
+⚠ **阶段 4 已完成（2026-11-16）**：业务表 + LangGraph saver/store + `spec_docs`/`spec_chunks` 都已就位，MySQL 退役，e2e 各套也已在 Postgres 上跑绿（清单见 §7.2）。Docker 容器名 `fileagent-postgres`，数据卷在 `D:\docker\fileagent-postgres`。LangGraph 表 6 张：`checkpoints` / `checkpoint_blobs` / `checkpoint_writes` / `checkpoint_migrations` / `store` / `store_migrations`，由 `setup()` 自动建。**Windows 硬约束**：psycopg3 异步模式 + 默认 ProactorEventLoop 直接卡死，`main.py` 顶部已切 `WindowsSelectorEventLoopPolicy`；任何独立脚本若用 `AsyncPostgresSaver/Store` 必须自己加这段。
 
 分层：`api/v1`（路由）→ `services`（业务）→ `models`（ORM）；`schemas` 是 Pydantic 出入参；`middleware/auth.py` 提供 `get_current_user` 依赖。
 核心链路三段分离：`POST /upload` → `POST /process/{log_id}` → `GET /download/{log_id}`，状态存在 `operation_logs`（`pending → processing → done / failed`）。
@@ -28,7 +41,7 @@
 ```bash
 uv sync                                        # 装依赖（含 dev 组）
 uv run python run_backend.py                   # 起后端（必须走这个入口，不能直接 uvicorn main:app，见下方 ⚠）
-uv run pytest -q                               # 363 passed, 1 skipped；纯函数 + 假 client + 内存 SQLite + 合成 PDF，不连 Postgres 不出网
+uv run pytest -q                               # 全绿；纯函数 + 假 client + 内存 SQLite + 合成 PDF，不连 Postgres 不出网（条数见 §7.1 的口径说明）
 uv run ruff check .                            # 全绿
 uv run ruff format --check .                   # 全部已格式化
 uv lock --check                                # 依赖锁一致性
@@ -36,15 +49,15 @@ uv run python backfill_spec_embeddings.py --check   # 看规范库还欠多少�
 uv run python backfill_spec_embeddings.py      # 真编码回填：需 .env 的 EMBEDDING_* 指向在跑的端点
 uv run python migrate_add_log_needs_ocr.py --check  # 看 needs_ocr / stored_filename 两列现状（只读）
 LONGDOC_CHUNK_CHARS=60 LLM_TRUST_ENV_PROXY=false uv run python run_backend.py    # 跑 test_e2e_structural 用这套环境
-uv run uvicorn test_llm_server:app --port 19000            # 假 OpenAI 文本端点（批改 + PPT 大纲共用同一进程，按 system prompt 路由）
-uv run uvicorn test_vlm_server:app --port 19001            # 假 VLM 视觉批评端点（PPT 批评循环 e2e 用）
+uv run uvicorn test_llm_server:app --port 19000            # 假 OpenAI 文本端点（批改类 e2e 用）；文件里那套"幻灯片大纲"路由属已删除的阶段5链路，仅历史残留
+uv run uvicorn test_vlm_server:app --port 19001            # 假 VLM 端点：② PPT 的坏块修复（[ppt-repair:]）与版面批评（[ppt-layout-thread:]）e2e 在用（test_e2e_ppt.py 第 9/10 节）
 uv run uvicorn test_mineru_server:app --port 19002         # 假 MinerU 云端点（扫描件 OCR 兜底 e2e 用）
-uv run python test_e2e.py                      # 端到端 31 项：需后端在 8000 已起 + 假 LLM 不用，见 §7
-uv run python test_e2e_structural.py           # 结构化批改 + PDF + 分块端到端 60 项，零真实 token
-uv run python test_e2e_rag.py                  # 规范库入库→检索→注入 端到端 41 项：后端 + 假 LLM + **本地 embedding 端点**三者在跑
+uv run python test_e2e.py                      # 端到端冒烟：需后端在 8000 已起 + 假 LLM 不用，见 §7.2
+uv run python test_e2e_structural.py           # 结构化批改 + PDF + 分块端到端，零真实 token
+uv run python test_e2e_rag.py                  # 规范库入库→检索→注入 端到端：后端 + 假 LLM + **本地 embedding 端点**三者在跑
 uv run python -m eval.retrieval                # recall@k 三臂对拍（纯本地，零 token）；--modes hybrid,vector,lexical / --k 5
-uv run python test_e2e_ppt.py                  # PPT 流水线端到端 28 项：后端 + 假 LLM 19000 + 假 VLM 19001 三进程必起
-uv run python test_e2e_mineru.py               # 扫描件 OCR 兜底 + md 转换端到端 67 项：**后端由脚本自起**（FA_PORT=8010，注入假 MinerU 环境），另需假 LLM 19000 + 假 MinerU 19002 在跑
+uv run python test_e2e_ppt.py                  # PDF→PPT 忠实转换端到端：**后端由脚本自起**（FA_PPT_E2E_PORT=8011，注入假 MinerU 环境），另需假 MinerU 19002 + 假 VLM 19001 在跑（第 9 节坏块修复）；不用假 LLM
+uv run python test_e2e_mineru.py               # 扫描件 OCR 兜底 + md 转换端到端：**后端由脚本自起**（FA_PORT=8010，注入假 MinerU 环境），另需假 LLM 19000 + 假 MinerU 19002 在跑
 uv run python -m eval.runner --provider 5 --case clean   # 评测台冒烟：**会真花钱**，先单条再全量
 ```
 
@@ -72,31 +85,31 @@ npm run build    # = vue-tsc -b && vite build，唯一的类型门禁（无 esli
 ### 3.1 数据隔离（安全底线）
 
 - **每个查询都带 `user_id == current.id`**，providers / tasks / logs / process 四个路由无一例外，新接口照抄。
-- `user_id` 只取自 `Depends(get_current_user)`，**绝不接受请求体传入**（`server/api/v1/providers.py:50`、`server/api/v1/tasks.py:46`）。
-- 越权一律 **404 而非 403**，不暴露"资源存在但不属于你"（`providers.py:71`、`tasks.py:63`）。
-- task 引用 provider 时必须校验 `provider.user_id == current.id`（`tasks.py:41`、`process.py:151`）。
+- `user_id` 只取自 `Depends(get_current_user)`，**绝不接受请求体传入**（`api/v1/providers.py:create_provider`、`api/v1/tasks.py:create_task`）。
+- 越权一律 **404 而非 403**，不暴露"资源存在但不属于你"（`providers.py:update_provider` / `delete_provider`、`tasks.py:update_task` / `delete_task` 里查不到就 404）。
+- task 引用 provider 时校验的是**可用性**而不是只看归属：统一走 `services/llm.py:provider_usable_by`（自己的 provider，或被授权的公共 provider）。管理员功能落地后这里已不是 `provider.user_id == current.id` 的裸比较，改可见性规则看 SPEC §9.11。校验点：`tasks.py:create_task` / `update_task`、`process.py:process`。
 - `api_key` **永不出现在响应里**：走 `ProviderResponse.from_orm_masked()`（前 4 位 + `****`）。LLM 错误响应体截断 500 字符，`error_message` 截断 2000。
 
 ### 3.2 删除顺序（否则外键约束 → 500）
 
 必须**先置空引用再删**：
 
-- 删 provider → 先 `Task.provider_id = None`（`providers.py:100`）
-- 删 task → 先 `OperationLog.task_id = None`（`tasks.py:92`）
+- 删 provider → 先 `Task.provider_id = None`（`api/v1/providers.py:delete_provider`）
+- 删 task → 先 `OperationLog.task_id = None`（`api/v1/tasks.py:delete_task`）
 
 模型侧**声明**了 `ON DELETE SET NULL`（`task.provider_id` / `log.task_id`）。阶段 4 起 Postgres 是新建库，外键规则按 ORM 一次建齐（实测 `pg_constraint.confdeltype` 8 条全部匹配，不再有"MySQL 老库 vs ORM 声明"这档差异）。应用层那次置空**保留**——单测仍走内存 SQLite（不会真的级联），删 provider 走应用层置空让单测和真库行为一致；同时如果未来引入 Alembic，这条路径也不依赖具体方言。
 `llm_calls` 表的外键规则确实是 `SET NULL` / `CASCADE`。日志和计量靠 `task_name` / `provider_name` 快照在关联被删后仍可读。
 
 ### 3.3 处理必须后台化
 
-`POST /process/{log_id}` **立即返回 processing**，真正干活在 `_run_processing`（`server/api/v1/process.py:176`）：
+`POST /process/{log_id}` **立即返回 processing**，真正干活在 `api/v1/process.py:_run_processing`：
 
 - 必须用独立 `SessionLocal()`——请求级 `db` 在响应发出后就关闭了。
 - **每一条失败路径都要 `_mark_failed()`**，绝不允许日志停在 processing（前端会无限轮询）。
 - 只有 `pending` / `failed` 可触发；`GET /process/{id}/status` 纯只读，不会重复触发 LLM。
-- `BackgroundTasks` 不持久化 → `server/main.py:75` 启动时把僵尸 processing 重置为 failed。**该 reaper 只在单 worker 下正确**；上多 worker 前必须换成带超时阈值的 reaper 或任务队列。
+- `BackgroundTasks` 不持久化 → `server/main.py:lifespan` 启动时把僵尸 processing 重置为 failed。**该 reaper 只在单 worker 下正确**；上多 worker 前必须换成带超时阈值的 reaper 或任务队列。
 - provider 一律走 `resolve_provider()`：task 指定 > 当前用户默认 active（按 id 升序 + 按 `capabilities` 筛）。指定的 provider 失效或能力不匹配要**显式报错**，不许静默 fallback 到别的模型。
-- 请求里已对"task 指定了 provider"提前校验（`process.py:154`），让这类错误在返回 processing **之前**就是 400，而不是后台跑一半才 failed。
+- 请求里已对"task 指定了 provider"提前校验（`process.py:process` 调 `resolve_provider` 那几行），让这类错误在返回 processing **之前**就是 400，而不是后台跑一半才 failed。
 
 ### 3.4 配置读取
 
@@ -105,15 +118,15 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 
 ### 3.5 其他后端事实
 
-- 同步/异步约定：纯 DB 操作用 `def`（FastAPI 自动丢线程池），涉及外部 HTTP 才 `async def`。已知同步阻塞点用 `# noqa: ASYNC230` 并写明理由（`process.py:89`）。
-- 日志用 `logging.getLogger("fileagent...")`，**不要 print**（Windows GBK 控制台中文乱码）；独立脚本需 `sys.stdout.reconfigure(encoding="utf-8")`。root handler 已在 `main.py:46` 的 `_setup_logging()` 里配好，级别走 `LOG_LEVEL`。⚠ 那个 `basicConfig(force=True)` 不能省——`--reload` 会反复重导入模块，不清掉旧 handler 每行日志会打印两遍。
+- 同步/异步约定：纯 DB 操作用 `def`（FastAPI 自动丢线程池），涉及外部 HTTP 才 `async def`。已知同步阻塞点用 `# noqa: ASYNC230` 并写明理由（`process.py` 里落盘与读回 PDF 那三处 `open(...)`）。
+- 日志用 `logging.getLogger("fileagent...")`，**不要 print**（Windows GBK 控制台中文乱码）；独立脚本需 `sys.stdout.reconfigure(encoding="utf-8")`。root handler 已在 `main.py:_setup_logging()` 里配好，级别走 `LOG_LEVEL`。⚠ 那个 `basicConfig(force=True)` 不能省——`--reload` 会反复重导入模块，不清掉旧 handler 每行日志会打印两遍。
 - `LogStatus` 是 `enum.StrEnum`，配 `Enum(..., values_callable=...)` 存 **value**（`"pending"`）而非 name；阶段 4 后 Postgres 用原生枚举类型 `logstatus`（`CREATE TYPE logstatus AS ENUM(...)`，由 `create_all()` 自动建）。改枚举要连带回归后端状态流转与前端字符串比较。
 - 正文权威副本在 `operation_logs.original_content`，磁盘文件只是审计留存。两列声明已是 `Text()`——Postgres 的 TEXT 没有大小上限，原 MySQL 时代的 `with_variant(LONGTEXT, "mysql")` 已撤。`structured_output` 同样是 `Text`。
 - 提取层两条硬边界：`extract_text_from_docx` **只读 `doc.paragraphs`**（不含表格/文本框），`extract_text_from_pdf` **不读表格、不做 OCR**——已知功能边界，不是 bug。细则见 §3.8。
-- 上传白名单 = `TEXT_EXTRACTORS.keys()`（`.docx` / `.pdf`），落盘名 `uuid4().hex + ext`。**阶段 4 起有两份 `TEXT_EXTRACTORS`**：`api/v1/process.py:63` 是批改/处理链路（落盘 + 处理），`services/spec_storage.py:` 是规范库入库链路（只切块存表，不落盘）。加格式时两处都要改，否则规范库会出现"上传得了，规范进不去"或反过来。
+- 上传白名单 = `TEXT_EXTRACTORS.keys()`（`.docx` / `.pdf`，`ALLOWED_EXTENSIONS` 由它派生），落盘名 `uuid4().hex + ext`。**有两份同名 `TEXT_EXTRACTORS`**：`api/v1/process.py` 那份是批改/处理链路（落盘 + 处理），`services/spec_storage.py` 那份是规范库入库链路（只切块存表，不落盘）。加格式时两处都要改，否则规范库会出现"上传得了，规范进不去"或反过来。
 - 认证：直接用 bcrypt，**不要引 passlib**（1.7.4 与 bcrypt 4.1+ 不兼容），密码截 72 字节；JWT HS256，`sub` 是字符串化 user_id；`/auth/me` 只做一件事——启动时刷新 role/can_use_default 快照（AppLayout 挂载调用，失败静默）；无刷新 token。
-- 下载中文文件名必须 RFC 5987：`filename*=UTF-8''{quote(...)}`（`process.py:324`）。
-- diff 用 `SequenceMatcher(autojunk=False)`——**关 autojunk 对中文是必须的**，否则"的/是/在"被当噪声导致结果不准（`server/services/diff.py:30`）。
+- 下载中文文件名必须 RFC 5987：`filename*=UTF-8''{quote(...)}`（`api/v1/process.py:download`）。
+- diff 用 `SequenceMatcher(autojunk=False)`——**关 autojunk 对中文是必须的**，否则"的/是/在"被当噪声导致结果不准（`services/diff.py:compute_diff`）。
 - `create_diff_docx` 先 `strip_markdown` 再 diff，按 `\n` 重组段落，末尾分页追加一份无标注纯净全文。
 
 ### 3.6 LLM 传输层（`services/llm.py`）
@@ -156,7 +169,7 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - 失败一律 `PdfError` → 路由转 400（打不开 / 有打开密码 / 没有文字层 / 文字层过薄）。**扫描件两条判据抛子类 `ScannedPdfError`**——上传路由靠它分流 MinerU 兜底（§3.15），损坏/加密仍是父类，OCR 救不了它们，别混用。
   最后一种是扫描件判据的补集：整页是图片、只被 OCR 出一层图注水印的文档（实测一份 8 页护理指南只有 64 字符，却带着 16 张图），旧判据"有没有文字层"对它形同虚设，会被当正常文档送去付费模型。新判据三条同时成立才拦：页数 ≥2、每页平均字符 < `_MIN_CHARS_PER_PAGE`(80)、图片数 ≥ 页数——**带图这个条件不能省**，否则确实只有一两页短文的正常文档会被误杀。
 - **扫描件绝不回空文本**——那会让用户以为文档本来就是空的。
-- 依赖：`pymupdf` 2.x 把版面分析（`pymupdf-layout` → onnxruntime + numpy）和 Markdown 导出（`pymupdf4llm` → networkx + tabulate）做成了**硬依赖**。`services/pdf.py` 只用 `get_text("blocks")`，对这些零引用，所以 `pyproject.toml` 的 `[tool.uv] override-dependencies` 用"永不成立的 marker"把它们摘掉了：锁 **75 包**、`.venv` **233M**（摘之前是 84 包 / 337M）。**阶段 5 真要用版面分析时，删掉那几行 override 就能装回来**，别把它当成已经付过的成本。`import pymupdf`，**不要用 `fitz`**（2.x 里已弃用，会打 FutureWarning）。
+- 依赖：`pymupdf` 2.x 把版面分析（`pymupdf-layout` → onnxruntime + numpy）和 Markdown 导出（`pymupdf4llm` → networkx + tabulate）做成了**硬依赖**。`services/pdf.py` 只用 `get_text("blocks")`，对这些零引用，所以 `pyproject.toml` 的 `[tool.uv] override-dependencies` 用"永不成立的 marker"把它们摘掉了（省下的体积主要是 onnxruntime + numpy）。**将来真要用版面分析时（阶段 5 已完成但用的是 WSL LibreOffice 渲染，没碰 `pymupdf-layout`），删掉那几行 override 就能装回来**，别把它当成已经付过的成本。包数以 `grep -c '^\[\[package\]\]' uv.lock` 现测为准。`import pymupdf`，**不要用 `fitz`**（2.x 里已弃用，会打 FutureWarning）。
 
 ### 3.9 评测台（阶段 2 最小版）
 
@@ -185,16 +198,13 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - 假 client 在扇出下**必须按请求内容路由**（见 `tests/test_grading_graph.py` 的 `_RouteClient`）：按脚本顺序吐响应会把 A 块的答复发给 B 块，测试通过只是在测运气。
 - `checkpoints/` 已 gitignore、只增不自缩，属定期清理项；`interrupt` 人工确认分块方案还没做（要先有 UI）。
 
-### 3.11 PPT 流水线（阶段 5 · LangGraph 多节点 + 批评循环）
+### 3.11 PPT 流水线（阶段 5 · 已整体删除，历史）
 
-- **`build_pptx(outline, *, image_refs=None, template_path=None)` 三参签名是 §9.12.2.C 硬约束**——图片轮启用时只换 image_refs 实参、不改外部接口。**不要"顺手"删 image_refs 形参**或者改成 Optional[List[Image]]，那样下次接图片提取又要重新拆 builder。
-- **`render_pptx_to_images(pptx_bytes, slide_count) -> list[bytes]` 是 s5.4 的双后端派发点**。`settings.ppt_render_backend`：`stub`（默认，1×1 占位 PNG）/ `soffice`（WSL LibreOffice 真渲染，本机 .env 已启用）。换实现只改 `_render_via_soffice` 函数体，graphs/ppt_graph.py 不动、单测的 stub client 不动。**Windows↔WSL 文件交换必须走 `/mnt/<盘>` NTFS 挂载，禁用 `\\wsl.localhost` UNC**（本机两个 WSL 视图互相看不见，见 SPEC §9.13 运行约定 2）。
-- **批评循环 `max_rounds` 默认 2、硬上限 5**。超过硬上限要 logger.warning 后钳到 5，绝不静悄悄改。语义是"批评 LLM 调用次数"，不是"修订次数"——pass 早停时实际只跑了 1 次。
-- **VLM 提供商通过 `resolve_provider(user, None, "vision")` 找**，**不接受 `provider_id` 直传**。这是 §3.3 的 capability 路由约束在 s5.6 的延伸：批评和大纲可能用不同厂商，硬绑 provider_id 会让"换 VLM 不换 LLM"做不出来。
-- **`llm_calls.purpose` 阶段 5 新增 4 个取值**：`outline` / `outline_degraded` / `critic` / `critic_degraded`。加新外呼点（比如未来 s5.4 加图像质量评估）要扩这张集合 + 评测台分组。
-- **critic 调用的 messages 文本里必须含 `[critic-thread:<id>]` 标记**，mock VLM 端按它计数（`test_vlm_server._calls_per_thread`）。真实 VLM 不看这串，但 e2e 退出条件全靠它。thread_id 用闭包传进 `_build_graph`，**不要塞 state**——state 进 checkpoint 后会因 round_count 一起涨，多一帧不变字段没意义。
-- **`parse_outline_output` / `parse_critique` 阶梯降级不许抛**。和 §3.7 批改结构化一样：用户的文档必须拿到一个结果。critic 解析失败一律归 needs_revision + degraded=True，**绝不返回 pass**——把"没听清"当"通过了"是交付污染。
-- **没有 checkpointer**：s5.4 stub 渲染阶段批评循环跑一次也就几毛；接真渲染（耗时秒级 + 多 VLM 往返）之后再考虑挂 `AsyncPostgresSaver`。`thread_id` 已预留，调用接口不变。
+⚠ **2026-11-21 整条大纲流水线已按用户决定删除**：`graphs/ppt_graph.py` / `services/pptx_builder.py` / `schemas/ppt_outline.py` / `schemas/vlm_critique.py` 及其 5 个单测已 `git rm`（历史可从 git 找回）。现役 pptx 链路是 §3.17–§3.19 的忠实转换；其中仍有效的机制已迁到：
+- **`render_pptx_to_images(pptx_bytes, slide_count)` 双后端派发点保留**（`services/pptx_renderer.py`，片3 版面循环在用）。`settings.ppt_render_backend`：`stub`（默认）/ `soffice`（WSL LibreOffice 真渲染）。**Windows↔WSL 文件交换必须走 `/mnt/<盘>` NTFS 挂载，禁用 `\\wsl.localhost` UNC**（见 SPEC §9.13 运行约定 2）。
+- **轮次语义**（批评调用数、默认 2 硬上限 5、pass 早停）与 **"解析失败绝不当通过"** 的边界已原样继承到 §3.19。
+- **VLM 走 `resolve_provider(user, None, "vision")`、不接受 provider_id 直传**（§3.3 capability 路由的延伸）——现役两处 VLM 都守这条。
+- 阶段 5 的 `outline` / `critic` 等 purpose 取值不再产生新行；现役新增的是 `ppt_repair(_degraded)` 与 `ppt_critic(_degraded)`。
 
 ### 3.12 规范库向量层（阶段 6 · A1）
 
@@ -271,15 +281,50 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - **`NO_PROXY` 裸 `[::1]` 会让 httpx 抛 InvalidURL**：`config.py:normalize_no_proxy_env()` 剥掉它，`main.py` 启动与 `mineru._get_client` 都调。⚠ `httpx.InvalidURL` **不是** `httpx.HTTPError` 子类，except 要两个都接。⚠ Windows `os.environ` 大小写不敏感（NO_PROXY 与 no_proxy 同键），`test_no_proxy.py` 按 `sys.platform` 分支，小写键测试在 win32 skip。
 - **MinerU 对拉丁字符串可能插空格**（实测合成文字 PDF："P DF 转 M ar k d o w n"，中文段落干净）：这是云端版面识别对该类输入的产出特性，我方管道如实透传，**不是转换缺陷**，别在 docx_md / ocr 层"顺手修"。
 
+### 3.17 PDF→PPT 忠实转换（② 片1，2026-11-21，替换阶段5大纲路径）
+
+- **定位是"转换"不是"修改"**：忠实搬运 MinerU 版面块，不重组、不改写、不摘要；产出以**可编辑**为目标（文字进文本框、表格进原生 PPT 表、图按位贴图）。阶段5 的"大纲 LLM 重组"路线已从处理链路摘除（§3.11）。片1 零 LLM 是硬不变式（不解析 provider、不写 `llm_calls`、`provider_name=NULL`、`structured_output=NULL`——重试时顺带清掉旧 ppt_outline 信封残留）。
+- **输入只收 PDF**：pptx 任务上传 docx 直接 400；PDF 没配 `MINERU_TOKEN` 上传即 400（fail-fast，同 md 的判据）。与批改互斥（`schemas/task.py` 创建 422 / `api/v1/tasks.py:update_task` 合并值 400），前端 `Tasks.vue` 的 `watch(output_format)` 对 md/pptx 同向强制归位。
+- **渲染器在 `services/ppt_convert.py:render_blocks_to_pptx(pages, images, page_sizes, *, mode="auto")`**，纯函数不碰 DB 不出网（可假块单测）。输入是 content_list **v2 页嵌套**形状：外层页列表、内层块列表，bbox **归一化 0..1000**（不是 pt！），真实页面宽高比靠 `MinerUResult.page_sizes`（layout.json）还原。`test_mineru_server.py` 的假 zip 已镜像这套形状（页嵌套 + layout.json + 合法 PNG——假 jpeg 字节会把 add_picture 炸掉）。
+- **布局双模：B 阅读顺序重排为主、A 整页忠实兜底**（用户拍板："转换目的是做成能用的 PPT"）。`mode="auto"` 逐页分流：横向页（幻灯导出件）或密集页（视觉块归一化面积 ≥0.45 或块数 >30）→ A；其余 → B。阈值是对两份真实护理文档实测调出来的（最大 0.21 / 26 块），调它先重测。
+- **B 流式完整性不变式**：超长段落 `_split_text_pieces` 切成**连续子串**（拼接逐字等于原文，不丢字不插字）；超高表格无跨格时按行拆成多张原生表（单元格全保留），带跨格则回落整表渲染图。**A 模压盖不变式**：bbox 互不重叠 + 字装进框（`_fit_font_pt`）→ 不压盖；行距用绝对 Pt（倍数行距会被 PowerPoint 再乘默认行高）。
+- **流式图片两条实拍教训**：整高贴图会把图文拆成碎片页（真实指南 56 页）→ 限高 0.6 内容高；低分辨率 logo 放大到糊 → 放大上限 1.5pt/px（2 倍）。
+- **噪声按分流模式分**：A 模横向页保留页眉页脚（那本来就是页标题/品牌标）、页码永远跳；B 模流式一律跳页眉页脚页码。
+- **交付链路**：`_run_ppt_conversion` 处理时把二进制落 `outputs/pptx/{log_id}.pptx`，下载路由 `_read_pptx_delivery` 直接读（缺失 400"请重新处理"），文件名 `转换_{stem}.pptx`。片3 版面修订后就地覆盖这个文件，接口不变。structured 三件套照旧落盘（片2 坏块修复要拿区域原图 grounding）。
+- **`process.py` 的 provider 预校验对 md/pptx 跳过**（转换不用文本 provider）；老 LLM 路径的 `critic_provider` 解析、`_render_outline_as_text`、`_run_model` 的 pptx 分支已删，`_error_purpose_for` 不再返回 `outline`。
+
+### 3.18 PPT 坏块 VLM 修复（② 片2，2026-11-21）
+
+- **只修两类确定性坏块**（`services/ppt_repair.py:find_defects`）：title/paragraph 文本为空、table 的 html 缺失或解析不出网格。**判据必须可机械判定**，"看着质量差"是片3 版面循环的范围，不在这里主观裁决。
+- **防幻觉铁律：没有区域原图就不修**。`crop_region` 用 pymupdf 按 bbox（归一化 0..1000 × `page_sizes` 的 pt）从**原 PDF** 裁区域渲染 144dpi PNG 喂 VLM，提示词只许逐字转录；裁不出（页码越界/退化框）直接跳过该块，绝不"凭上下文补"。
+- **产出必须过结构校验才替换**：表格要求 `<table>` 且 `parse_html_table` 出网格；文字要求非空。过不了 → `degraded=True` 保留原块，**绝不抛**（§3.7"用户的文档必须拿到一个结果"的延伸）。
+- **装配走不可变**：`_apply_repair` 整块复制后替换 content 并打 `repaired` 标记；原 `result.content_list` 不动（单测钉着这条）。
+- **修复是旁路增强**：没配 vision 提供商（`resolve_provider(user, None, "vision")`，不接受 provider_id 直传，§3.3 延伸）、VLM 挂了、产出烂了——一律保留片1 兜底继续交付，转换照 done。所以 §3.17 的"零文本 LLM"不变式仍然成立，只是 llm_calls 可能多出 `ppt_repair` / `ppt_repair_degraded` 行（归 vision provider；`log.provider_name` 仅在真发生过修复时写 vision 名，"无需模型"对无坏块文档继续成立）。
+- **成本闸 `MAX_REPAIR_BLOCKS=20`**：坏块成串通常意味着整份解析失败，逐块烧 VLM 不如整体兜底；超上限只修前 20 个并 logger.warning。
+- **渲染器负责透明度**：带 `repaired` 的块在产物里标注"LLM 修复"（B 模在块后追加小字注记，A 模在块框下方贴标签）。这是用户拍板的要求，不是装饰——删标记等于交付污染。
+- **假端点契约**：`test_vlm_server` 按 `[ppt-repair:log-N]` 标记分派修复分支，且**请求里没有 image_url 直接 400**（把 grounding 契约钉在 e2e 层）；`test_mineru_server` 的 `defective` 模式吐含空段落 + 无 html 表格的 v2 页。`/v1/_mock/repairs` 计数供 e2e 断言"真打过 VLM"。
+
+### 3.19 PPT 版面检查循环（② 片3，2026-11-21，只修版面不改字）
+
+- **用户拍板的边界**：循环**只查/修版面，绝不改文字**。所以修订只有两个确定性旋钮（`services/ppt_layout.py:_apply_revisions`）：被点名的 A 整页忠实幻灯片 → 其源页强制改走 B 流式重排（重排天然消压盖/竖排堆叠）；被点名的 B 流式幻灯片 → 全局 `font_scale *= 0.85`（下限 0.7）。文字在任何路径下都没有被改写的口子——这是不变式，不是实现细节。
+- **修订依据靠渲染元数据**：`services/ppt_convert.py:render_blocks_with_meta` 返回与幻灯片顺序一致的 `[{pages, mode}]`；批评给的 `slide_index` 靠它映射回源页/旋钮。**改渲染器分页逻辑必须同步维护 meta**（meta 长度 == 幻灯片数是硬约定，占位页也算）。
+- **轮次语义同 §3.11**：`max_rounds`（配置 `PPT_LAYOUT_MAX_ROUNDS`，默认 2）指**批评 VLM 调用次数**，硬上限 5（超了 warning 后钳制）；pass 早停时实际只跑 1 次。末轮仍是 needs_revision 就交付当前版本，不再白烧一轮重渲染。
+- **"没听清"绝不当前提通过**：批评产出解析失败 → `degraded=True` 记账 + 收手交付现版（继承 §3.11 边界）；批评外呼失败、渲染后端异常同理——**整个循环是旁路**，任何异常都不允许把已能交付的转换判 failed（process.py 里还有一层 Exception 兜底防循环自身出 bug）。
+- **送样抽样有上限**：单轮至多 12 张，均匀抽样 + 首尾必送（`_sample_indices`）；thread 标记 `[ppt-layout-thread:log-N]` 跨轮稳定（假端点按它计数），轮次写在标记外。
+- **计量**：`llm_calls.purpose` 新增 `ppt_critic` / `ppt_critic_degraded`（归 vision provider）。`log.provider_name` 在"修复或批评真发生过"时才写 vision 名；开关 `PPT_LAYOUT_ENABLED=false` 可整体关掉循环（只剩修复）。
+- **e2e 走 stub 渲染**：`test_e2e_ppt.py` 的 start_backend 强制 `PPT_RENDER_BACKEND=stub`——测的是循环机制与计量归因，真 soffice 渲染留人工目检，不在 CI 路径烧 WSL 时间。假 VLM 的版面分支第一轮点名幻灯片 1（stacked）、第二轮 pass。
+- 已知遗留（人工观察，非缺陷判据）：A 模窄框拉丁词竖排堆叠正是靠这个循环改走 B 重排来治；B 模表格样式（边框/底纹）仍未还原源文档。
+
 
 ## 4. 前端不可违反的约定
 
 - **前端测试是 `npm test`（vitest + happy-dom），配置在 `vitest.config.ts` 不在 `vite.config.ts`**：构建入口 `vue-tsc -b && vite build` 是唯一的类型门禁，不要为了跑测试去改它。测试文件放 `src/**/*.test.ts`，会被 `tsconfig.app.json` 的 include 一起类型检查，所以 `noUnusedLocals` 之类在测试里同样生效。当前只测 SFC 之外的纯逻辑（`extractErrorMessage`、`tokenStorage`、两个 Pinia store），**没装 @vue/test-utils**——要测组件渲染再说。加新配置项时记得：测试里用 `SimpleNamespace` 造假 Settings，字段缺一个就是一堆 AttributeError（本轮加 `llm_enable_thinking` 时 29 个测试连带失败就是这个原因）。
-- **token 双写**：登录成功同时写 Pinia store 和 `localStorage`；axios 拦截器只读 `localStorage`（在 API 层拿不到 store）。key 常量集中在 `client/src/api/client.ts`（`fileagent_token` / `fileagent_username`），别处不要硬编码。- 401 处理要排除 `/auth/login`（那是密码错误），用 `window.location.replace` 带 `redirect` 参数（拦截器层拿不到 router 实例）。
+- **token 双写**：登录成功同时写 Pinia store 和 `localStorage`；axios 拦截器只读 `localStorage`（在 API 层拿不到 store）。key 常量集中在 `client/src/api/client.ts`（`fileagent_token` / `fileagent_username`），别处不要硬编码。
+- 401 处理要排除 `/auth/login`（那是密码错误），用 `window.location.replace` 带 `redirect` 参数（拦截器层拿不到 router 实例）。
 - 自动重试**只针对无响应的 GET**，1 次 / 800ms；写操作绝不重试。
 - 处理结果**一律靠轮询 `status` 拿**，不要依赖 `POST /process` 的响应体（它只返回 processing）。`POLL_INTERVAL=5000`、`MAX_POLL_COUNT=120`（10 分钟上限）。
 - `AppLayout.vue` 的 `<keep-alive>` 包住 router-view，工作台切页不销毁 → 必须成对处理 `onActivated`（恢复状态 + 重启轮询）/ `onDeactivated`（停轮询）。
-- **Pinia setup store 只用 `ref` + `watch`**，不要用对象字面量 getter/setter 代理闭包变量：Pinia 会把访问器转成普通数据属性，导致 `restore()` 后 UI 拿不到值、setter 不触发保存（`client/src/stores/home.ts:16`）。
+- **Pinia setup store 只用 `ref` + `watch`**，不要用对象字面量 getter/setter 代理闭包变量：Pinia 会把访问器转成普通数据属性，导致 `restore()` 后 UI 拿不到值、setter 不触发保存（`client/src/stores/home.ts` 文件头"持久化策略"注释已写明这条）。
 - 持久化用 `sessionStorage`（key `fileagent_home_state`），**不存 File 对象**，恢复时 `pickedFile` 置 null。
 - 路径别名 `@` → `src`，`vite.config.ts` 与 `tsconfig.app.json` 两处都要配。
 - Element Plus 是**按需引入**（`vite.config.ts` 的 `unplugin-vue-components` + `ElementPlusResolver`），首屏 JS 从 893kB 降到 ~436kB，构建的体积告警随之消失。三件插件管不到的东西必须在 `main.ts` 手工接上，漏了就是"构建通过、界面上裸样式"：**ElMessage / ElMessageBox / v-loading**（函数式与指令，不是标签，扫不到）以及它们各自的样式、还有中文 locale（改成 App.vue 里的 `el-config-provider`，不要再 `app.use(ElementPlus)`）。`src/components.d.ts` 是构建生成的，已 ignore，删掉也能重新生成。
@@ -296,7 +341,7 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - `gradingIssues` / `gradingDegraded` 和 `processedContent` 一样要走 `syncToStore()` + `home.ts` 持久化，并在 `reset()` / `goBackToUpload()` 里成对清空；`applyResult()` 是唯一铺结果到 UI 的入口（3 处轮询/上传回调都调它），别在调用点各自赋值。**阶段 6 的 `specRefs` / `specNote` 走同一条路**：加字段时 `home.ts` 的六处（state / 接口 / save / watch 数组 / restore / clear / return）和 Home 的两处清空都要成对改，漏一处就是刷新后显示上一次的引用。
 - **规范库页（`views/Specs.vue`，阶段 6）**：上传走 `el-upload` 的 `:http-request` 自定义，不能用它默认的请求——那条路绕过 axios 拦截器，token 带不上。删除要写清后果（"之后批改不再召回它的 N 条条款"），因为规范库不可变，删了只能重传。条款引用显示在 `GradingResult.vue` 顶部，`refs` 为空时整行不出现（不是显示"参考了 0 条"）。
 - **扫描件提示走 `ocr_pending`**（§3.15）：上传响应与 status 都带这个字段。`Home.vue` 在处理步骤把"提取到 N 字符"换成"扫描件将在处理时由 MinerU 识别"，耗时提示换成"几分钟"档；**不要显示空白预览假装提取失败**。OCR 完成后 status 回填 `original_content`，`applyResult` 只在 `extracted_text` 为空时补进 `uploadResult`（新对象，不可变），高亮底本就有了。`uploadResult` 整体持久化，`ocr_pending` 自动跟着走，不需要 home.ts 加字段。
-- **md 任务的工作台文案随 `isMdTask` 切换**（§3.16）：`Home.vue` 用 `selectedTask`（按 selectedTaskId find）派生 `isMdTask` / `downloadLabel`（md→"下载 Markdown"）/ `processHint`（md→"Word 本地转换很快；PDF 走 MinerU…1–3 分钟"）；处理步骤标题 md 时是"转换处理"不是"调用 LLM 处理"；**无可用模型的警告 `v-if` 要带 `&& !isMdTask`**——md 零 LLM，没模型也能跑，别误报。`Tasks.vue` 的 md 约束见 §3.16 第一条。`OutputFormat` 类型（`api/types.ts`）与后端 `schemas/task.py:OUTPUT_FORMATS` 同步，加值两处一起改。
+- **转换类任务（md / pptx）的工作台文案随 `isConversionTask` 切换**（§3.16 / §3.17）：`Home.vue` 用 `selectedTask`（按 selectedTaskId find）派生 `isConversionTask` / `downloadLabel`（md→"下载 Markdown"、pptx→"下载 PPT (.pptx)"）/ `processHint`（md→"Word 本地转换很快…"；pptx→"PDF 走 MinerU 版面识别后本地拼装…1–3 分钟"）；处理步骤标题转换类时是"转换处理"不是"调用 LLM 处理"；**无可用模型的警告 `v-if` 要带 `&& !isConversionTask`**——转换零 LLM，没模型也能跑，别误报。`Tasks.vue` 的 `watch(output_format)` 对 md/pptx 同向强制归位、`isConversion` 驱动 disable、表格"无需模型"覆盖两种格式。`OutputFormat` 类型（`api/types.ts`）与后端 `schemas/task.py:OUTPUT_FORMATS` 同步，加值多处一起改。
 
 ## 5. 数据库变更
 
@@ -319,33 +364,52 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 
 ## 7. 当前基线与已知缺口
 
-当前路线（阶段 0–5，含为什么这么排）在 SPEC §9.2；阶段 0 交付与验证明细在 SPEC §9.3，阶段 1 在 §9.4，阶段 1.5（PDF 输入 + 去 Word 化）在 §9.5，阶段 2 最小版（评测台 + 基线数字）在 §9.6，阶段 3（长文档分块批改图）在 §9.7，缺陷台账第六轮在 §10，改 bug 前先看这几张表。
+当前路线（阶段 0–6，加 MinerU / ① md / ② PPT 三段拓展，含为什么这么排）在 SPEC §9.2；阶段 0 交付与验证明细在 SPEC §9.3，阶段 1 在 §9.4，阶段 1.5（PDF 输入 + 去 Word 化）在 §9.5，阶段 2 最小版（评测台 + 基线数字）在 §9.6，阶段 3（长文档分块批改图）在 §9.7，缺陷台账第六轮在 §10，改 bug 前先看这几张表。
 
-门禁基线（均已实测通过，2026-11-20 ① md 转换之后）：`uv run pytest -q` → **363 passed, 1 skipped**（322 → +10 docx→md 转换器 + 20 md 处理路由 + 4 task schema md 互斥 + 4 MinerU 真实 zip 命名 + 5 NO_PROXY 归一化；skip 那 1 条是 win32 大小写不敏感测不了小写 no_proxy 键；曾写过的 277/204/322 是更早基线，已按实际改）；`uv run ruff check .` → 全绿；`ruff format --check .` → 100 files formatted；`uv lock --check` → 一致（**84 包**，MinerU/md 均走已有依赖无新增）；`npm run build` → **通过**；`npm test` → **33 passed**（前端 vitest，见 §4）；`test_e2e.py` **31/0**、`test_e2e_structural.py` **60/0**、`test_e2e_ppt.py` **28/0**（真渲染）、`test_e2e_rag.py` **46/0**、`test_e2e_mineru.py` **67/0**（扫描件受理→OCR→批改定位→structured 落盘→失败路径→计量边界 + 第 12–15 节 md 互斥/docx→md/PDF→md/零 LLM）。**e2e 必须走 `run_backend.py`**，详见 §2 那条 ⚠；`test_e2e_mineru.py` 更进一步——后端由脚本自起（`FA_PORT` 覆盖端口，`run_backend.py` 已支持），因为要注入假 MinerU 环境而不改日常 `.env`。
-**真实云端冒烟（2026-11-20，用户自填 MINERU_TOKEN）**：合成 2 页扫描件全链路 21/21（59s，OCR 写回 + 批改定位 100% + structured 三件套落盘 + 计量只有 grading 无 MinerU 行）；md 转换浏览器走查 docx→md（本地，4s，标题/表格转 md）与 PDF→md（真实 MinerU，纯 .md 无图）均 done，扫描件上传提示正确。**只发合成件，用户真实文档绝不进云**。
-⚠ ~~三个 e2e 脚本目前完全没碰 `/specs` 路由~~ → **阶段 6 已补**：`test_e2e_rag.py` 覆盖上传、向量落库、列表与越权、注入、引用落库、删库后归零。它比另外三套多一个前置——**本地 embedding 端点必须在跑**，脚本开头探活，缺了直接退出（返回码 4）而不是让断言一片红。
+### 7.1 门禁与验证快照
 
+最近一次全绿实测（2026-11-21，② PDF→PPT 忠实转换片1 之后）：**pytest / ruff check / ruff format --check / uv lock --check / npm run build / npm test / e2e 各套全过**（清单见 §7.2）。唯一 skip 的那条单测是 win32 下 `os.environ` 大小写不敏感、测不了小写 `no_proxy` 键，属平台限制不是回归。
 
+⚠ **具体条数（pytest 的 passed 数、e2e 的 N/M）不再抄进文档**。这个位置历史上写过 204 / 277 / 322 / 363 四个版本，每抄一次就要跟着每次改动重改，而且已经出现过 §2 写"41 项"、本节写"46/0"这种同仓库互相打脸的数字。想知道条数就跑命令，别相信文档里的快照。
+
+**真实云端冒烟（2026-11-20，用户自填 MINERU_TOKEN）**：合成 2 页扫描件全链路通过（59s，OCR 写回 + 批改定位 100% + structured 三件套落盘 + 计量只有 grading 行、无 MinerU 行）；md 转换浏览器走查 docx→md（本地，4s，标题/表格转 md）与 PDF→md（真实 MinerU，纯 .md 无图）均 done，扫描件上传提示正确。**只发合成件，用户真实文档绝不进云**。
+
+`test_e2e_rag.py` 比其他几套多一个前置——**本地 embedding 端点必须在跑**，脚本开头探活，缺了直接退出（返回码 4）而不是让断言一片红。
+
+### 7.2 e2e 脚本清单（都是现役脚本，别删）
 - **`server/test_e2e.py` 是仓库自带的端到端冒烟脚本，不是遗留物，别删**：需后端已在 8000 运行、连真实 Postgres。它会注册 `tester_*` / `other_*` 两个临时账号，造 1 条日志和 1 个上传文件；**跑完自动清理 DB 记录**（llm_calls → logs → tasks → providers → users）。落盘文件自 2026-11-20 起有 `stored_filename` 列可精确回溯（`test_e2e_mineru.py` 已按它清理）；**历史行该列为 NULL**，老产物仍只能按命名规则清：`ls uploads | grep -E '^[0-9a-f]{32}\.(docx|pdf)$' | xargs -I{} rm uploads/{}`。⚠ 用户放进 `uploads/` 的**具名文件是真实文档夹具**，不属于清理范围（2026-11-19 按这条清了 35 个 e2e 产物，6 份具名文档一个没碰）。第 7 节现在真走重试路径（连不上假 provider → 重试 3 次 → failed），第 10 节直接改库把日志置为 done 来验证下载，都属预期行为。
 - **`server/test_e2e_structural.py` + `test_llm_server.py` 是阶段 1 新增的结构化端到端**，同样别删：需后端 + 假 LLM 两个进程都在跑，全程零真实 token。mock 端点**刻意不支持 `response_format`**（回 400）来如实模拟国产兼容端点并逼出 `chat_json` 的降级路径，所以 LLM 日志里出现的 `400 Bad Request`（每次 `chat_json` 两条：`json_schema` 和 `json_object` 各一档）是预期行为不是故障。第 8 节是阶段 1.5 加的 **PDF 输入链路**：用 pymupdf 现场合成"每视觉行一个 block"的中文 PDF，断言提取结果与 docx **逐字相等**、定位成功、下载名换成 `.docx`——改提取器必跑它。它注册 `e2e_s_*` 账号，**跑完同样自动清理 DB + checkpoints/**。
-- **`server/test_e2e_ppt.py` + `test_vlm_server.py` 是阶段 5 新增的 PPT 端到端**：需后端 + 假 LLM 19000 + 假 VLM 19001 **三进程**都在跑，28 项断言覆盖 plan → assemble → render → critique(needs_revision) → revise → assemble → critique(pass) → 下载 .pptx → python-pptx 重读页数 + llm_calls 归因（outline 行归 text provider、critic 行归 vision provider）。假 VLM 按 prompt 里的 `[critic-thread:...]` 标记计数，`MOCK_VLM_STUB_ROUNDS` 环境变量控退出轮次（默认 1，所以 e2e 第一次挑刺第二次必 pass），`/v1/_mock/reset` 在脚本开头清空计数避免跨用例污染。它注册 `e2e_p_*` 账号，跑完自动清理 DB。
+- **`server/test_e2e_ppt.py` 是 ② PDF→PPT 忠实转换端到端**（2026-11-21 重写，替换阶段5 大纲流水线版；片2 加第 9 节、片3 加第 10 节）：**自己起后端**（`FA_PPT_E2E_PORT` 覆盖端口，默认 8011，注入假 MinerU 环境 + 强制 stub 渲染），另需假 MinerU 19002 + 假 VLM 19001 在跑；不用假 LLM。断言覆盖：互斥 422/400、docx 上传 400、文字型 PDF 受理→done、下载 .pptx 重读（文本框逐字、原生表单元格、图片、横向页眉保留、页码噪声跳过）、无坏块零 `llm_calls`、structured + `outputs/pptx/{log_id}.pptx` 落盘、MinerU failed→可行动文案→重试 done、越权下载 404、片2 坏块修复（`/v1/_mock/repairs` 计数 + 产物标记 + `ppt_repair` 归 vision）、片3 版面循环（批评 2 轮 + `ppt_critic` 计量 + 被点名横向页改走重排后页眉消失、文字一字未改）。它注册 `e2e_p_*` 账号，跑完自动清理 DB + provider + 本次落盘/产物文件。
+- **`server/test_e2e_rag.py` 是阶段 6 补的规范库端到端**（此前 `/specs` 路由完全没被 e2e 碰过）：覆盖上传、向量落库、列表与越权、条款注入、引用落库、删库后归零。前置比其他几套多——**本地 embedding 端点必须在跑**，脚本开头探活，缺了直接退出（返回码 4）。
+- **`server/test_e2e_mineru.py` 是扫描件 + md 转换端到端**（§3.15 / §3.16）：覆盖扫描件受理 → OCR 写回 → 批改定位 → structured 落盘 → 失败路径 → 计量边界，以及 md 互斥 / docx→md / PDF→md / 零 LLM 四节。它**自己起后端**（`FA_PORT` 覆盖端口，`run_backend.py` 已支持），目的是注入假 MinerU 环境而不改日常 `.env`；另需假 LLM 19000 + 假 MinerU 19002 在跑。
+
+### 7.3 测试边界与其他基线事实
+
 - 单测**不连 Postgres 也不出网**：HTTP 走假 client（替 `services.llm.get_client`），provider 路由走内存 SQLite。所以 `pytest` 绿不代表能连上数据库，端到端才是那一层的验证。加测试请保持这个边界，也别引入 `pytest-asyncio`——现有测试直接 `asyncio.run()` 就够。
 - `uploads/`、`outputs/`、`.env`、各类缓存已 ignore；`.env.example` 靠 `.gitignore` 里的 `!.env.example` 例外入库。
 - SPEC §11 示例写 `JWT_EXPIRE_HOURS=2`，本机 `.env` 实际是 24；`.env` 不入库，以本机为准。
-- 未做：限流、api_key 字段级加密、Alembic、Docker / 多 worker、表格提取（docx 表格和 PDF 表格都不进正文）、加密 PDF 解密、成本价格表（计量只存 token 不算钱）、问题清单写进交付 docx。**扫描件 OCR 已做**（MinerU 云兜底，§3.15，2026-11-20），本地 OCR 推理仍不做。阶段 3 未做：`interrupt` 人工确认分块方案（要先有 UI）、长文摘要的两段式（逐块摘要 + 整篇汇总）、`checkpoints/` 体积治理与 TTL。评测台的下一步：真实文档夹具、第二厂商当裁判、同夹具跑重复轮次（单轮会漂）、把 `format_tier` 落进 `llm_calls`（改表结构，做前先问）。
 - **时间列只用 DB 时钟（2026-11-17 修）**：全站 13 张表的 timestamp 列都由 `func.now()` 生成，唯独 `operation_logs.processed_at` 曾用应用侧 `datetime.now(UTC)` 写入。容器钟比宿主机快 3–4s，于是出现 `processed_at < uploaded_at` 的倒挂、"处理耗时"相减得负数。现在两处写入（成功路径 + `_mark_failed`）都走 `func.now()`，且 commit 后必须 `db.refresh(log)` 才能把 SQL 表达式读成真实 datetime；启动期 reaper 把僵尸 processing 重置为 failed 时同样要写 `processed_at`（模型约定"每个状态变更都记录 processed_at"）。**新增时间列时不要再引入第二个时钟源**；`services/auth.py` 的 JWT `exp` 属于应用域时间，不走 DB，保持用 `datetime.now(UTC)`。诊断法：`SELECT (processed_at < uploaded_at), count(*) FROM operation_logs WHERE processed_at IS NOT NULL GROUP BY 1;`——修复前留下的 2 条历史行仍是倒挂，属正常。
 - 同一次普通用户走查还确认：`/admin/*` 对普通用户是 403、公共 provider 对其不可见、越权引用公共 provider 是 400、无可用模型时后台落 `failed` 且文案可行动、失败后下载 400——这几条没问题。
+
+### 7.4 真机一手结论（带日期的观测，不是回归基线）
+
+- 真机跑过的一手结论（2026-11-15，qwen3.7-flash + 合成中文 PDF）：结构化链路 OK（`degraded=False`、4 条 的/地/得 全部精确定位）。但该端点回来的 `revised_text` 与原文一字不差——意见对、修订没落地。这是 prompt 产出质量，不是提取或解析缺陷，正属阶段 2 评测台要量化的范围，别在提取层"顺手改 prompt"掩盖它。
 - **真实模型轮一手结论（2026-11-18，qwen3.8-max-0902 + 用户真实文档 6 份）**：
   - 4 份可处理文档全部 `done`、`degraded=False`、问题清单**定位率 100%**（11/11、10/10、8/8、0/0），修订文长度≈原文且**确实不同**——2026-11-15 那条"意见对但修订没落地"的旧缺陷在这条链路上没有复现。
   - **图文混排的宣教类 PDF 报 0 条问题**（1282 字符散在 9 页、92 张图）。`degraded=False` 说明模型守了格式、真的认为没问题。此时界面显示"批改完成，未发现问题"对用户是误导——文档有内容，只是这类内容不该走文字批改。要不要加"提取密度异常/图文混排"提示是产品决策，未做。
-  - PDF→PPT 走真视觉模型跑通：批评循环实际外呼 4 次（outline→critic→outline→critic），产出 12 页 pptx 可被 python-pptx 重读，单份 22,571 token（≈批改一份的 6 倍）。
+  - PDF→PPT 走真视觉模型跑通（**该流水线已于 11-21 被 ② 片1 忠实转换替换，见 §3.17**）：批评循环实际外呼 4 次（outline→critic→outline→critic），产出 12 页 pptx 可被 python-pptx 重读，单份 22,571 token（≈批改一份的 6 倍）。
   - 本轮 6 份合计 35,181 token。成本只能事后从 `llm_calls` 看，`provider.max_tokens` 拦不住（见 §3.6）。
-- **路线 2026-11-16/17/19/20（见 SPEC §9.2）**：阶段 4（Postgres 基建，11-16）、阶段 5（PDF→PPT 全链路，11-17 八切片）、任务 2（管理员 + 默认模型授权，11-17）、阶段 6（本地 embedding + pgvector 检索 + 条款注入，11-19 A1–A7）、MinerU 扫描件 OCR 兜底（11-20 A–E，见 §3.15 / SPEC §9.15）、**① md 转换任务（11-20，零 LLM，见 §3.16 / SPEC §9.16）** 均已完成。**下一站 = ② PPT 带图**（用户 2026-11-20 拍板的拓展顺序；md 转换已交付，PPT 带图复用 MinerU 的 images/ 产物，`pptx_builder.build_pptx(image_refs=...)` 口子已留，见 §3.11）。仍然没做：`interrupt` 人工确认分块方案（要先有 UI）、长文两段式摘要、`checkpoints/` 体积治理与 TTL、引用点击回跳规范原文、`format_tier` 落库（改表要先问）。
-- **管理员 + 默认模型授权（已于 2026-11-17 实施，简单版）**：`users.role` / `users.can_use_default` / `model_providers.is_public` 三列 + `require_admin` + `/admin/*` 三端点 + 前端 Admin 页。不做 audit / 跨用户 provider 管理（用户拍板）。授权判据集中在 `services/llm.py:provider_usable_by`，改任何 provider 可见性逻辑先看 SPEC §9.11 的实施清单。**admin 路由是 §3.1 隔离铁律的声明式例外**——新加管理端点挂 `require_admin` 即可，不要"顺手"补 user_id 过滤把 admin 视图废掉。
-- **阶段 5 PDF→PPT**：6 项决策已敲定（VLM 走 mock 起步、OCR / 图片 / 真云端 VLM 是显式扩展口子）；`task.output_format` 列扩 + `services/pptx_builder.py` 接 `image_refs=None` 这两个签名是"留口子"的硬约束，未来切真实现不能改外部接口。⚠ 同批设计的 `services/pdf.py:extract_text_from_pdf(fallback_to_ocr=False)` **至今没有实现**——真实签名一直是 `extract_text_from_pdf(file_bytes)`（见 §7 阶段 6 前置约束），接 OCR 时才补这个参数。完整计划见 SPEC §9.12。
-- 真机跑过的一手结论（2026-11-15，qwen3.7-flash + 合成中文 PDF）：结构化链路 OK（`degraded=False`、4 条 的/地/得 全部精确定位）。但该端点回来的 `revised_text` 与原文一字不差——意见对、修订没落地。这是 prompt 产出质量，不是提取或解析缺陷，正属阶段 2 评测台要量化的范围，别在提取层"顺手改 prompt"掩盖它。
+### 7.5 路线状态与未做
 
-- **阶段 6 前置约束与实测事实（2026-11-19 核实，动手前先读这条）**
+- **路线 2026-11-16/17/19/20/21（见 SPEC §9.2）**：阶段 4（Postgres 基建，11-16）、阶段 5（PDF→PPT 大纲流水线，11-17 八切片；**11-21 被 ② 片1 忠实转换替换**）、任务 2（管理员 + 默认模型授权，11-17）、阶段 6（本地 embedding + pgvector 检索 + 条款注入，11-19 A1–A7）、MinerU 扫描件 OCR 兜底（11-20 A–E，见 §3.15 / SPEC §9.15）、① md 转换任务（11-20，零 LLM，见 §3.16 / SPEC §9.16）、**② PDF→PPT 忠实转换片1/片2/片3（11-21 全部完成：块驱动渲染器+B 重排/A 兜底 §3.17 / 坏块 VLM 修复 §3.18 / 版面批评循环 §3.19，详见 SPEC §9.17）** 均已完成。**阶段5 大纲流水线模块（ppt_graph / pptx_builder / ppt_outline / vlm_critique 及其单测）已于 11-21 按用户决定整体删除**（§3.11）。仍然没做：`interrupt` 人工确认分块方案（要先有 UI）、长文两段式摘要、`checkpoints/` 体积治理与 TTL、引用点击回跳规范原文、`format_tier` 落库（改表要先问）。
+- **更大的未做清单**：限流、api_key 字段级加密、Alembic、Docker / 多 worker、表格提取（docx 表格和 PDF 表格都不进正文）、加密 PDF 解密、成本价格表（计量只存 token 不算钱）、问题清单写进交付 docx、本地 OCR 推理（云兜底已做，见 §3.15）。评测台的下一步：真实文档夹具、第二厂商当裁判、同夹具跑重复轮次（单轮会漂）、把 `format_tier` 落进 `llm_calls`（改表结构，做前先问）。
+
+### 7.6 已落地功能的决策记录
+- **管理员 + 默认模型授权（已于 2026-11-17 实施，简单版）**：`users.role` / `users.can_use_default` / `model_providers.is_public` 三列 + `require_admin` + `/admin/*` 三端点 + 前端 Admin 页。不做 audit / 跨用户 provider 管理（用户拍板）。授权判据集中在 `services/llm.py:provider_usable_by`，改任何 provider 可见性逻辑先看 SPEC §9.11 的实施清单。**admin 路由是 §3.1 隔离铁律的声明式例外**——新加管理端点挂 `require_admin` 即可，不要"顺手"补 user_id 过滤把 admin 视图废掉。
+- **阶段 5 PDF→PPT（历史记录，现役见 §3.17–§3.19）**：当年 6 项决策已敲定（VLM 走 mock 起步、OCR / 图片 / 真云端 VLM 是显式扩展口子）。**大纲流水线已于 2026-11-21 整体删除**（模块+单测 git rm，历史可找回；有效机制已迁入 §3.11 保留说明与 §3.19）。⚠ 同批设计的 `services/pdf.py:extract_text_from_pdf(fallback_to_ocr=False)` **至今没有实现**——真实签名一直是 `extract_text_from_pdf(file_bytes)`（见 §7.7 阶段 6 前置约束），OCR 兜底落在路由层。完整计划见 SPEC §9.12，替换过程见 §9.17。
+### 7.7 阶段 6 前置约束与实测事实（2026-11-19 核实，动手前先读）
+
+这一节是"当时探明环境后定下的策略依据"，§3.12 / §3.13 / §3.14 里所有"别这么做"的条款都回指这里。
   - **环境**：`vector 0.8.7` 已装进 `fileagent-postgres`；镜像里**没有 `pg_jieba` / `zhparser`** → 混合检索的中文分词这条路当前走不通，**先纯向量**。入库已跑通：`spec_docs` 有 1 篇（教学示例稿规范，10,889 字）、`spec_chunks` 66 块，检索层可以直接拿它当数据。
   - **embedding 端点**：LM Studio `http://127.0.0.1:11386/v1`，模型 `text-embedding-bge-m3`（文件 `D:\aiagent\app\LM-studio\model\gpustack\bge-m3-GGUF\bge-m3-Q8_0.gguf`）。实测 **1024 维、模长 1.0（已归一化）、CLS pooling、非因果** → `Vector(1024)` + `vector_cosine_ops` 可定。⚠ 同一服务还挂着 `text-embedding-nomic-embed-text-v1.5` = **768 维**，模型名必须写死。
     **好消息（2026-11-19 实测）**：`spec_chunks.embedding` 建成 `vector(1024)` 后，维度由 pgvector 硬约束——插 3 维直接报 `expected 1024 dimensions, not 3`。所以选错模型是**响亮失败**，不会静默混存两种维度；启动期校验仍要做（早报错比写到一半炸好），但它不是唯一防线。

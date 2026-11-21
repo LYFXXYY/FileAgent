@@ -20,10 +20,10 @@ class TaskCreate(BaseModel):
     output_format: OutputFormat = "docx"
 
     @model_validator(mode="after")
-    def _md_not_grading(self):
-        # md 转换零 LLM、产物是 markdown，没有修订文可供 diff 标红
-        if self.output_format == "md" and self.is_grading:
-            raise ValueError("md 转换任务不能同时是批改类任务")
+    def _conversion_not_grading(self):
+        # md/pptx 转换零 LLM、产物不是修订文，没有可供 diff 标红的对象
+        if self.output_format in ("md", "pptx") and self.is_grading:
+            raise ValueError("md / pptx 转换任务不能同时是批改类任务")
         return self
 
 

@@ -1,6 +1,6 @@
 """MinerU 传输层单测 —— batch 流程、状态机、zip 解包、失败路径
 
-不出网：桩掉 services.mineru._get_client，用假 client 按 URL 路由响应。
+不出网：桩掉 services.mineru._get_client 与 _get_download_client，用假 client 按 URL 路由响应。
 轮询里的 time.sleep 也桩掉，超时用例靠 max_wait=0 触发，不真等。
 """
 
@@ -112,6 +112,7 @@ def _no_sleep(monkeypatch):
 
 def _run(monkeypatch, fake, **over):
     monkeypatch.setattr(mineru, "_get_client", lambda: fake)
+    monkeypatch.setattr(mineru, "_get_download_client", lambda: fake)
     _settings(monkeypatch, **over)
     return mineru.parse_pdf_via_mineru(b"%PDF-fake-bytes", "扫描件.pdf")
 
