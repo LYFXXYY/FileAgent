@@ -25,7 +25,7 @@
 
 | 层 | 位置 | 技术 |
 |---|---|---|
-| 后端 | `server/` | FastAPI + SQLAlchemy 2.0 + psycopg2；Python 3.12（`.python-version`）；uv 管依赖 |
+| 后端 | `server/` | FastAPI + SQLAlchemy 2.0；psycopg2（业务同步链路）+ psycopg3（LangGraph 异步 saver/store）；Python 3.12（`.python-version`）；uv 管依赖 |
 | 前端 | `client/` | Vue 3 `<script setup>` + TS + Vite + Element Plus + Pinia |
 | 数据库 | Postgres `localhost:5434/file_agent`（Docker `pgvector/pgvector:pg16`） | 业务 5 表 + 规范库 2 表（`spec_docs` / `spec_chunks`）+ LangGraph 6 表，共 13 张 |
 
@@ -315,6 +315,13 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - **e2e 走 stub 渲染**：`test_e2e_ppt.py` 的 start_backend 强制 `PPT_RENDER_BACKEND=stub`——测的是循环机制与计量归因，真 soffice 渲染留人工目检，不在 CI 路径烧 WSL 时间。假 VLM 的版面分支第一轮点名幻灯片 1（stacked）、第二轮 pass。
 - 已知遗留（人工观察，非缺陷判据）：A 模窄框拉丁词竖排堆叠正是靠这个循环改走 B 重排来治；B 模表格样式（边框/底纹）仍未还原源文档。
 
+### 3.20 注册默认配置（2026-11-21，用户拍板"注册时自动初始化"）
+
+- `services/defaults.py:init_user_defaults` 挂在 `api/v1/auth.py:register` 建号之后：**4 个默认任务**（作文批改 grading / 文本润色 / PDF 转 PPT / 文档转 Markdown）+ **通用参考文档**（`fixtures/specs/文字编辑校对规范（教学示例稿）.docx` 走 `ingest_spec_doc` 正常入库编码）。
+- **两条硬约束**：① 全程旁路——embedding 端点没起来时参考文档跳过（logger.warning），注册绝不失败；② 幂等——按任务名 / 规范标题判重，老账号回填与新人注册同一条路（管理员账号已回填）。
+- **任务与规范库按 user_id 隔离，没有公共模板机制**——"默认配置"只存在于每个用户自己的空间，改默认=改 `DEFAULT_TASKS`，同时同步前端 `Tasks.vue` 的 `PRESET_TASKS`（两处文案同源，无共享常量）。
+- **对测试的连带义务（改这里必踩）**：五套 e2e 的 cleanup 现在都按 user_id 删默认任务/规范（否则 user 行 FK 删不掉）；`test_e2e_rag.py` 的"无规范库/删库归零"用例在注册后**先 GET+DELETE 清空默认规范**再测——新写涉及规范库断言的用例，主/他人两个账号都要清。
+
 
 ## 4. 前端不可违反的约定
 
@@ -333,7 +340,8 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - **页面头部结构是全局的**：`.page` / `.page-header` / `.page-header-content` / `.page-icon` 都在 `style.css`，五个业务页共用（原先 Tasks/Providers/Logs 各抄一份 `.page-icon`，已去重）。新页面直接套这套类名 + `page-header-content > (page-icon + div)`，不要再在 scoped 里另写头部样式。
 - **色彩分工**：`success/warning/danger/info` 只用于**状态**（日志状态、删除按钮）；属性标记（批改=是、`.pptx`、官方）一律 `type="primary"`。主色已是近黑，所以"处理中"用 `warning` 而不是 `primary`——否则与 `pending` 的灰阶糊在一起（UI-REFERENCE §4.5 预告的代价，实测踩到）。
 - **状态值不给用户看英文枚举**：`Logs.vue` 的 `statusLabel` 从 `statusOptions` 派生，筛选下拉与表格列共用一份中文文案；新增枚举时改这一处。
-- 改了样式装载方式，验证不能只看 `npm run build` 过了：把 `dist/assets/*.css` 拼起来 grep 每个用过的 `el-*` 类名，才能确认样式真的进了产物（`el-option` / `el-tab-pane` / `el-config-provider` 三个是名字对不上，不是缺样式——它们的 style 入口引的是父组件 CSS）。**弹窗样式、loading 遮罩、分页中文、状态中文标签、批注清单联动已在 2026-11-18 真浏览器逐项走过并存档结论**，别再写"未验证"；仍未在浏览器里跑的是移动端断点表现与深色模式（后者明确不做）。
+- 改了样式装载方式，验证不能只看 `npm run build` 过了：把 `dist/assets/*.css` 拼起来 grep 每个用过的 `el-*` 类名，才能确认样式真的进了产物（`el-option` / `el-tab-pane` / `el-config-provider` 三个是名字对不上，不是缺样式——它们的 style 入口引的是父组件 CSS）。**弹窗样式、loading 遮罩、分页中文、状态中文标签、批注清单联动、手机端 TabBar/卡片列表/弹窗宽度已在 2026-11-21 真浏览器逐项走过并存档结论**，别再写"未验证"；仍未在浏览器里跑的是深色模式（明确不做）。
+- **手机端专门布局（2026-11-21，375px 真机实测）**：判定唯一入口 `composables/useIsMobile.ts`（matchMedia 768px）——**768 阈值三处同源**（useIsMobile / style.css 断点 / theme.css 手机端层），改一处要想起另两处。形态：AppLayout 双渲染（桌面悬浮胶囊 / ≤768 细顶栏 + 底部 TabBar 5 项，规范库·用户管理·退出收进"更多"弹层）；五个列表页用 `MobileCardList`（泛型外壳 + 页面插槽）v-if 分支替换 el-table；弹窗/消息框宽度在 theme.css 手机端层收 92vw/86vw；Home 步骤条手机端换两字短标签（选择/上传/处理/下载，四字会竖折实拍）。新加列表页照 Logs.vue 的双分支写法，别只做桌面表格。
 - provider 的 `capabilities` 后端存逗号分隔**字符串**、表单要的是**数组**，转换只认 `KNOWN_CAPABILITIES` 里的已知值（`client/src/views/Providers.vue` 的 `toCapabilityList()` / `buildPayload()`）——顺带做了顺序归一化和脏值丢弃，未知标记不会把表单卡死也不会吃 422。提交**必须走 `buildPayload()`**，别把带 `capabilityList` 临时字段的 form 整个发出去。
 - 上传格式只在两处声明：`Home.vue` 的 `accept=".docx,.pdf"` 和上传区文案。**前端不做扩展名校验**，`accept` 只管文件选择对话框，拖拽照样能拖进 `.txt`——真校验在后端白名单，400 文案已是给用户看的。加格式时要同时改这两处 + 后端派发表。
 - 结构化批改的原文高亮在 `client/src/utils/annotate.ts:buildParagraphs()`（纯函数，`annotate.test.ts` 钉着），视图在 `client/src/components/GradingResult.vue`。按 `\n` 分段，用全局偏移 `start/end` 折算成段内区间再套 span。**非高亮片段也必须给 `index: null`**（`Span.index` 是 `number | null` 必填），漏了会让相邻片段的 `seg.index` 是 `undefined`，点击时把 `activeIssueIndex` 写成 `undefined` 从而永不匹配。匹配不到位置的 issue 显示"未定位"，不要猜位置。卡片↔高亮的联动状态是 `GradingResult` 的局部状态，不要退回 Home 编排层。
@@ -401,7 +409,7 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
   - 本轮 6 份合计 35,181 token。成本只能事后从 `llm_calls` 看，`provider.max_tokens` 拦不住（见 §3.6）。
 ### 7.5 路线状态与未做
 
-- **路线 2026-11-16/17/19/20/21（见 SPEC §9.2）**：阶段 4（Postgres 基建，11-16）、阶段 5（PDF→PPT 大纲流水线，11-17 八切片；**11-21 被 ② 片1 忠实转换替换**）、任务 2（管理员 + 默认模型授权，11-17）、阶段 6（本地 embedding + pgvector 检索 + 条款注入，11-19 A1–A7）、MinerU 扫描件 OCR 兜底（11-20 A–E，见 §3.15 / SPEC §9.15）、① md 转换任务（11-20，零 LLM，见 §3.16 / SPEC §9.16）、**② PDF→PPT 忠实转换片1/片2/片3（11-21 全部完成：块驱动渲染器+B 重排/A 兜底 §3.17 / 坏块 VLM 修复 §3.18 / 版面批评循环 §3.19，详见 SPEC §9.17）** 均已完成。**阶段5 大纲流水线模块（ppt_graph / pptx_builder / ppt_outline / vlm_critique 及其单测）已于 11-21 按用户决定整体删除**（§3.11）。仍然没做：`interrupt` 人工确认分块方案（要先有 UI）、长文两段式摘要、`checkpoints/` 体积治理与 TTL、引用点击回跳规范原文、`format_tier` 落库（改表要先问）。
+- **路线 2026-11-16/17/19/20/21（见 SPEC §9.2）**：阶段 4（Postgres 基建，11-16）、阶段 5（PDF→PPT 大纲流水线，11-17 八切片；**11-21 被 ② 片1 忠实转换替换**）、任务 2（管理员 + 默认模型授权，11-17）、阶段 6（本地 embedding + pgvector 检索 + 条款注入，11-19 A1–A7）、MinerU 扫描件 OCR 兜底（11-20 A–E，见 §3.15 / SPEC §9.15）、① md 转换任务（11-20，零 LLM，见 §3.16 / SPEC §9.16）、**② PDF→PPT 忠实转换片1/片2/片3（11-21 全部完成：块驱动渲染器+B 重排/A 兜底 §3.17 / 坏块 VLM 修复 §3.18 / 版面批评循环 §3.19，详见 SPEC §9.17）** 均已完成。**阶段5 大纲流水线模块（ppt_graph / pptx_builder / ppt_outline / vlm_critique 及其单测）已于 11-21 按用户决定整体删除**（§3.11）、**注册默认配置（4 任务+通用参考文档，§3.20 / SPEC §9.18）已完成**。仍然没做：`interrupt` 人工确认分块方案（要先有 UI）、长文两段式摘要、`checkpoints/` 体积治理与 TTL、引用点击回跳规范原文、`format_tier` 落库（改表要先问）。
 - **更大的未做清单**：限流、api_key 字段级加密、Alembic、Docker / 多 worker、表格提取（docx 表格和 PDF 表格都不进正文）、加密 PDF 解密、成本价格表（计量只存 token 不算钱）、问题清单写进交付 docx、本地 OCR 推理（云兜底已做，见 §3.15）。评测台的下一步：真实文档夹具、第二厂商当裁判、同夹具跑重复轮次（单轮会漂）、把 `format_tier` 落进 `llm_calls`（改表结构，做前先问）。
 
 ### 7.6 已落地功能的决策记录

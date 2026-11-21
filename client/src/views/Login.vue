@@ -638,6 +638,29 @@ function switchTab(name: string | number) {
 
 /* ============ 响应式 ============ */
 /* 窄屏改为上下堆叠：左侧介绍仍然给到，只是缩小，不把内容直接藏掉 */
+@media (max-width: 768px) {
+  /* 手机端第一屏就是登录表单：卡片排到 hero 前，营销文案收掉只留标题 */
+  .login-page {
+    gap: 20px;
+    padding: 32px 16px 48px;
+  }
+
+  .login-card {
+    order: -1;
+  }
+
+  .hero-desc,
+  .hero-note,
+  .hero-points {
+    display: none;
+  }
+
+  .hero-title {
+    font-size: 28px;
+    margin-bottom: 0;
+  }
+}
+
 @media (max-width: 1000px) {
   .login-page {
     flex-direction: column;

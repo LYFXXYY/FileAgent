@@ -55,6 +55,7 @@ def _cleanup_db():
     from models.llm_call import LlmCall
     from models.operation_log import OperationLog
     from models.provider import ModelProvider
+    from models.spec_doc import SpecChunk, SpecDoc
     from models.task import Task
     from models.user import User
 
@@ -66,6 +67,15 @@ def _cleanup_db():
             db.query(Task).filter(Task.id == task_id).delete()
         if provider_id:
             db.query(ModelProvider).filter(ModelProvider.id == provider_id).delete()
+        # 注册默认初始化（4 任务 + 参考文档）随用户产生，按用户清干净才能删 user 行
+        other_row = db.query(User).filter(User.username == other).first()
+        for uid in (user_id, other_row.id if other_row else None):
+            if not uid:
+                continue
+            db.query(Task).filter(Task.user_id == uid).delete()
+            for d in db.query(SpecDoc).filter(SpecDoc.user_id == uid).all():
+                db.query(SpecChunk).filter(SpecChunk.doc_id == d.id).delete()
+                db.delete(d)
         db.query(User).filter(User.id == user_id).delete()
         db.query(User).filter(User.username == other).delete()
         db.commit()

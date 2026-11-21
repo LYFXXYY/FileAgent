@@ -157,6 +157,11 @@ def _cleanup(
         for uid in (user_id, other_user_id):
             if uid:
                 db.query(LlmCall).filter(LlmCall.user_id == uid).delete()
+                # 注册默认初始化的任务/参考文档按用户清干净
+                db.query(Task).filter(Task.user_id == uid).delete()
+                for d in db.query(SpecDoc).filter(SpecDoc.user_id == uid).all():
+                    db.query(SpecChunk).filter(SpecChunk.doc_id == d.id).delete()
+                    db.delete(d)
         for lid in log_ids:
             db.query(OperationLog).filter(OperationLog.id == lid).delete()
         for tid in task_ids:
@@ -215,6 +220,10 @@ def main() -> int:
         other_id = r.json().get("id") if r.status_code == 201 else None
         r = c.post(f"{API}/auth/login", json={"username": other, "password": "secret123"})
         other_tok = {"Authorization": f"Bearer {r.json()['access_token']}"}
+        # 他人账号也带默认参考文档——第 10 节要测"无规范库"，先清零
+        for d in c.get(f"{API}/specs", headers=other_tok).json():
+            rr = c.delete(f"{API}/specs/{d['id']}", headers=other_tok)
+            check(f"他人预置规范清零（id={d['id']}）", rr.status_code == 204, rr.text[:200])
 
         print("\n===== 2. 提供商与批改任务 =====")
         r = c.post(
@@ -245,6 +254,11 @@ def main() -> int:
         task_ids.append(task_id)
 
         print("\n===== 3. 规范文档入库（同步编码） =====")
+        # 注册默认初始化会给账号带一份同名教学示例稿规范——先清空，
+        # 保证"删库后归零"与召回断言面对的是确定性起点（只测本用例上传的那份）
+        for d in c.get(f"{API}/specs", headers=tok).json():
+            rr = c.delete(f"{API}/specs/{d['id']}", headers=tok)
+            check(f"预置规范清零（id={d['id']}）", rr.status_code == 204, rr.text[:200])
         raw = _spec_docx()
         r = c.post(
             f"{API}/specs/upload",
@@ -267,7 +281,11 @@ def main() -> int:
         r = c.get(f"{API}/specs", headers=tok)
         check("本人能看到自己那份", any(d["id"] == spec_id for d in r.json()), r.text[:200])
         r = c.get(f"{API}/specs", headers=other_tok)
-        check("他人列表为空（数据隔离）", r.status_code == 200 and r.json() == [], r.text[:200])
+        check(
+            "他人列表不含本人规范（数据隔离）",
+            r.status_code == 200 and all(d["id"] != spec_id for d in r.json()),
+            r.text[:200],
+        )
         r = c.get(f"{API}/specs/{spec_id}/chunks", headers=other_tok)
         check("越权读别人的规范块 404", r.status_code == 404, r.text[:200])
 

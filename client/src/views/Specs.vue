@@ -17,8 +17,11 @@ import { extractErrorMessage } from '@/api/client'
 import { specApi } from '@/api/specs'
 import type { SpecDoc } from '@/api/types'
 import TableEmpty from '@/components/TableEmpty.vue'
+import MobileCardList from '@/components/MobileCardList.vue'
+import { useIsMobile } from '@/composables/useIsMobile'
 
 const items = ref<SpecDoc[]>([])
+const { isMobile } = useIsMobile()
 const loading = ref(false)
 const uploading = ref(false)
 const titleDraft = ref('')
@@ -134,7 +137,32 @@ async function removeDoc(row: SpecDoc) {
       同名重传是新增一份，不覆盖旧的。
     </p>
 
-    <div class="table-wrapper">
+    <!-- 手机端：行转卡片；桌面：原表格 -->
+    <MobileCardList v-if="isMobile" :items="items" :loading="loading">
+      <template #empty>
+        <TableEmpty
+          title="规范库还是空的"
+          hint="上传一份校对规范，之后的批改就会按你自己的标准判，而不是模型的通用直觉"
+          action-text="刷新列表"
+          @action="load"
+        />
+      </template>
+      <template #default="{ row }">
+        <div class="mrow-head">
+          <span class="mrow-title">{{ row.title }}</span>
+          <el-tag size="small" effect="plain">{{ row.source_format }}</el-tag>
+        </div>
+        <div class="mrow-meta">
+          {{ row.char_count.toLocaleString('zh-CN') }} 字 · {{ row.chunk_count }} 条 ·
+          {{ formatDate(row.uploaded_at) }}
+        </div>
+        <div class="mrow-actions">
+          <el-button type="danger" size="small" link @click="removeDoc(row)">删除</el-button>
+        </div>
+      </template>
+    </MobileCardList>
+
+    <div v-else class="table-wrapper">
       <el-table v-loading="loading" :data="items" stripe>
         <template #empty>
           <TableEmpty
@@ -198,5 +226,37 @@ async function removeDoc(row: SpecDoc) {
 
 :deep(.el-table th.el-table__cell) {
   background: color-mix(in oklab, var(--fa-ink) 3%, var(--fa-bg));
+}
+
+/* 手机端卡片行 */
+.mrow-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+
+.mrow-title {
+  font-size: var(--fa-text-base);
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+  word-break: break-all;
+}
+
+.mrow-meta {
+  margin-top: 6px;
+  font-size: var(--fa-text-xs);
+  color: var(--el-text-color-secondary);
+}
+
+@media (max-width: 768px) {
+  .upload-row {
+    flex-wrap: wrap;
+  }
+
+  .title-input {
+    max-width: 100%;
+    flex: 1;
+  }
 }
 </style>

@@ -441,6 +441,8 @@ uv run python test_e2e_structural.py              # 断言条数以跑命令为�
 
 **依赖代价（2026-11-16 已减负）**：PyMuPDF 2.1 把版面分析（`pymupdf-layout` → onnxruntime + numpy + protobuf + flatbuffers）和 Markdown 导出（`pymupdf4llm` → networkx + tabulate）做成硬依赖，装上后 venv 一度到 337M / 84 包。但 `services/pdf.py` 只用 `page.get_text("blocks")`，对这些**零引用**，于是用 `pyproject.toml` 的 `[tool.uv] override-dependencies`（永不成立的 environment marker）把整条链摘掉：**75 包 / 233M**，`import pymupdf`、块提取、142 项测试全部照过。阶段 5 真要用版面分析时删掉那几行就装回来——别把它当成已经付过的成本。要换 pypdf 省得更多，但届时还得再引一次 PyMuPDF，变成两套 PDF 库并存，不值。
 
+> 注（2026-11-21）：阶段 5 与 ② 忠实转换最终都**没有**用 `pymupdf-layout`——版面块来自 MinerU 云产物，PPT 真渲染走 WSL LibreOffice；`ppt_repair.crop_region` 只用了 `get_pixmap(clip=…)`（基础能力，不在这条被摘的依赖链上）。override 至今仍在，venv 保持轻量。
+
 > 顺带修正：`pyproject.toml` 的 `description` 还写着"Word 文档 AI 处理平台"，已改为"文档 AI 处理平台"；`pytest` 原本同时出现在 `project.dependencies` 和 dev 组里，已从生产依赖里摘掉（部署时不该装 pytest）。
 
 > 顺带修正了 ORM 与真实库的一处漂移：`operation_logs.original_content / processed_content` 改为 `Text().with_variant(LONGTEXT, "mysql")`。MySQL 的 `TEXT` 是 64KB **字节**上限，中文按 3 字节算两万字就撞墙，而 PDF 输入让长文档变成常态；本机老库早就是 LONGTEXT，这样声明让新建库和它一致（SQLite 单测仍走 TEXT）。`structured_output` 保持 TEXT——它只装问题清单，不装全文。
@@ -1630,6 +1632,25 @@ POST `/file-urls/batch`（Bearer + `files:[{name,is_ocr:true}]`）→ PUT 预签
 
 【遗留】B 模表格样式（边框/底纹）未还原源文档；真 VLM/真 soffice 端到端质量已由浏览器走查实证一轮（公共"默认全能模型"带 vision 能力，2 轮 ppt_critic success，交付件文字逐字完整）。**2026-11-21 用户拍板：阶段5 大纲流水线模块（graphs/ppt_graph.py、services/pptx_builder.py、schemas/ppt_outline.py、schemas/vlm_critique.py）及其 5 个单测整体 git rm**——现役 pptx 链路（§3.17–§3.19）对它们零引用，`render_pptx_to_images` 所在的 services/pptx_renderer.py 保留（片3 在用）；历史可从 git 找回，见 AGENTS §3.11。
 
+### 9.18 注册默认配置交付情况（2026-11-21）
+
+**范围**：用户拍板"项目功能的默认配置 = 4 个配置好的任务 + 配置好的通用参考文档，注册时自动初始化"。`services/defaults.py:init_user_defaults` 挂 `api/v1/auth.py:register`：建 4 个默认任务（作文批改 grading+docx / 文本润色 / PDF 转 PPT / 文档转 Markdown）并把 `fixtures/specs/文字编辑校对规范（教学示例稿）.docx` 经 `ingest_spec_doc` 入该用户的规范库（批改默认可召回条款）。
+
+【设计决策】
+
+| 点 | 取舍 |
+|---|---|
+| 落点 | 任务/规范库按 user_id 隔离、无公共模板机制 → 默认配置逐用户建在自己的空间（否决：改表加 is_public 的公共模板、仅建管理员） |
+| 旁路 | 参考文档入库要连 embedding 端点；端点缺席只 warning，注册绝不失败（任务部分独立事务先 commit） |
+| 幂等 | 按任务名/规范标题判重；老账号回填走同一函数（管理员 LYF 已回填：4 任务 + 既有规范 id=3 判重跳过） |
+| 前端同源 | `Tasks.vue` PRESET_TASKS 补"PDF 转 PPT"模板与 `DEFAULT_TASKS` 对齐（两处文案同源，无共享常量，改一处要想起另一处） |
+| 测试连带 | 五套 e2e cleanup 改为按 user_id 清默认任务/规范（user 行 FK）；rag e2e"无规范库/删库归零"用例注册后先清零默认规范（主/他人两个账号都要） |
+
+【验证】`tests/test_defaults.py` 6 项（4 任务建齐/规范入库/幂等/同名不覆盖/embedding down 旁路/夹具缺失旁路）；全量 pytest 386 passed、ruff/lock 绿；**五套 e2e 全绿**：e2e 31/0、structural 60/0、rag 48/0（新增清零断言）、mineru 67/0、ppt 60/0。npm build + 33 测试过。
+
+【边界】默认任务 provider_id 留空走"用户默认 active"回落；用户删掉默认任务不会被重建（幂等只判"同名存在"，删了就是用户意愿）；已注册老用户不会自动回填（只对新注册生效，老账号按需手动跑 init）。
+
+
 
 ## 10. 缺陷修复总结
 
@@ -1854,6 +1875,20 @@ doProcess() 超时/异常
 - **搜索栏**：状态下拉（el-select）+ 文件名输入（el-input）+ 搜索/重置按钮，回车搜索
 - **重试**：`failed` 状态的行显示"重试"按钮，调用 `POST /process/{id}`，确认后执行
 - **空状态**：`el-table #empty` 插槽 + `el-empty` 组件，区分"有筛选无结果"和"完全无记录"两种场景
+
+### 12.6 手机端专门布局（2026-11-21，375×667 真机实测）
+
+用户拍板三件事：底部 TabBar、列表行转卡片、覆盖全部 7 页。落地形态：
+
+| 块 | 做法 |
+|---|---|
+| 判定 | `composables/useIsMobile.ts`（matchMedia 768px）为唯一入口；阈值与 style.css 断点、theme.css 手机端层三处同源 |
+| 导航 | AppLayout 双渲染：桌面悬浮胶囊不变；≤768 细顶栏（品牌+用户名）+ 底部 TabBar 固定 5 项（工作台/任务/日志/模型/更多），规范库、用户管理（admin）、退出收进"更多"弹层；`env(safe-area-inset-bottom)` 适配刘海屏 |
+| 列表 | `components/MobileCardList.vue` 泛型外壳（卡片壳+空态+loading），卡片内容由页面插槽渲染；Tasks/Providers/Logs/Specs/Admin 五页全部 `v-if=isMobile` 双分支，桌面表格零改动 |
+| 浮层 | theme.css 手机端层：el-dialog 92vw、el-message-box 86vw（375px 上原 600px 对话框被截成贴边窄条，实拍） |
+| 细节 | 登录页表单 order:-1 置顶、营销区只留标题；Home 步骤条短标签（选择/上传/处理/下载，四字竖折实拍）；Logs 分页器手机端收掉 sizes 下拉 |
+
+验证：375×667 emulate 真机截图逐页过（TabBar 高亮/卡片渲染/更多弹层三项/弹窗 92vw/无横向溢出）；1280 桌面回归（胶囊导航+表格原样）；`npm run build` + 33 单测全绿。约定与坑记 AGENTS §4。
 
 ---
 

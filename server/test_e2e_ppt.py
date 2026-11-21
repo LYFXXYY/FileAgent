@@ -167,6 +167,13 @@ def cleanup(user_id, task_ids, log_ids, provider_ids=()):
         for pid in provider_ids:
             db.query(ModelProvider).filter(ModelProvider.id == pid).delete()
         if user_id:
+            # 注册默认初始化的任务/参考文档按用户清干净，否则 user 行删不掉
+            from models.spec_doc import SpecChunk, SpecDoc
+
+            db.query(Task).filter(Task.user_id == user_id).delete()
+            for d in db.query(SpecDoc).filter(SpecDoc.user_id == user_id).all():
+                db.query(SpecChunk).filter(SpecChunk.doc_id == d.id).delete()
+                db.delete(d)
             db.query(User).filter(User.id == user_id).delete()
         db.commit()
 
@@ -444,9 +451,15 @@ def main():
         )
         if other_id:
             import database
+            from models.spec_doc import SpecChunk, SpecDoc
+            from models.task import Task
             from models.user import User
 
             with database.SessionLocal() as db:
+                db.query(Task).filter(Task.user_id == other_id).delete()
+                for d in db.query(SpecDoc).filter(SpecDoc.user_id == other_id).all():
+                    db.query(SpecChunk).filter(SpecChunk.doc_id == d.id).delete()
+                    db.delete(d)
                 db.query(User).filter(User.id == other_id).delete()
                 db.commit()
 

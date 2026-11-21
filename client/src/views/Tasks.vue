@@ -14,6 +14,8 @@ import { providerApi } from '@/api/providers'
 import { taskApi } from '@/api/tasks'
 import type { OutputFormat, Provider, Task, TaskCreatePayload } from '@/api/types'
 import TableEmpty from '@/components/TableEmpty.vue'
+import MobileCardList from '@/components/MobileCardList.vue'
+import { useIsMobile } from '@/composables/useIsMobile'
 
 /**
  * 预置的常用任务模板（纯前端静态常量，不会写入数据库）
@@ -76,6 +78,14 @@ const PRESET_TASKS: PresetTask[] = [
     output_format: 'docx',
   },
   {
+    name: 'PDF 转 PPT',
+    description:
+      'PDF 忠实转换为可编辑 PPT：文字进文本框、表格进原生表、图片原位贴图；不调用文本大模型，只支持 .pdf 输入（需服务端配置 MINERU_TOKEN）。',
+    prompt_template: '{{content}}',
+    is_grading: false,
+    output_format: 'pptx',
+  },
+  {
     name: '文档转 Markdown',
     description:
       '把 Word / PDF 转成 Markdown，不调用大模型：Word 本地免费转换；PDF 走 MinerU 版面识别，保留标题层级、表格与图片引用，带图时打包 zip（md + images/）下载。',
@@ -86,6 +96,7 @@ const PRESET_TASKS: PresetTask[] = [
 ]
 
 const tasks = ref<Task[]>([])
+const { isMobile } = useIsMobile()
 const providers = ref<Provider[]>([])
 const loading = ref(false)
 const submitting = ref(false) // 防止对话框「保存」按钮重复点击
@@ -297,7 +308,36 @@ function providerName(id: number | null): string {
     </div>
 
     <!-- 任务列表表格 -->
-    <div class="table-wrapper">
+    <!-- 手机端：行转卡片；桌面：原表格 -->
+    <MobileCardList v-if="isMobile" :items="tasks" :loading="loading">
+      <template #empty>
+        <TableEmpty
+          title="还没有任务"
+          hint="任务就是一段 Prompt 模板加上一种处理方式。先建一个，工作台才能选它"
+          action-text="新建任务"
+          @action="openCreate"
+        />
+      </template>
+      <template #default="{ row }">
+        <div class="mrow-head">
+          <span class="task-name">{{ row.name }}</span>
+          <el-tag v-if="row.is_grading" type="primary" size="small" effect="light">批改</el-tag>
+          <el-tag v-else-if="row.output_format !== 'docx'" type="primary" size="small" effect="plain">
+            .{{ row.output_format }}
+          </el-tag>
+        </div>
+        <div v-if="row.description" class="mrow-desc">{{ row.description }}</div>
+        <div class="mrow-meta">
+          {{ row.output_format === 'md' || row.output_format === 'pptx' ? '无需模型' : providerName(row.provider_id) }}
+        </div>
+        <div class="mrow-actions">
+          <el-button link type="primary" class="action-btn" @click="openEdit(row)">编辑</el-button>
+          <el-button link type="danger" class="action-btn delete-btn" @click="remove(row)">删除</el-button>
+        </div>
+      </template>
+    </MobileCardList>
+
+    <div v-else class="table-wrapper">
       <el-table v-loading="loading" :data="tasks" class="task-table">
         <template #empty>
           <TableEmpty
@@ -609,6 +649,30 @@ function providerName(id: number | null): string {
 :deep(.el-input__wrapper:focus-within),
 :deep(.el-textarea__inner:focus) {
   box-shadow: 0 0 0 1px var(--fa-ink) inset !important;
+}
+
+/* ========== 手机端卡片行 ========== */
+.mrow-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+
+.mrow-desc {
+  margin-top: 6px;
+  font-size: var(--fa-text-sm);
+  color: var(--el-text-color-regular);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.mrow-meta {
+  margin-top: 6px;
+  font-size: var(--fa-text-xs);
+  color: var(--el-text-color-secondary);
 }
 
 /* ========== 动画 ========== */

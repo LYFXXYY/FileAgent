@@ -17,6 +17,7 @@ from middleware.auth import get_current_user
 from models.user import User
 from schemas.auth import LoginRequest, RegisterRequest, TokenResponse, UserResponse
 from services.auth import create_access_token, hash_password, verify_password
+from services.defaults import init_user_defaults
 
 router = APIRouter()
 
@@ -49,6 +50,9 @@ def register(body: RegisterRequest, db: Session = Depends(get_db)):
     db.add(user)
     db.commit()
     db.refresh(user)  # 重新加载以拿到自增 id 和 server_default 的 created_at
+
+    # 默认配置（4 任务 + 通用参考文档）：内部旁路，失败不影响注册结果
+    init_user_defaults(db, user)
     return user
 
 

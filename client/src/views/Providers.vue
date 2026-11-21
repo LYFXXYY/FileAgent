@@ -13,10 +13,13 @@ import { extractErrorMessage } from '@/api/client'
 import { providerApi } from '@/api/providers'
 import type { Capability, Provider, ProviderCreatePayload } from '@/api/types'
 import TableEmpty from '@/components/TableEmpty.vue'
+import MobileCardList from '@/components/MobileCardList.vue'
+import { useIsMobile } from '@/composables/useIsMobile'
 import { useAuthStore } from '@/stores/auth'
 
 const auth = useAuthStore()
 const providers = ref<Provider[]>([])
+const { isMobile } = useIsMobile()
 const loading = ref(false)
 const submitting = ref(false) // 防止对话框「保存」按钮重复点击
 
@@ -219,7 +222,50 @@ async function toggleActive(row: Provider) {
     </div>
 
     <!-- 表格卡片包裹 -->
-    <div class="table-wrapper">
+    <!-- 手机端：行转卡片；桌面：原表格 -->
+    <MobileCardList v-if="isMobile" :items="providers" :loading="loading">
+      <template #empty>
+        <TableEmpty
+          title="还没有可用的模型提供商"
+          hint="填一个 OpenAI 兼容端点的地址与密钥，AI 处理才有模型可调"
+          action-text="新建提供商"
+          @action="openCreate"
+        />
+      </template>
+      <template #default="{ row }">
+        <div class="mrow-head">
+          <span class="provider-name">{{ row.name }}</span>
+          <span class="mrow-right">
+            <el-tag v-if="row.is_public" type="primary" size="small" effect="dark">官方</el-tag>
+            <el-switch
+              v-if="auth.isAdmin || !row.is_public"
+              v-model="row.is_active"
+              @change="toggleActive(row)"
+            />
+            <span v-else class="readonly-hint">由管理员维护</span>
+          </span>
+        </div>
+        <div class="mrow-meta">
+          <span class="model-tag">{{ row.model_name }}</span>
+          <el-tag
+            v-for="item in toCapabilityList(row.capabilities)"
+            :key="item"
+            size="small"
+            class="cap-tag"
+          >
+            {{ item }}
+          </el-tag>
+          <span class="mrow-temp">温度 {{ row.temperature.toFixed(2) }}</span>
+        </div>
+        <div class="mrow-url">{{ row.base_url }}</div>
+        <div v-if="auth.isAdmin || !row.is_public" class="mrow-actions">
+          <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
+          <el-button link type="danger" @click="remove(row)">删除</el-button>
+        </div>
+      </template>
+    </MobileCardList>
+
+    <div v-else class="table-wrapper">
       <el-table v-loading="loading" :data="providers" stripe>
         <template #empty>
           <TableEmpty
@@ -451,6 +497,42 @@ async function toggleActive(row: Provider) {
 
 /* 淡入动画 */
 /* fadeInUp 已提取到全局 style.css，此处保留占位注释以说明来源 */
+
+/* 手机端卡片行 */
+.mrow-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+
+.mrow-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  white-space: nowrap;
+}
+
+.mrow-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: var(--fa-text-xs);
+  color: var(--el-text-color-secondary);
+}
+
+.mrow-temp {
+  color: var(--el-text-color-secondary);
+}
+
+.mrow-url {
+  margin-top: 6px;
+  font-size: var(--fa-text-xs);
+  color: var(--el-text-color-placeholder);
+  word-break: break-all;
+}
 
 /* 响应式 */
 @media (max-width: 768px) {

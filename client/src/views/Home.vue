@@ -21,9 +21,11 @@ import { providerApi } from '@/api/providers'
 import { taskApi } from '@/api/tasks'
 import type { ChunkProgress, GradingIssue, Provider, SpecRef, Task } from '@/api/types'
 import GradingResult from '@/components/GradingResult.vue'
+import { useIsMobile } from '@/composables/useIsMobile'
 import { useHomeStore } from '@/stores/home'
 
 const homeStore = useHomeStore()
+const { isMobile } = useIsMobile()
 
 // 步骤：0 选任务 → 1 上传 → 2 处理 → 3 完成可下载
 const currentStep = ref(homeStore.currentStep)
@@ -457,10 +459,10 @@ function reset() {
     <!-- 步骤进度条：自定义样式，增加图标和过渡动效 -->
     <div class="steps-wrapper">
       <el-steps :active="currentStep" finish-status="success" align-center>
-        <el-step title="选择任务" />
-        <el-step title="上传文档" />
-        <el-step title="AI 处理" />
-        <el-step title="下载结果" />
+        <el-step :title="isMobile ? '选择' : '选择任务'" />
+        <el-step :title="isMobile ? '上传' : '上传文档'" />
+        <el-step :title="isMobile ? '处理' : 'AI 处理'" />
+        <el-step :title="isMobile ? '下载' : '下载结果'" />
       </el-steps>
     </div>
 

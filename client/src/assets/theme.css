@@ -289,3 +289,31 @@ html:root .el-upload__text em {
 html:root .el-upload-dragger:hover .el-icon {
   color: var(--fa-accent-pop);
 }
+
+/* ============ 手机端（≤768px）全局层 ============ */
+/* 弹窗近全屏：375px 上 640px 宽的对话框会被 EP 截断成贴边窄条，
+   表单字段挤成一团（2026-11-21 手机视口实拍）；消息框同理跟随 */
+@media (max-width: 768px) {
+  html:root .el-dialog {
+    width: 92vw !important;
+    max-width: 92vw;
+    margin-top: 8vh !important;
+  }
+
+  html:root .el-message-box {
+    width: 86vw;
+    max-width: 360px;
+  }
+
+  /* 表格容器允许横向甩动（EP 自带滚动，这里补惯性）；
+     行转卡片由各列表页自己渲染，这里只管兜底 */
+  html:root .el-table {
+    font-size: var(--fa-text-sm);
+  }
+
+  /* 下拉/日期等浮层不贴屏幕边 */
+  html:root .el-select__popper,
+  html:root .el-popper.el-collapse-transition-leave-active {
+    max-width: 92vw;
+  }
+}

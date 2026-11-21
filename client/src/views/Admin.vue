@@ -14,9 +14,12 @@ import { extractErrorMessage } from '@/api/client'
 import type { AdminUserRow, UserRole } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
 import TableEmpty from '@/components/TableEmpty.vue'
+import MobileCardList from '@/components/MobileCardList.vue'
+import { useIsMobile } from '@/composables/useIsMobile'
 
 const auth = useAuthStore()
 const users = ref<AdminUserRow[]>([])
+const { isMobile } = useIsMobile()
 const loading = ref(false)
 
 async function load() {
@@ -83,7 +86,40 @@ function formatDate(raw: string): string {
       </div>
     </div>
 
-    <div class="table-wrapper">
+    <!-- 手机端：行转卡片；桌面：原表格 -->
+    <MobileCardList v-if="isMobile" :items="users" :loading="loading">
+      <template #empty>
+        <TableEmpty title="还没有用户" hint="注册入口开放后，新用户会出现在这里" />
+      </template>
+      <template #default="{ row }">
+        <div class="mrow-head">
+          <span class="mrow-title">{{ row.username }}</span>
+          <el-select
+            :model-value="row.role"
+            :disabled="row.username === auth.username"
+            size="small"
+            style="width: 108px"
+            @update:model-value="(v: unknown) => changeRole(row, v as UserRole)"
+          >
+            <el-option label="普通用户" value="user" />
+            <el-option label="管理员" value="admin" />
+          </el-select>
+        </div>
+        <div class="mrow-meta">
+          任务 {{ row.task_count }} · 处理 {{ row.log_count }} · token
+          {{ row.total_tokens.toLocaleString('zh-CN') }} · 注册于 {{ formatDate(row.created_at) }}
+        </div>
+        <div class="mrow-auth">
+          <span>默认模型授权</span>
+          <el-switch
+            :model-value="row.can_use_default"
+            @update:model-value="(v: unknown) => toggleAccess(row, Boolean(v))"
+          />
+        </div>
+      </template>
+    </MobileCardList>
+
+    <div v-else class="table-wrapper">
       <el-table v-loading="loading" :data="users" stripe>
         <template #empty>
           <TableEmpty title="还没有用户" hint="注册入口开放后，新用户会出现在这里" />
@@ -130,5 +166,37 @@ function formatDate(raw: string): string {
 .table-wrapper {
   border-radius: var(--fa-radius-card);
   overflow: hidden;
+}
+
+/* 手机端卡片行 */
+.mrow-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+
+.mrow-title {
+  font-size: var(--fa-text-base);
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+  word-break: break-all;
+}
+
+.mrow-meta {
+  margin-top: 6px;
+  font-size: var(--fa-text-xs);
+  color: var(--el-text-color-secondary);
+}
+
+.mrow-auth {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid color-mix(in oklab, var(--fa-ink) 6%, transparent);
+  font-size: var(--fa-text-sm);
+  color: var(--el-text-color-regular);
 }
 </style>

@@ -12,18 +12,26 @@
  * - 悬浮胶囊（fixed + rounded-full + backdrop blur）手法来自 UI-REFERENCE §3.4/§10.2，
  *   数值为参考站 computed style 实测：高 48px、blur(24px)、30% 透明白、hover 才加深阴影
  * - el-menu 换成 horizontal 模式，激活态自绘成墨底白字小胶囊，不用组件库默认下划线
+ *
+ * 【手机端（≤768px）】
+ * - 顶栏瘦成"品牌 + 用户名"细条，导航整体下移到固定底部 TabBar（工作台/任务/日志/模型/更多）；
+ *   规范库、用户管理、退出收进"更多"弹层——6 个入口在 375px 放不下，砍入口不如分组
+ * - 断点阈值与 useIsMobile / style.css 三处同源（768px），改一处要想起另两处
  */
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
 
 import { useAuthStore } from '@/stores/auth'
 import { markReady } from '@/router/notice'
+import { useIsMobile } from '@/composables/useIsMobile'
 import BrandMark from '@/components/BrandMark.vue'
 
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+const { isMobile } = useIsMobile()
+const moreOpen = ref(false)
 
 // 挂载即刷新身份快照：role / can_use_default 是登录时冻结进 localStorage 的，
 // 管理员在 Admin 页改了授权，被改动者下次进入应用就能看到正确视图（无需重登）。
@@ -37,7 +45,11 @@ onMounted(() => {
 // 当前激活的菜单项 —— 用路径反推，保证刷新后仍能高亮
 const activeMenu = computed(() => route.path)
 
+// "更多"里装着规范库/用户管理——这些路由激活时"更多"按钮也要亮
+const isMoreRoute = computed(() => activeMenu.value === '/specs' || activeMenu.value === '/admin')
+
 async function handleLogout() {
+  moreOpen.value = false
   // Element Plus 的确认框，返回 Promise，用户取消会 reject
   try {
     await ElMessageBox.confirm('确定退出登录吗？', '提示', {
@@ -55,8 +67,8 @@ async function handleLogout() {
 
 <template>
   <div class="app-shell">
-    <!-- ============ 悬浮胶囊导航 ============ -->
-    <header class="float-nav">
+    <!-- ============ 悬浮胶囊导航（桌面） ============ -->
+    <header v-if="!isMobile" class="float-nav">
       <div class="brand">
         <!-- 品牌标记与登录卡片共用同一个组件，不再两处各画一份 -->
         <BrandMark :size="28" class="brand-icon" />
@@ -141,6 +153,65 @@ async function handleLogout() {
         <el-button link type="primary" @click="handleLogout">退出</el-button>
       </div>
     </header>
+
+    <!-- ============ 手机端：细顶栏 + 底部 TabBar ============ -->
+    <header v-else class="mobile-top">
+      <div class="brand">
+        <BrandMark :size="24" class="brand-icon" />
+        <span class="brand-name"><b>File</b><i>Agent</i></span>
+      </div>
+      <span class="username">{{ auth.username }}</span>
+    </header>
+
+    <nav v-if="isMobile" class="tabbar">
+      <router-link class="tab" to="/" :class="{ 'is-active': activeMenu === '/' }">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+          <path d="M3 9L12 2L21 9V20C21 21.1 20.1 22 19 22H5C3.9 22 3 21.1 3 20V9Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M9 22V12H15V22" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span>工作台</span>
+      </router-link>
+      <router-link class="tab" to="/tasks" :class="{ 'is-active': activeMenu === '/tasks' }">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+          <path d="M9 11L12 14L20 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M20 12V19C20 20.1 19.1 21 18 21H5C3.9 21 3 20.1 3 19V5C3 3.9 3.9 3 5 3H16" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span>任务</span>
+      </router-link>
+      <router-link class="tab" to="/logs" :class="{ 'is-active': activeMenu === '/logs' }">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+          <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/>
+          <path d="M12 6V12L16 14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span>日志</span>
+      </router-link>
+      <router-link class="tab" to="/providers" :class="{ 'is-active': activeMenu === '/providers' }">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+          <rect x="4" y="6.5" width="16" height="13" rx="4" stroke="currentColor" stroke-width="2"/>
+          <circle cx="9" cy="12" r="1.2" fill="currentColor" stroke="none"/>
+          <circle cx="15" cy="12" r="1.2" fill="currentColor" stroke="none"/>
+          <path d="M9.5 16H14.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+        <span>模型</span>
+      </router-link>
+      <el-popover v-model:visible="moreOpen" placement="top-end" :width="180" trigger="click">
+        <template #reference>
+          <button class="tab" :class="{ 'is-active': isMoreRoute }" type="button">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+              <circle cx="5" cy="12" r="1.8" fill="currentColor" stroke="none"/>
+              <circle cx="12" cy="12" r="1.8" fill="currentColor" stroke="none"/>
+              <circle cx="19" cy="12" r="1.8" fill="currentColor" stroke="none"/>
+            </svg>
+            <span>更多</span>
+          </button>
+        </template>
+        <div class="more-sheet">
+          <router-link class="more-item" to="/specs" @click="moreOpen = false">规范库</router-link>
+          <router-link v-if="auth.isAdmin" class="more-item" to="/admin" @click="moreOpen = false">用户管理</router-link>
+          <button class="more-item more-danger" type="button" @click="handleLogout">退出登录</button>
+        </div>
+      </el-popover>
+    </nav>
 
     <!-- ============ 主区域 ============ -->
     <main class="app-main">
@@ -331,5 +402,99 @@ async function handleLogout() {
   max-width: calc(var(--app-content-max-width) + 48px);
   margin: 0 auto;
   width: 100%;
+}
+
+/* ============ 手机端（≤768px，与 useIsMobile 同阈值） ============ */
+.mobile-top {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 100;
+  height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  background: color-mix(in oklab, var(--fa-surface) 82%, transparent);
+  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
+  box-shadow: var(--fa-shadow-md);
+}
+
+.mobile-top .username {
+  font-size: var(--fa-text-sm);
+}
+
+.tabbar {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 100;
+  display: flex;
+  align-items: stretch;
+  height: calc(58px + env(safe-area-inset-bottom));
+  padding-bottom: env(safe-area-inset-bottom);
+  background: color-mix(in oklab, var(--fa-surface) 90%, transparent);
+  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
+  box-shadow: 0 -2px 14px color-mix(in oklab, var(--fa-ink) 10%, transparent);
+}
+
+.tab {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  border: none;
+  background: transparent;
+  color: var(--el-text-color-regular);
+  font-size: var(--fa-text-xs);
+  text-decoration: none;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* 激活态与桌面导航同一个动作：暖橙荧光笔垫底 */
+.tab.is-active {
+  color: var(--fa-ink);
+  font-weight: 600;
+  background: color-mix(in oklab, var(--fa-accent) 30%, var(--fa-bg));
+  border-radius: 14px 14px 0 0;
+}
+
+.more-sheet {
+  display: flex;
+  flex-direction: column;
+}
+
+.more-item {
+  padding: 10px 14px;
+  border: none;
+  background: transparent;
+  border-radius: 8px;
+  color: var(--el-text-color-primary);
+  font-size: var(--fa-text-base);
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.more-item:hover {
+  background: color-mix(in oklab, var(--fa-ink) 6%, transparent);
+}
+
+.more-danger {
+  color: var(--el-color-danger);
+}
+
+@media (max-width: 768px) {
+  .app-main {
+    /* 顶栏 52 + 呼吸 12；底部给 TabBar 让出 58 + 安全区 + 12 */
+    padding: 64px 12px calc(78px + env(safe-area-inset-bottom));
+  }
 }
 </style>

@@ -8,7 +8,7 @@
  * - 失败记录可一键重试（重新调用 LLM 处理）
  * - 无数据时显示空状态提示
  */
-import { onActivated, onMounted, ref } from 'vue'
+import { onActivated, computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 import { extractErrorMessage } from '@/api/client'
@@ -16,6 +16,15 @@ import { logsApi } from '@/api/logs'
 import { processApi } from '@/api/process'
 import type { LogEntry } from '@/api/types'
 import TableEmpty from '@/components/TableEmpty.vue'
+import MobileCardList from '@/components/MobileCardList.vue'
+import { useIsMobile } from '@/composables/useIsMobile'
+
+const { isMobile } = useIsMobile()
+
+// 手机端分页器收掉 sizes 下拉，375px 放不下整排
+const paginationLayout = computed(() =>
+  isMobile.value ? 'total, prev, pager, next' : 'total, sizes, prev, pager, next',
+)
 
 const items = ref<LogEntry[]>([])
 const total = ref(0)
@@ -203,7 +212,58 @@ async function retryProcess(row: LogEntry) {
       <el-button @click="onResetFilters">重置</el-button>
     </div>
 
-    <div class="table-wrapper">
+    <!-- 手机端：行转卡片；桌面：原表格 -->
+    <MobileCardList v-if="isMobile" :items="items" :loading="loading">
+      <template #empty>
+        <TableEmpty
+          v-if="filterStatus || filterFilename"
+          title="没有符合条件的记录"
+          hint="换个状态或文件名再试一次"
+          action-text="清除筛选"
+          @action="onResetFilters"
+        />
+        <TableEmpty
+          v-else
+          title="还没有处理记录"
+          hint="去工作台上传一份文档，跑完的结果都会留在这里"
+          action-text="前往工作台"
+          @action="$router.push('/')"
+        />
+      </template>
+      <template #default="{ row }">
+        <div class="mrow-head">
+          <span class="mrow-title">{{ row.original_filename }}</span>
+          <el-tag :type="statusType[row.status as keyof typeof statusType]" size="small">
+            {{ statusLabel[row.status] ?? row.status }}
+          </el-tag>
+        </div>
+        <div class="mrow-meta">
+          #{{ row.id }} · {{ row.task_name ?? '—' }} · {{ formatDate(row.uploaded_at) }}
+        </div>
+        <div v-if="row.error_message" class="error-text mrow-err">{{ row.error_message }}</div>
+        <div class="mrow-actions">
+          <el-button
+            v-if="canDownload(row.status)"
+            type="primary"
+            size="small"
+            @click="downloadLog(row)"
+          >
+            下载
+          </el-button>
+          <el-button
+            v-else-if="row.status === 'failed'"
+            type="warning"
+            size="small"
+            :loading="retryingId === row.id"
+            @click="retryProcess(row)"
+          >
+            重试
+          </el-button>
+        </div>
+      </template>
+    </MobileCardList>
+
+    <div v-else class="table-wrapper">
       <el-table v-loading="loading" :data="items" stripe>
         <!-- 空状态：紧凑且带出口（原先 el-empty 的 120px 插图把表格撑到 439px 高） -->
         <template #empty>
@@ -274,7 +334,7 @@ async function retryProcess(row: LogEntry) {
     <el-pagination
       class="logs-pagination"
       background
-      layout="total, sizes, prev, pager, next"
+      :layout="paginationLayout"
       :total="total"
       :current-page="page"
       :page-size="pageSize"
@@ -337,10 +397,44 @@ async function retryProcess(row: LogEntry) {
   justify-content: flex-end;
 }
 
+/* 手机端卡片行内元素 */
+.mrow-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+
+.mrow-title {
+  font-size: var(--fa-text-base);
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+  word-break: break-all;
+}
+
+.mrow-meta {
+  margin-top: 6px;
+  font-size: var(--fa-text-xs);
+  color: var(--el-text-color-secondary);
+}
+
+.mrow-err {
+  margin-top: 6px;
+}
+
 /* 响应式 */
 @media (max-width: 768px) {
   .filter-bar {
     flex-wrap: wrap;
+  }
+
+  .filter-bar .el-input {
+    flex: 1;
+    width: auto !important;
+  }
+
+  .logs-pagination {
+    justify-content: center;
   }
 }
 </style>
