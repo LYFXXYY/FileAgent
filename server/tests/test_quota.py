@@ -15,8 +15,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from api.v1 import process as process_module
-from api.v1.process import _db_now, _quota_error
-from database import Base
+from api.v1.process import _quota_error
+from database import Base, db_now
 from models.operation_log import LogStatus, OperationLog
 from models.user import User
 
@@ -61,7 +61,7 @@ def test_zero_means_unlimited(session, monkeypatch):
     """
     monkeypatch.setattr(process_module, "settings", SimpleNamespace(max_processes_per_day=0))
     alice = _user(session, "alice")
-    now = _db_now(session)
+    now = db_now(session)
     for _ in range(30):
         _log(session, alice.id, processed_at=now)
 
@@ -72,7 +72,7 @@ def test_zero_means_unlimited(session, monkeypatch):
 def test_limit_reached_returns_actionable_text(session, monkeypatch):
     monkeypatch.setattr(process_module, "settings", SimpleNamespace(max_processes_per_day=3))
     alice = _user(session, "alice")
-    now = _db_now(session)
+    now = db_now(session)
     for _ in range(3):
         _log(session, alice.id, processed_at=now)
 
@@ -87,7 +87,7 @@ def test_limit_reached_returns_actionable_text(session, monkeypatch):
 def test_below_limit_passes(session, monkeypatch):
     monkeypatch.setattr(process_module, "settings", SimpleNamespace(max_processes_per_day=3))
     alice = _user(session, "alice")
-    _log(session, alice.id, processed_at=_db_now(session))
+    _log(session, alice.id, processed_at=db_now(session))
 
     assert _quota_error(session, alice.id) is None
 
@@ -108,7 +108,7 @@ def test_failed_retries_count(session, monkeypatch):
     """失败重试会再烧一遍钱，必须计入，否则配额可以被"故意跑挂再重试"绕穿"""
     monkeypatch.setattr(process_module, "settings", SimpleNamespace(max_processes_per_day=2))
     alice = _user(session, "alice")
-    now = _db_now(session)
+    now = db_now(session)
     _log(session, alice.id, status=LogStatus.FAILED, processed_at=now)
     _log(session, alice.id, status=LogStatus.FAILED, processed_at=now)
 
@@ -119,7 +119,7 @@ def test_window_is_rolling_24h(session, monkeypatch):
     """25 小时前的那次不该还占额度——窗口是滚动的，不是按自然日"""
     monkeypatch.setattr(process_module, "settings", SimpleNamespace(max_processes_per_day=1))
     alice = _user(session, "alice")
-    old = _db_now(session) - timedelta(hours=25)
+    old = db_now(session) - timedelta(hours=25)
     _log(session, alice.id, processed_at=old)
 
     assert _quota_error(session, alice.id) is None
@@ -134,7 +134,7 @@ def test_other_users_volume_does_not_burn_my_quota(session, monkeypatch):
     monkeypatch.setattr(process_module, "settings", SimpleNamespace(max_processes_per_day=2))
     alice = _user(session, "alice")
     bob = _user(session, "bob")
-    now = _db_now(session)
+    now = db_now(session)
     for _ in range(10):
         _log(session, bob.id, processed_at=now)
 
@@ -148,7 +148,7 @@ def test_db_now_is_naive_and_parses_sqlite_string(session):
     SQLite 下 CURRENT_TIMESTAMP 回来是字符串，必须归一成 naive datetime，
     否则与 ORM 读出的 datetime 比较会 TypeError。
     """
-    now = _db_now(session)
+    now = db_now(session)
 
     assert isinstance(now, datetime)
     assert now.tzinfo is None

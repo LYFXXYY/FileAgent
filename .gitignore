@@ -59,3 +59,7 @@ desktop.ini
 
 # Qoder
 .qoder-credits/
+
+# 数据库导出/迁移前备份：可能含明文密钥，永不入库
+_backup*.sql
+server/_backup*.sql

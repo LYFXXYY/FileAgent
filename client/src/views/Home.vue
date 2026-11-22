@@ -597,6 +597,13 @@ function reset() {
               拖拽 .docx / .pdf 文件到此处，或 <em>点击选择</em>
             </div>
           </el-upload>
+          <!-- 开放给别人用之后的留存与外发告知（2026-11-22 拍板：上传页加一行说明）。
+               说清三件事：文件存在哪、什么情况下会离开本机、以及别拿别人的隐私来试。
+               这不只是礼貌——扫描件会整页送到 MinerU 第三方云按页识别。 -->
+          <p class="hint upload-notice">
+            上传的文档会保存在本服务器用于处理与下载。扫描件 PDF 会整页送入 MinerU
+            云端识别后再批改；文字型 .docx / .pdf 在本机提取，不外发。请勿上传包含他人隐私或保密内容的文件。
+          </p>
           <div v-if="pickedFile" class="picked-file">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="vertical-align: middle; margin-right: 4px;">
               <path d="M14 2H6C5.46957 2 4.96086 2.21071 4.58579 2.58579C4.21071 2.96086 4 3.46957 4 4V20C4 20.5304 4.21071 21.0391 4.58579 21.4142C4.96086 21.7893 5.46957 22 6 22H18C18.5304 22 19.0391 21.7893 19.4142 21.4142C19.7893 21.0391 20 20.5304 20 20V8L14 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>

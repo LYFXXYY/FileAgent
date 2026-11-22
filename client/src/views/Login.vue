@@ -8,7 +8,7 @@
  * - @submit.prevent 阻止表单原生提交（走 JS handler）
  * - el-form :rules 定义校验规则，validate() 手动触发
  */
-import { reactive, ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 
@@ -30,16 +30,36 @@ const form = reactive({
 })
 
 // 表单校验规则（前端第一层校验，后端还有第二层）
-const rules: FormRules = {
+/**
+ * 口令强度只在注册 tab 生效
+ *
+ * 登录与注册共用一个表单，但**登录侧绝不能套长度规则**：存量用户里有人是 6 位密码，
+ * 前端一改下限就会在发请求之前把这些人拦下——等于自己把人锁在门外，而且后端其实
+ * 还能验通。真正的强度校验在 `schemas/auth.py`，只管注册路径，这里与它同源。
+ */
+const weakPasswordHint = '密码至少 8 位，且不能只用数字或只用字母'
+
+function checkPasswordStrength(_rule: unknown, value: string, callback: (e?: Error) => void) {
+  if (!value) return callback()
+  if (/^\d+$/.test(value)) return callback(new Error('密码不能只用数字'))
+  if (/^[\p{L}]+$/u.test(value)) return callback(new Error('密码不能只用字母，请混入数字或符号'))
+  return callback()
+}
+
+const rules = computed<FormRules>(() => ({
   username: [
     { required: true, message: '请输入用户名', trigger: 'blur' },
     { min: 3, max: 50, message: '用户名长度 3-50', trigger: 'blur' },
   ],
-  password: [
-    { required: true, message: '请输入密码', trigger: 'blur' },
-    { min: 6, max: 72, message: '密码长度 6-72', trigger: 'blur' },
-  ],
-}
+  password:
+    tab.value === 'register'
+      ? [
+          { required: true, message: '请输入密码', trigger: 'blur' },
+          { min: 8, max: 72, message: weakPasswordHint, trigger: 'blur' },
+          { validator: checkPasswordStrength, trigger: 'blur' },
+        ]
+      : [{ required: true, message: '请输入密码', trigger: 'blur' }],
+}))
 
 async function handleSubmit() {
   // validate() 返回 boolean，字段不合法时会自动给 form-item 加红字错误

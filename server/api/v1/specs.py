@@ -30,6 +30,7 @@ from services.spec_storage import (
     delete_spec_doc,
     ingest_spec_doc,
 )
+from services.uploads import check_pdf_pages, read_capped_sync
 
 router = APIRouter()
 
@@ -53,7 +54,9 @@ def upload_spec(
             detail=f"不支持的格式 {ext or '(无扩展名)'}，目前只接 .docx 与 .pdf",
         )
 
-    raw = file.file.read()
+    # 与工作文档上传同一套上限：分块读到超限即断，PDF 再过页数闸
+    raw = read_capped_sync(file)
+    check_pdf_pages(raw)
     try:
         doc = ingest_spec_doc(
             db,

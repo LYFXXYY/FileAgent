@@ -69,6 +69,11 @@ def update_role(
     # 护栏 1：禁止自助改角色（防自锁的唯一入口）
     if user_id == admin.id:
         raise HTTPException(400, "不能修改自己的角色")
+    # 护栏 0：本项目固定只有一个管理员。开放注册给别人用之后，"能设管理员"这件事
+    # 本身就是最大的越权面（第二个 admin 可以看全站用户），所以直接封口，
+    # 而不是靠前端把选项藏起来。降级成 user 仍然允许（见护栏 2 的最后一人保护）。
+    if body.role == "admin":
+        raise HTTPException(400, "本系统固定只有一个管理员，不能再设置或提升管理员")
     target = db.get(User, user_id)
     if target is None:
         raise HTTPException(404, "用户不存在")

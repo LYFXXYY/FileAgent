@@ -20,17 +20,17 @@ import os
 import uuid
 import zipfile
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, select
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from config import get_settings
-from database import SessionLocal, get_db
+from database import SessionLocal, db_now, get_db
 from graphs.grading_graph import grade_long_document, read_progress
 from middleware.auth import get_current_user
 from models.operation_log import LogStatus, OperationLog
@@ -40,6 +40,24 @@ from models.user import User
 from schemas.grading import GRADING_JSON_SCHEMA, GradingIssue, GradingResult
 from schemas.process import ChunkProgressResponse, ProcessResponse, UploadResponse
 from services.docx_md import docx_to_markdown
+from services.errors import (
+    CODE_DOC_EMPTY,
+    CODE_DOCX_MD,
+    CODE_FILE_MISSING,
+    CODE_FILE_READ,
+    CODE_INTERNAL,
+    CODE_MINERU_FAILED,
+    CODE_MINERU_UNREACHABLE,
+    CODE_OCR_EMPTY,
+    CODE_PDF_MD,
+    CODE_PDF_PPT,
+    CODE_PPT_DELIVERY,
+    CODE_PPT_RENDER,
+    CODE_QUOTA_PROCESS,
+    CODE_TASK_GONE,
+    describe_exception,
+    tag,
+)
 from services.grading import (
     build_messages,
     deserialize_issues,
@@ -66,6 +84,7 @@ from services.ppt_convert import PptConvertError, render_blocks_with_meta
 from services.ppt_layout import run_layout_loop
 from services.ppt_repair import find_defects, repair_defective_blocks
 from services.spec_retrieval import SpecContext, collect_spec_context
+from services.uploads import check_pdf_pages, read_capped
 from services.word import create_diff_docx, create_plain_docx, extract_text_from_docx
 
 logger = logging.getLogger("fileagent.process")
@@ -138,7 +157,9 @@ async def upload(
             raise HTTPException(400, "PDF 转 PPT 需要服务端配置 MINERU_TOKEN")
 
     # 3. 读取字节 + 按扩展名派发到对应的提取器
-    file_bytes = await file.read()  # UploadFile.read() 是 async
+    #    分块读到上限就断，不整份吸进内存；PDF 再单独过页数闸（按页计费的东西）
+    file_bytes = await read_capped(file)  # UploadFile.read() 是 async
+    check_pdf_pages(file_bytes)
     ocr_pending = False
     try:
         text = TEXT_EXTRACTORS[ext](file_bytes)
@@ -189,21 +210,6 @@ async def upload(
     )
 
 
-def _db_now(db: Session) -> datetime:
-    """
-    取 DB 时钟的当前时刻
-
-    全站时间列都由 `func.now()` 生成（§7.3：容器钟与宿主机钟差 3–4 秒，
-    混用两个时钟会算出负的耗时）。配额窗口要跟这些列可比，基准就必须也取 DB 时钟，
-    不能在应用侧 `datetime.now()`。SQLite（单测）下 CURRENT_TIMESTAMP 回来是字符串，
-    Postgres 回来是 datetime，两种都归一成 naive UTC datetime。
-    """
-    raw = db.execute(select(func.now())).scalar_one()
-    if isinstance(raw, str):
-        return datetime.fromisoformat(raw.strip().replace("Z", ""))
-    return raw.replace(tzinfo=None) if raw.tzinfo else raw
-
-
 def _quota_error(db: Session, user_id: int) -> str | None:
     """
     近 24 小时处理次数是否已超上限；超了返回给用户看的文案，没超返回 None
@@ -215,7 +221,7 @@ def _quota_error(db: Session, user_id: int) -> str | None:
     limit = settings.max_processes_per_day
     if limit <= 0:
         return None
-    cutoff = _db_now(db) - timedelta(hours=24)
+    cutoff = db_now(db) - timedelta(hours=24)
     used = (
         db.query(OperationLog)
         .filter(
@@ -227,9 +233,10 @@ def _quota_error(db: Session, user_id: int) -> str | None:
     )
     if used < limit:
         return None
-    return (
+    return tag(
         f"最近 24 小时已处理 {used} 次，达到上限 {limit} 次。"
-        "请稍后再试，或联系维护者调整 MAX_PROCESSES_PER_DAY"
+        "请稍后再试，或联系维护者调整 MAX_PROCESSES_PER_DAY",
+        CODE_QUOTA_PROCESS,
     )
 
 
@@ -261,8 +268,21 @@ async def process(
         raise HTTPException(400, msg)
 
     # 成本闸放在任何状态变更之前：超配额时这条日志必须原样停在 pending，
-    # 否则用户看到 429 但日志已经变 processing，前端会一直轮询一个不会跑的任务
-    quota = _quota_error(db, current.id)
+    # 否则用户看到 429 但日志已经变 processing，前端会一直轮询一个不会跑的任务。
+    # 查库丢线程池 + 自开 session：本路由是 async def，直接在事件循环上跑同步
+    # psycopg 就等于给每个"开始处理"请求加一次可能阻塞全站的机会；
+    # 配额关闭时连线程池都不跳，默认配置零额外开销。
+    quota = None
+    if settings.max_processes_per_day > 0:
+
+        def _check_quota():
+            session = SessionLocal()
+            try:
+                return _quota_error(session, current.id)
+            finally:
+                session.close()
+
+        quota = await run_in_threadpool(_check_quota)
     if quota:
         raise HTTPException(429, quota)
 
@@ -314,7 +334,7 @@ async def _run_processing(log_id: int) -> None:
 
         task = db.get(Task, log.task_id) if log.task_id is not None else None
         if task is None:
-            _mark_failed(db, log, "关联的任务已被删除")
+            _mark_failed(db, log, "关联的任务已被删除", code=CODE_TASK_GONE)
             return
 
         # md 转换：零 LLM，在选 provider / OCR 兜底之前分流。
@@ -335,7 +355,7 @@ async def _run_processing(log_id: int) -> None:
         # parse_pdf_via_mineru 是同步阻塞（含轮询 sleep），必须丢线程池
         if log.needs_ocr:
             if not log.stored_filename:
-                _mark_failed(db, log, "扫描件落盘记录缺失，请重新上传")
+                _mark_failed(db, log, "扫描件落盘记录缺失，请重新上传", code=CODE_FILE_MISSING)
                 return
             stored_path = os.path.join(_resolve_dir(settings.upload_dir), log.stored_filename)
             try:
@@ -345,17 +365,27 @@ async def _run_processing(log_id: int) -> None:
                     parse_pdf_via_mineru, pdf_bytes, log.original_filename
                 )
             except (MinerUError, OSError) as e:
-                _mark_failed(db, log, f"扫描件识别失败：{e}")
+                _mark_failed(db, log, f"扫描件识别失败：{e}", code=CODE_MINERU_FAILED)
                 return
             except (httpx.HTTPError, httpx.InvalidURL) as e:
                 # 传输层异常（代理配置非法 / 连接中断等）文案对用户不可行动，
                 # 归一成 MinerU 口径；细节进日志供排查
                 logger.warning("MinerU 传输层异常 log_id=%s：%r", log.id, e)
-                _mark_failed(db, log, "扫描件识别失败：无法连接 MinerU 服务，请检查网络后重试")
+                _mark_failed(
+                    db,
+                    log,
+                    "扫描件识别失败：无法连接 MinerU 服务，请检查网络后重试",
+                    code=CODE_MINERU_UNREACHABLE,
+                )
                 return
             plain = markdown_to_plain_text(result.markdown)
             if not plain.strip():
-                _mark_failed(db, log, "扫描件识别结果为空，请确认文档内容清晰可辨")
+                _mark_failed(
+                    db,
+                    log,
+                    "扫描件识别结果为空，请确认文档内容清晰可辨",
+                    code=CODE_OCR_EMPTY,
+                )
                 return
             log.original_content = plain
             log.needs_ocr = False
@@ -370,7 +400,7 @@ async def _run_processing(log_id: int) -> None:
         try:
             provider = resolve_provider(db, log.user_id, task.provider_id, "text")
         except LLMError as e:
-            _mark_failed(db, log, str(e))
+            _mark_failed(db, log, str(e), code=e.code)
             return
 
         # 快照成普通值：计量写入要丢线程池，不能跨线程用这个 session 的 ORM 对象
@@ -411,10 +441,10 @@ async def _run_processing(log_id: int) -> None:
                 log,
                 provider_ref,
                 purpose=_error_purpose_for(task),
-                error=str(e),
+                error=e.detail,
                 attempts=e.attempts,
             )
-            _mark_failed(db, log, str(e))
+            _mark_failed(db, log, str(e), code=e.code)
             return
 
         for call in output.calls:
@@ -434,7 +464,8 @@ async def _run_processing(log_id: int) -> None:
         try:
             log = db.get(OperationLog, log_id)
             if log is not None and log.status == LogStatus.PROCESSING:
-                _mark_failed(db, log, f"内部错误：{e}")
+                code, human = describe_exception(e)
+                _mark_failed(db, log, human, code=code)
         except Exception:
             db.rollback()
             # 连"标成 failed"都写不下去（DB 此时多半已不可用）。不记日志的话
@@ -444,10 +475,17 @@ async def _run_processing(log_id: int) -> None:
         db.close()
 
 
-def _mark_failed(db: Session, log: OperationLog, message: str) -> None:
-    """把日志标记为 failed 并写入错误信息（统一提交点，长度上限只在这一处截）"""
+def _mark_failed(
+    db: Session, log: OperationLog, message: str, *, code: str = CODE_INTERNAL
+) -> None:
+    """
+    把日志标记为 failed 并写入错误信息（统一提交点，长度上限只在这一处截）
+
+    **编号一律由这里追加**，调用点只写人话。给不出具体 code 的落 `E-INTERNAL`——
+    它表示"这条失败还没被归类"，本身就是有用的信号，比界面上出现"有时有号有时没号"好。
+    """
     log.status = LogStatus.FAILED
-    log.error_message = message[:_ERROR_MESSAGE_MAX_CHARS]
+    log.error_message = tag(message, code)[:_ERROR_MESSAGE_MAX_CHARS]
     # 时间列全站由 DB 时钟生成（uploaded_at 是 func.now()）。这里若用应用侧 now()，
     # 容器与宿主机的钟差会让 processed_at 反而早于 uploaded_at，耗时算出负数
     log.processed_at = func.now()
@@ -491,14 +529,14 @@ async def _run_md_conversion(db: Session, log: OperationLog) -> None:
     归一化纯文本写回 original_content，前端预览与批改路径同源。
     """
     if not log.stored_filename:
-        _mark_failed(db, log, "文件落盘记录缺失，请重新上传")
+        _mark_failed(db, log, "文件落盘记录缺失，请重新上传", code=CODE_FILE_MISSING)
         return
     stored_path = os.path.join(_resolve_dir(settings.upload_dir), log.stored_filename)
     try:
         with open(stored_path, "rb") as f:  # noqa: ASYNC230
             file_bytes = f.read()
     except OSError as e:
-        _mark_failed(db, log, f"读取上传文件失败：{e}")
+        _mark_failed(db, log, f"读取上传文件失败：{e}", code=CODE_FILE_READ)
         return
 
     ext = os.path.splitext(log.stored_filename)[1].lower()
@@ -506,10 +544,10 @@ async def _run_md_conversion(db: Session, log: OperationLog) -> None:
         try:
             markdown = await run_in_threadpool(docx_to_markdown, file_bytes)
         except Exception as e:
-            _mark_failed(db, log, f"Word 转 Markdown 失败：{e}")
+            _mark_failed(db, log, f"Word 转 Markdown 失败：{e}", code=CODE_DOCX_MD)
             return
         if not markdown.strip():
-            _mark_failed(db, log, "文档没有可转换的正文内容")
+            _mark_failed(db, log, "文档没有可转换的正文内容", code=CODE_DOC_EMPTY)
             return
         log.processed_content = markdown
     else:
@@ -520,14 +558,19 @@ async def _run_md_conversion(db: Session, log: OperationLog) -> None:
                 parse_pdf_via_mineru, file_bytes, log.original_filename
             )
         except (MinerUError, OSError) as e:
-            _mark_failed(db, log, f"PDF 转 Markdown 失败：{e}")
+            _mark_failed(db, log, f"PDF 转 Markdown 失败：{e}", code=CODE_PDF_MD)
             return
         except (httpx.HTTPError, httpx.InvalidURL) as e:
             logger.warning("MinerU 传输层异常 log_id=%s：%r", log.id, e)
-            _mark_failed(db, log, "PDF 转 Markdown 失败：无法连接 MinerU 服务，请检查网络后重试")
+            _mark_failed(
+                db,
+                log,
+                "PDF 转 Markdown 失败：无法连接 MinerU 服务，请检查网络后重试",
+                code=CODE_MINERU_UNREACHABLE,
+            )
             return
         if not result.markdown.strip():
-            _mark_failed(db, log, "识别结果为空，请确认文档内容清晰可辨")
+            _mark_failed(db, log, "识别结果为空，请确认文档内容清晰可辨", code=CODE_OCR_EMPTY)
             return
         log.processed_content = result.markdown
         log.original_content = markdown_to_plain_text(result.markdown)
@@ -552,27 +595,32 @@ async def _run_ppt_conversion(db: Session, log: OperationLog) -> None:
     processed_content 存 markdown 供预览/审计。
     """
     if not log.stored_filename:
-        _mark_failed(db, log, "文件落盘记录缺失，请重新上传")
+        _mark_failed(db, log, "文件落盘记录缺失，请重新上传", code=CODE_FILE_MISSING)
         return
     stored_path = os.path.join(_resolve_dir(settings.upload_dir), log.stored_filename)
     try:
         with open(stored_path, "rb") as f:  # noqa: ASYNC230
             pdf_bytes = f.read()
     except OSError as e:
-        _mark_failed(db, log, f"读取上传文件失败：{e}")
+        _mark_failed(db, log, f"读取上传文件失败：{e}", code=CODE_FILE_READ)
         return
 
     try:
         result = await run_in_threadpool(parse_pdf_via_mineru, pdf_bytes, log.original_filename)
     except (MinerUError, OSError) as e:
-        _mark_failed(db, log, f"PDF 转 PPT 失败：{e}")
+        _mark_failed(db, log, f"PDF 转 PPT 失败：{e}", code=CODE_PDF_PPT)
         return
     except (httpx.HTTPError, httpx.InvalidURL) as e:
         logger.warning("MinerU 传输层异常 log_id=%s：%r", log.id, e)
-        _mark_failed(db, log, "PDF 转 PPT 失败：无法连接 MinerU 服务，请检查网络后重试")
+        _mark_failed(
+            db,
+            log,
+            "PDF 转 PPT 失败：无法连接 MinerU 服务，请检查网络后重试",
+            code=CODE_MINERU_UNREACHABLE,
+        )
         return
     if not result.content_list:
-        _mark_failed(db, log, "识别结果为空，请确认文档内容清晰可辨")
+        _mark_failed(db, log, "识别结果为空，请确认文档内容清晰可辨", code=CODE_OCR_EMPTY)
         return
 
     # vision 提供商有两个消费者：片2 坏块修复 + 片3 版面循环。
@@ -603,7 +651,7 @@ async def _run_ppt_conversion(db: Session, log: OperationLog) -> None:
             render_blocks_with_meta, pages_for_render, result.images, result.page_sizes
         )
     except PptConvertError as e:
-        _mark_failed(db, log, f"PPT 渲染失败：{e}")
+        _mark_failed(db, log, f"PPT 渲染失败：{e}", code=CODE_PPT_RENDER)
         return
 
     # 片3 版面检查循环：只调分流/字号两个旋钮，文字一字不动。
@@ -630,7 +678,12 @@ async def _run_ppt_conversion(db: Session, log: OperationLog) -> None:
         with open(os.path.join(out_dir, f"{log.id}.pptx"), "wb") as f:  # noqa: ASYNC230
             f.write(pptx_bytes)
     except OSError as e:
-        _mark_failed(db, log, f"PPT 交付文件写入失败：{e}")
+        _mark_failed(
+            db,
+            log,
+            f"PPT 交付文件写入失败：{e}",
+            code=CODE_PPT_DELIVERY,
+        )
         return
 
     # 修复/批评外呼逐笔记账（成功/降级/失败都有行），计量本身仍是旁路不影响交付

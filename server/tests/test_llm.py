@@ -22,6 +22,7 @@ import services.llm as llm
 from database import Base
 from models.provider import ModelProvider
 from schemas.provider import ProviderCreate
+from services.secrets import encrypt_secret
 
 
 # ---------- 测试脚手架 ----------
@@ -47,7 +48,8 @@ def _provider(**overrides) -> ModelProvider:
         "user_id": 1,
         "name": "test-provider",
         "base_url": "https://example.test/v1",
-        "api_key": "sk-test-1234567890",
+        # 库里存的是密文，测试构造的必须是真的行形态（services/secrets 不留明文后路）
+        "api_key": encrypt_secret("sk-test-1234567890"),
         "model_name": "test-model",
         "capabilities": "text",
         "max_tokens": 4096,
@@ -283,8 +285,12 @@ def test_chat_tolerates_null_and_empty_content(reset_globals):
     r = asyncio.run(llm.chat([{"role": "user", "content": "x"}], _provider()))
     assert r.content == ""
 
-    with pytest.raises(llm.LLMError, match="响应结构异常"):
+    with pytest.raises(llm.LLMError) as exc:
         asyncio.run(llm.chat([{"role": "user", "content": "x"}], _provider()))
+    # 界面上只该看到人话；上游报文留在 detail 里给排障用
+    assert "缺少必要字段" in str(exc.value)
+    assert exc.value.code == "E-LLM-BADSTRUCT"
+    assert "响应结构异常" in exc.value.detail
 
 
 # ---------- 重试策略 ----------
@@ -293,9 +299,13 @@ def test_chat_does_not_retry_on_401(reset_globals, sleeps):
     client = _ScriptClient([_Response(status_code=401, text="unauthorized")])
     reset_globals.setattr(llm, "get_client", lambda: client)
 
-    with pytest.raises(llm.LLMError, match="401"):
+    with pytest.raises(llm.LLMError) as exc:
         asyncio.run(llm.chat([{"role": "user", "content": "x"}], _provider()))
 
+    assert "密钥无效" in str(exc.value)
+    assert exc.value.code == "E-LLM-AUTH"
+    # 状态码与上游文字只进 detail/日志，不上界面
+    assert "401" in exc.value.detail
     assert len(client.bodies) == 1
     assert sleeps == []
 
@@ -389,10 +399,12 @@ def test_extract_json_rejects_empty():
 
 
 def test_extract_json_rejects_invalid():
-    with pytest.raises(llm.LLMError, match="不是合法 JSON"):
+    with pytest.raises(llm.LLMError, match="没有按规定格式返回结果"):
         llm.extract_json("抱歉，我无法完成")
-    with pytest.raises(llm.LLMError, match="不是合法 JSON"):
+    with pytest.raises(llm.LLMError, match="没有按规定格式返回结果") as exc:
         llm.extract_json('{"a": 1')
+    # 原文（模型输出片段）留在 detail，不显示给用户
+    assert '{"a": 1' in exc.value.detail
 
 
 # ---------- chat_json 降级 ----------
@@ -419,7 +431,7 @@ def test_chat_json_propagates_auth_and_parse_errors(reset_globals, sleeps):
     # 401 直接报错
     client = _ScriptClient([_Response(status_code=401, text="invalid api key")])
     reset_globals.setattr(llm, "get_client", lambda: client)
-    with pytest.raises(llm.LLMError, match="401"):
+    with pytest.raises(llm.LLMError, match="密钥无效"):
         asyncio.run(llm.chat_json([{"role": "user", "content": "json"}], _provider()))
 
     # 烂 JSON 交回调用方
@@ -461,9 +473,12 @@ def test_timeout_message_names_the_exception_when_detail_is_empty(reset_globals)
         asyncio.run(llm.chat([{"role": "user", "content": "x"}], _provider()))
 
     msg = str(exc.value)
-    assert "ReadTimeout" in msg, msg
+    # 给人看的那句必须是完整句子，且空异常文本不会留下"冒号后空白"的病句
     assert "超时" in msg, msg
+    assert "共尝试 3 次" in msg, msg
     assert "：（" not in msg, msg
+    # 异常类名是排障线索，现在的落点是 detail（以及 llm_calls.error_message）
+    assert "ReadTimeout" in exc.value.detail, exc.value.detail
 
 
 def test_enable_thinking_absent_unless_configured(reset_globals):

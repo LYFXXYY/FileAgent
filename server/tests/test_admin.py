@@ -18,6 +18,7 @@ from models.provider import ModelProvider
 from models.user import User
 from schemas.admin import DefaultAccessUpdate, RoleUpdate
 from services.llm import LLMError, provider_usable_by, resolve_provider
+from services.secrets import encrypt_secret
 
 
 @pytest.fixture()
@@ -45,7 +46,7 @@ def _provider(db, owner_id, name, is_public=False, capabilities="text"):
         user_id=owner_id,
         name=name,
         base_url="https://example.test/v1",
-        api_key="sk-1",
+        api_key=encrypt_secret("sk-1"),
         model_name="m",
         capabilities=capabilities,
         is_public=is_public,

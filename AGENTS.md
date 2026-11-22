@@ -340,6 +340,70 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - **对测试的连带义务（改这里必踩）**：五套 e2e 的 cleanup 现在都按 user_id 删默认任务/规范（否则 user 行 FK 删不掉）；`test_e2e_rag.py` 的"无规范库/删库归零"用例在注册后**先 GET+DELETE 清空默认规范**再测——新写涉及规范库断言的用例，主/他人两个账号都要清。
 
 
+## 3.21 规模上限与 SSRF 防护（2026-11-22，开放给别人用之前加的）
+
+- **三个上限都在 `config.py`，默认值本身就是策略**：`max_upload_mb=20`、`max_pdf_pages=300`、`allow_private_provider_urls=False`。前两个 **0 = 不限制**。为什么默认就开着而不是等上线：上传是"整份读进内存再提取"，不限大小一个请求就能打挂进程；而 PDF 会整份传给 MinerU 云**按页计费**——所以字节闸和页数闸是两件事，20 MB 里塞得下一份两千页的文件，字节没超、钱会超。默认 20 MB 的依据是本机最大的真实夹具 4.3 MB。
+- **读取必须走 `services/uploads.py`**：`read_capped`（async）与 `read_capped_sync`（同步路由用）分块读、超限即断，**绝不先把整个文件吸进内存再判断**；`check_pdf_pages` 只卡 PDF。两条上传链路（`api/v1/process.py` 的工作文档、`api/v1/specs.py` 的规范库）都必须用它——写两遍判据迟早只改一边。超限返 **413**，页数超限返 **400**。
+- **`check_pdf_pages` 对打不开的 PDF 一律放过**：损坏件、带密码的加密件在 `services/pdf.py` 各有专门文案，这里抢判据会把"文件已加密"误报成"页数超限"，比不拦更糟。
+- **`base_url` 的 SSRF 校验在 `schemas/provider.py:_validate_base_url`，必须解析成 IP 再判**。base_url 不是给用户浏览器打开的链接，而是**服务端**发 POST 的目标，任何登录用户填 `http://169.254.169.254/` 就能让服务器替他去够云元数据。字符串黑名单挡不住 `127.1` / `0177.0.0.1` / `[::1]` / `127.0.0.1.nip.io`，所以先 `getaddrinfo` 再逐个判 `is_private / is_loopback / is_link_local / is_reserved / is_multicast / is_unspecified`。`ProviderUpdate` 也过一遍——否则"建号合规、编辑改成内网"就绕过去了。
+  - **已知边界（未做）**：校验时解析到的 IP 与真正建连时可能不同（DNS rebinding），彻底做法要在 httpx 连接层再判一次。
+  - **`ALLOW_PRIVATE_PROVIDER_URLS=true` 只给开发机**（连本地假端点 19000 / LM Studio 用），**部署时不要带这一行**。五套 e2e 用的 `http://127.0.0.1:*` 提供商全靠它。
+- **单测里不要解析真实域名**：`_validate_base_url` 会走 `getaddrinfo`，测试只用**字面 IP**（数字地址不发 DNS 查询）和开关早退路径，否则离线环境一片红（§7.3 的"不出网"边界）。
+
+
+
+## 3.22 认证加固（2026-11-22，开放注册给别人用时加的）
+
+- **口令强度只作用于注册路径**：`schemas/auth.py:RegisterRequest` 是 `min_length=8` + `_reject_weak_password`（拒"整串只有一个字符类"：纯数字 / 纯字母）。**登录不校验长度**——`LoginRequest` 故意没有约束，否则存量短密码用户会被前端或后端拦在门外，等于自己把人锁住。前端 `Login.vue` 的 `rules` 因此是 `computed`，按 `tab` 切换：注册 tab 才带强度规则。改这条前先想"会不会把已有账号挡在外面"。
+  不用"大小写+数字+符号"那套复杂度规则：它逼出 `Password123!`，既难记又是最常见的弱口令模板；长度才是主要防线。
+- **登录失败锁定在 `api/v1/auth.py`**，键是 **(客户端 IP, 用户名小写)**：只按用户名会被拿来锁人（拿错密码把受害者锁在门外），只按 IP 则挡不住分布式脚本。窗口 `login_lockout_minutes` 同时是遗忘时长；**登录成功必须清账**。`login_max_failures=0` = 关闭。不存在的用户名同样计数并返 429，否则 401/429 的差异又能枚举用户名。
+  ⚠ 两条已知边界：① 计数器是**进程内**字典，属 §3.3 reaper / §3.6 并发闸同一个**单 worker 假设**，重启清零；② `request.client.host` 在反向代理后面会全是代理 IP——**上 Nginx 之后必须改读 `X-Forwarded-For` 并校验代理链**，否则这道闸退化成"按 IP 全局锁定"。
+- **注册永远只能建出 `user`**：`User(...)` 不读 body 的 role。唯一的 admin 由 `api/v1/admin.py:update_role` 的**护栏 0**固定——`body.role == "admin"` 直接 400，"能设管理员"在开放注册之后本身就是最大的越权面（第二个 admin 能看全站用户）。前端 `Admin.vue` 把"管理员"选项置 `disabled`（保留是为了让现有 admin 那行显示得出名字），但**真正的封死在接口层**。原有的护栏 1（不能改自己）与护栏 2（至少留一名 admin）没被取代。
+- **`max_registrations_per_day` 是全局 DB 判据**（按 `users.created_at` 落在近 24 小时计数，走 `database.db_now()`），`0 = 不限制`。为什么光有 §3.21/§3.20 的按账号配额不够：配额按账号算，脚本注册 50 个号就有 50 份额度，**兜住总消费的其实是注册上限**。本机 `.env` 设 60 而不是 10，是因为五套 e2e 各自都要注册账号，得留够跑回归的余量。
+- **`database.db_now(db)` 是所有"和 DB 时间列比时间"的单一入口**（配额窗口、注册上限都用它）。SQLite 回来的是字符串、Postgres 回来的是带 tz 的 datetime，这里统一成 naive UTC。新增这类判据时**不要再写第二个 `_db_now`**，也不要用应用侧 `datetime.now()`——§7.3 那条容器钟偏差的坑就是这么来的。
+
+
+
+## 3.23 错误文案分层与错误编号（2026-11-22，开放给别人用之前做的）
+
+**分层规矩：`message` 给人看，`detail` 给排障用，`code` 是两者的桥。**
+
+- **`services/errors.py` 是编号的唯一来源**。`operation_logs.error_message` 直接显示在界面上，
+  以前它混装两种东西：一处是写好人话（"扫描件落盘记录缺失，请重新上传"），另一处直接是
+  `内部错误：{e}` 或 `body={resp.text[:500]}`——后者会把上游报文、URL、框架内部结构送给陌生用户。
+- **`_mark_failed(db, log, message, *, code=CODE_INTERNAL)` 总是追加编号**，调用点只写人话。
+  这样"一半有号一半没号"从构造上不可能出现；给不出具体 code 就落 `E-INTERNAL`，
+  它本身是有用信号（这条失败还没被归类）。**不要在调用点自己拼 `（E-XXX）`**。
+- **`LLMError` 带 `code` 与 `detail`**。上游响应体、原始异常文本一律进 `detail`，
+  由 `logger.warning` 与 `llm_calls.error_message`（`_meter(error=e.detail)`）承接。
+  计量表那一路必须传 `detail` 而不是 `str(e)`，否则原文就只存在于日志文件里。
+- ⚠ **`chat_json` 的降级阶梯判据是 `e.detail`，不是 `str(e)`**。`_rejected_response_format`
+  靠 `response_format` / `json_schema` 这些**只出现在上游原文里**的字样判断要不要降档。
+  把文案换成人话之后若这里仍写 `str(e)`，降级会**静默失效**——实测就是这样：所有不支持
+  严格档的端点都会直接抛"模型服务返回了错误"。改任何错误文案前先确认有没有代码在**解析**它。
+- **前端 `extractErrorMessage` 是唯一出口**，它现在做三件事：后端字符串 detail 优先透出；
+  422 的 `detail[]` 按 `FIELD_LABELS` 把字段名翻成中文、`translateMsg` 把 Pydantic 英文
+  译成中文；**拿不到可读文案时按状态码兜底**（413→"文件太大"、429→额度、500→已记录），
+  绝不把 `Internal Server Error` 这种英文原文弹给用户。
+  加新 `FIELD_LABELS` 条目时同步后端模型字段名，别凭记忆写。
+- **`describe_exception` 是兜底闸**：认得出类型给具体指引，认不出统一一句话 + `E-INTERNAL`，
+  **绝不把 `str(exc)` 端出去**。`tests/test_error_codes.py` 里有专门一条断言"未知异常不得
+  把 SQL 片段带进文案"，别删。
+- **B6 留存告知在 `Home.vue` 上传步骤**（`upload-notice`）：说清"存在哪、什么情况下会离开本机
+  （扫描件整页送 MinerU 云）、别上传他人隐私"。改上传链路的外发行为时必须同步这段话。
+
+## 3.24 `api_key` 字段级加密（2026-11-22，Fernet）
+
+- **库里存的不再是明文**：`model_providers.api_key` 是 Fernet 密文，`String(512)`（输入上限 255，密文约 400 字符）。加解密只在两个边界：写入时 `api/v1/providers.py:_encrypt_or_400`（**create 和 update 都要**，漏一个就是"创建时密文、改一次退回明文"），读取时 `services/llm.py` 拼 `Authorization` 前 `decrypt_secret`。业务代码不应再直接读 `provider.api_key`。
+- **`services/secrets.py` 是严格模式：解不开就抛 `SecretError`，绝不"看着不像密文就当明文用"**。这不是洁癖——留一条明文后路，等于任何能写库的人都能让代码按明文处理，这道闸就形同虚设。因此**存量数据必须先跑 `migrate_encrypt_api_keys.py`**，否则那些 provider 一调用就报"模型密钥解密失败"。
+- ⚠ **迁移脚本必须先区分"解不开"的两种原因**：值不像 Fernet token → 历史明文，加密它；值像 token 却解不开 → **密钥不对，立即中止且一行都不改**。把密文当明文再加密一层等于永久毁掉它。脚本有 `--check` / `--dry-run` 两档，判据是 `gAAAAA` 前缀 + 可 base64 解码 + 长度 ≥ 60（Fernet token 首字节恒为版本 0x80）。
+- **`API_KEY_ENC_KEY` 一旦丢失，库里所有密钥不可恢复**。它只存在于 `.env`（已 ignore），必须单独备份。生成：`python -c "from services.secrets import generate_key; print(generate_key())"`。留空 = 保存/读取密钥都响亮失败（`E-CONFIG-SECRET`），不退回明文。
+- **展示路径不许因为密钥问题 500**：`mask_secret` 解不开返回 `"****"` 而不是抛错——列表页要永远打得开，真正该报错的是外呼路径。
+- **单测连带义务**：`tests/conftest.py` 给每个用例装一把固定测试密钥（`base64("0"*32)`，不用随机值以便复现）。凡构造 ORM `ModelProvider` 行的地方**必须写 `encrypt_secret(...)`**——写明文是在验证一条生产环境不存在的路径。
+- 没有 Alembic，所以列宽 255→512 也在同一个幂等脚本里做（`information_schema` 查 `character_maximum_length` 再 ALTER）。
+
+
+
 ## 4. 前端不可违反的约定
 
 - **前端测试是 `npm test`（vitest + happy-dom），配置在 `vitest.config.ts` 不在 `vite.config.ts`**：构建入口 `vue-tsc -b && vite build` 是唯一的类型门禁，不要为了跑测试去改它。测试文件放 `src/**/*.test.ts`，会被 `tsconfig.app.json` 的 include 一起类型检查，所以 `noUnusedLocals` 之类在测试里同样生效。当前只测 SFC 之外的纯逻辑（`extractErrorMessage`、`tokenStorage`、两个 Pinia store），**没装 @vue/test-utils**——要测组件渲染再说。加新配置项时记得：测试里用 `SimpleNamespace` 造假 Settings，字段缺一个就是一堆 AttributeError（本轮加 `llm_enable_thinking` 时 29 个测试连带失败就是这个原因）。

@@ -39,8 +39,11 @@ class ModelProvider(Base):
     # API 基础地址，如 https://ark.cn-beijing.volces.com/api/v3
     base_url: Mapped[str] = mapped_column(String(255), nullable=False)
 
-    # API Key —— 生产环境应加密存储（后续可加字段级加密）
-    api_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    # API Key —— **Fernet 密文**入库，不是明文（services/secrets.py）。
+    # 列宽 512 的来由：输入上限 255 字符，加密后约 32 字节头 + base64(明文+16 字节 HMAC)
+    # ≈ 400 字符，留到 512 有余量。用户输入仍是明文，加解密都发生在服务层，
+    # 业务代码看不到密文。
+    api_key: Mapped[str] = mapped_column(String(512), nullable=False)
 
     # 模型标识符，如 doubao-pro-128k / gpt-4o
     model_name: Mapped[str] = mapped_column(String(100), nullable=False)

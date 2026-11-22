@@ -36,6 +36,22 @@ from database import SessionLocal
 from models.llm_call import LlmCall
 from models.provider import ModelProvider
 from models.user import User
+from services.errors import (
+    CODE_LLM_AUTH,
+    CODE_LLM_BAD_JSON,
+    CODE_LLM_BAD_STRUCT,
+    CODE_LLM_CONFIG,
+    CODE_LLM_FAILED,
+    CODE_LLM_HTTP,
+    CODE_LLM_NETWORK,
+    CODE_LLM_RATE,
+    CODE_LLM_SERVER,
+    CODE_LLM_TIMEOUT,
+    CODE_MODEL_CAPABILITY,
+    CODE_MODEL_UNAVAILABLE,
+    CODE_SECRET_CONFIG,
+)
+from services.secrets import SecretError, decrypt_secret
 
 logger = logging.getLogger("fileagent.llm")
 
@@ -60,19 +76,48 @@ class LLMError(Exception):
 
     attempts 记录实际发起过几次 HTTP 请求。失败路径也必须带上它，
     否则计量表里的 attempts 永远是 1，看不出"这次是重试到耗尽才失败"还是"一次就挂"。
+
+    message 与 detail 是**两个受众**：message 是要显示给使用者看的人话（会被写进
+    `operation_logs.error_message` 并显示在界面上），detail 是排障用的原文（上游 HTTP
+    报文、原始异常文本），只进日志和 `llm_calls.error_message`。开放给别人用之后
+    必须分开——上游报文里可能有 base_url、模型名，甚至密钥回显。
+    code 见 services/errors.py，用户报障时念这一个号就能定位抛出点。
     """
 
-    def __init__(self, message: str, *, attempts: int = 1):
+    def __init__(
+        self,
+        message: str,
+        *,
+        attempts: int = 1,
+        code: str = CODE_LLM_FAILED,
+        detail: str | None = None,
+    ):
         super().__init__(message)
         self.attempts = attempts
+        self.code = code
+        self.detail = detail or message
 
 
 class _Retryable(Exception):
-    """内部信号：这次失败可以重试。不往外抛给调用方"""
+    """
+    内部信号：这次失败可以重试。不往外抛给调用方
 
-    def __init__(self, message: str, retry_after: float | None = None):
+    带 code / detail 是为了重试耗尽后转成 LLMError 时不丢信息——早先只有一句
+    `str(e)`，最终给用户的那句话就是原始报文本身。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        retry_after: float | None = None,
+        *,
+        code: str = CODE_LLM_FAILED,
+        detail: str | None = None,
+    ):
         super().__init__(message)
         self.retry_after = retry_after
+        self.code = code
+        self.detail = detail or message
 
 
 @dataclass(frozen=True)
@@ -112,9 +157,16 @@ def get_client() -> httpx.AsyncClient:
         )
     except Exception as e:
         # httpx 构造时会解析代理环境变量，NO_PROXY 里有非法写法（如裸 [::1]）就在这里炸
+        # 这是**服务器配置问题**，不是用户做错了什么：给用户的只有一句可行动的话，
+        # 而 NO_PROXY / LLM_TRUST_ENV_PROXY 这些运维细节只进日志——之前把它们直接
+        # 显示到界面上，陌生用户看到的是一串看不懂的环境变量名。
+        logger.error("LLM HTTP 客户端初始化失败（服务端配置问题）：%s", e, exc_info=True)
         raise LLMError(
-            f"LLM HTTP 客户端初始化失败：{e}。若报 InvalidURL: Invalid port，"
-            "通常是 NO_PROXY 含非法条目，把 LLM_TRUST_ENV_PROXY 设为 false 可绕开"
+            "服务器暂时无法连上模型服务，这是服务端配置问题，请联系维护者后重试",
+            code=CODE_LLM_CONFIG,
+            detail=f"LLM HTTP 客户端初始化失败：{e}。"
+            "若报 InvalidURL: Invalid port，通常是 NO_PROXY 含非法条目，"
+            "把 LLM_TRUST_ENV_PROXY 设为 false 可绕开",
         ) from e
     return _client
 
@@ -180,9 +232,15 @@ def resolve_provider(
             provider.user_id == user_id or provider_usable_by(provider, user)
         )
         if not usable:
-            raise LLMError("任务指定的模型提供商已被删除或不可用，请重新选择")
+            raise LLMError(
+                "任务指定的模型提供商已被删除或不可用，请重新选择",
+                code=CODE_MODEL_UNAVAILABLE,
+            )
         if capability not in parse_capabilities(provider.capabilities):
-            raise LLMError(f"任务指定的提供商 {provider.name} 不支持 {capability} 能力，请重新选择")
+            raise LLMError(
+                f"任务指定的提供商 {provider.name} 不支持 {capability} 能力，请重新选择",
+                code=CODE_MODEL_CAPABILITY,
+            )
         return provider
 
     active = (
@@ -211,7 +269,10 @@ def resolve_provider(
             if capability in parse_capabilities(provider.capabilities):
                 return provider
 
-    raise LLMError(f"当前账号下没有支持 {capability} 能力的可用模型提供商，请先添加")
+    raise LLMError(
+        f"当前账号下没有支持 {capability} 能力的可用模型提供商，请先添加",
+        code=CODE_MODEL_UNAVAILABLE,
+    )
 
 
 async def chat(
@@ -242,7 +303,21 @@ async def chat(
         body["enable_thinking"] = s.llm_enable_thinking
 
     url = provider.base_url.rstrip("/") + "/chat/completions"
-    headers = {"Authorization": f"Bearer {provider.api_key}", "Content-Type": "application/json"}
+    # api_key 是 Fernet 密文入库（services/secrets），外呼前才还原。
+    # 解不开必须转成 LLMError 带上自己的编号：直接让 SecretError 冒出去会被
+    # 兜底分支归到 E-INTERNAL，用户只看到"未预期的问题"，运维也分不清是哪种坏
+    try:
+        api_key = decrypt_secret(provider.api_key)
+    except SecretError as e:
+        raise LLMError(
+            "模型密钥无法解密，服务端加密配置有问题，请联系维护者",
+            code=CODE_SECRET_CONFIG,
+            detail=str(e),
+        ) from e
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
     timeout = httpx.Timeout(
         read_timeout if read_timeout is not None else s.llm_timeout_read,
         connect=s.llm_timeout_connect,
@@ -251,6 +326,8 @@ async def chat(
     started = time.perf_counter()
     max_attempts = s.llm_max_retries + 1
     last_error = "LLM 调用失败"
+    last_code = CODE_LLM_FAILED
+    last_detail: str | None = None
 
     async with _get_semaphore():
         for attempt in range(1, max_attempts + 1):
@@ -258,16 +335,25 @@ async def chat(
                 data = await _post_once(url, headers, body, timeout)
                 return _build_result(data, provider, started, attempt)
             except _Retryable as e:
+                # code / detail 必须跟着走：重试耗尽后抛给用户的那句话就是这里攒下来的，
+                # 早先只留 str(e)，等于把最后一次失败的原文直接端上界面
                 last_error = str(e)
+                last_code = e.code
+                last_detail = e.detail
                 if attempt < max_attempts:
                     delay = _retry_delay(attempt, e.retry_after)
-                    logger.debug("LLM 重试（第 %d 次，等 %.1fs）：%s", attempt, delay, last_error)
+                    logger.debug("LLM 重试（第 %d 次，等 %.1fs）：%s", attempt, delay, last_detail)
                     await asyncio.sleep(delay)
             except LLMError as e:
                 # 不可恢复的错误也带上已尝试次数，否则计量会记成"一次就挂"
-                raise LLMError(str(e), attempts=attempt) from e
+                raise LLMError(str(e), attempts=attempt, code=e.code, detail=e.detail) from e
 
-    raise LLMError(f"{last_error}（共尝试 {max_attempts} 次）", attempts=max_attempts)
+    raise LLMError(
+        f"{last_error}（共尝试 {max_attempts} 次）",
+        attempts=max_attempts,
+        code=last_code,
+        detail=last_detail,
+    )
 
 
 def _exc_text(exc: BaseException) -> str:
@@ -289,22 +375,51 @@ async def _post_once(
     try:
         resp = await get_client().post(url, headers=headers, json=body, timeout=timeouts)
     except httpx.TimeoutException as e:
-        raise _Retryable(f"LLM 请求超时：{_exc_text(e)}") from e
+        raise _Retryable(
+            "模型响应超时，已按重试策略再试仍未成功。可稍后重试，或把文档拆短一些",
+            code=CODE_LLM_TIMEOUT,
+            detail=f"LLM 请求超时：{_exc_text(e)}",
+        ) from e
     except httpx.RequestError as e:
-        raise _Retryable(f"LLM 网络错误：{_exc_text(e)}") from e
+        raise _Retryable(
+            "连不上模型服务，请检查网络或服务端地址配置后重试",
+            code=CODE_LLM_NETWORK,
+            detail=f"LLM 网络错误：{_exc_text(e)}",
+        ) from e
 
     if resp.status_code != 200:
-        # 响应体截断 500 字符，防止密钥等敏感信息整段进入错误消息
-        msg = f"LLM 返回 {resp.status_code}：{resp.text[:500]}"
+        # 上游报文**只进日志与 detail**，不进界面：里面可能有 base_url、模型名，
+        # 某些兼容端点还会把请求头（含密钥前缀）回显在错误体里。
+        raw = f"LLM 返回 {resp.status_code}：{resp.text[:500]}"
+        logger.warning("模型端点返回非 200：%s", raw)
+        if resp.status_code in (401, 403):
+            raise LLMError(
+                "模型密钥无效或没有该模型的访问权限，请到「模型」页检查提供商配置",
+                code=CODE_LLM_AUTH,
+                detail=raw,
+            )
+        msg_by_status = {
+            429: (CODE_LLM_RATE, "模型服务限流，请稍后重试"),
+            500: (CODE_LLM_SERVER, "模型服务内部错误，请稍后重试"),
+            502: (CODE_LLM_SERVER, "模型服务暂时不可用（网关错误），请稍后重试"),
+            503: (CODE_LLM_SERVER, "模型服务正在维护或过载，请稍后重试"),
+            504: (CODE_LLM_SERVER, "模型服务响应超时（网关），请稍后重试"),
+        }
+        code, human = msg_by_status.get(resp.status_code, (CODE_LLM_HTTP, "模型服务返回了错误"))
         if resp.status_code in _RETRYABLE_STATUS:
             hint = _parse_retry_after(resp.headers.get("Retry-After"))
-            raise _Retryable(msg, retry_after=hint)
-        raise LLMError(msg)
+            raise _Retryable(human, hint, code=code, detail=raw)
+        raise LLMError(human, code=code, detail=raw)
 
     try:
         return resp.json()
     except ValueError as e:
-        raise LLMError(f"LLM 响应不是 JSON：{e}，body={resp.text[:500]}") from e
+        logger.warning("模型返回的不是合法 JSON：%s", resp.text[:500])
+        raise LLMError(
+            "模型返回的内容格式不符合预期（不是有效 JSON）。请重试，或更换模型",
+            code=CODE_LLM_BAD_JSON,
+            detail=f"LLM 响应不是 JSON：{e}，body={resp.text[:500]}",
+        ) from e
 
 
 def _build_result(
@@ -318,7 +433,12 @@ def _build_result(
         choice = data["choices"][0]
         content = choice["message"]["content"]
     except (KeyError, IndexError, TypeError) as e:
-        raise LLMError(f"LLM 响应结构异常：{e}，body={str(data)[:500]}") from e
+        logger.warning("模型响应结构异常：%s body=%s", e, str(data)[:500])
+        raise LLMError(
+            "模型返回的数据缺少必要字段，无法解析。请重试，或更换模型",
+            code=CODE_LLM_BAD_STRUCT,
+            detail=f"LLM 响应结构异常：{e}，body={str(data)[:500]}",
+        ) from e
 
     usage = data.get("usage") or {}
     prompt = _as_int(usage.get("prompt_tokens"))
@@ -416,7 +536,11 @@ async def chat_json(
                 messages, provider, response_format=response_format, read_timeout=read_timeout
             )
         except LLMError as e:
-            if not _rejected_response_format(str(e)):
+            # 判据必须看 detail，不能看给用户看的那句人话：
+            # "端点不认 response_format"这个信号只存在于上游原文里。
+            # 改文案时把它错接成 str(e)，降级阶梯会**静默失效**——实测就是这样：
+            # 所有不支持严格档的端点都会直接抛"模型服务返回了错误"而不是降一档重试。
+            if not _rejected_response_format(e.detail):
                 raise
             last_error = str(e)
             logger.info(
@@ -434,7 +558,13 @@ async def chat_json(
             logger.debug("端点输出不可解析为 JSON，交调用方降级：%s", str(e)[:200])
             return tagged, None
 
-    raise LLMError(last_error)
+    # 走到这里说明阶梯的每一档都被端点明确拒绝——即该端点根本不支持严格 JSON 输出。
+    # 内层那句 `last_error` 是原始报文，不能给用户看，但必须留在 detail 里
+    raise LLMError(
+        "所选模型不支持结构化输出，无法产出可解析的结果。请更换模型后重试",
+        code=CODE_LLM_BAD_JSON,
+        detail=last_error,
+    )
 
 
 _FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
@@ -448,7 +578,7 @@ def extract_json(text: str) -> Any:
     """
     stripped = text.strip()
     if not stripped:
-        raise LLMError("模型返回空内容，无法解析 JSON")
+        raise LLMError("模型返回空内容，无法解析 JSON", code=CODE_LLM_BAD_JSON)
 
     unfenced = _FENCE_RE.sub("", stripped).strip()
     candidates = [stripped]
@@ -464,7 +594,13 @@ def extract_json(text: str) -> Any:
         except json.JSONDecodeError:
             continue
 
-    raise LLMError(f"模型输出不是合法 JSON：{stripped[:200]}")
+    # 模型吐了自由文本：原文只进 detail（界面会自己降级成"整段当修订文"，
+    # 把 200 字模型输出塞进错误提示里对使用者没有意义）
+    raise LLMError(
+        "模型没有按规定格式返回结果，已改用兼容方式处理",
+        code=CODE_LLM_BAD_JSON,
+        detail=f"模型输出不是合法 JSON：{stripped[:200]}",
+    )
 
 
 def _first_balanced(text: str) -> str | None:

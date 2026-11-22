@@ -250,9 +250,20 @@ try:
     check("立即返回 processing", r.json().get("status") == "processing", r.text)
 
     data = {}
+    misses = 0
     for _ in range(30):
         time.sleep(1)
-        data = CLIENT.get(f"{API}/process/{log_id}/status", headers=AUTH).json()
+        try:
+            data = CLIENT.get(f"{API}/process/{log_id}/status", headers=AUTH).json()
+            misses = 0
+        except (httpx.HTTPError, ValueError) as e:
+            # 单次轮询抖动不该把整套 e2e 打断。实测过一次 httpcore 读超时直接让脚本
+            # 在第 7 节抛出、后面 24 项断言全没跑，而退出码问题修好后它至少会报错——
+            # 但"一次网络抖动 = 整套失败"本身就是假的回归信号。连续 3 次才算真坏了。
+            misses += 1
+            print(f"  [warn] status 轮询第 {misses} 次失败：{type(e).__name__}")
+            if misses >= 3:
+                raise
         if data.get("status") in ("done", "failed"):
             break
     check("轮询到失败状态 failed", data.get("status") == "failed", str(data))

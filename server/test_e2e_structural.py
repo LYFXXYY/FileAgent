@@ -206,9 +206,19 @@ def main():
         check("返回 processing", r.json().get("status") == "processing", r.text)
 
         final = {}
+        misses = 0
         for _ in range(30):
             time.sleep(1)
-            final = c.get(f"{API}/process/{log_id}/status", headers=tok).json()
+            try:
+                final = c.get(f"{API}/process/{log_id}/status", headers=tok).json()
+                misses = 0
+            except (httpx.HTTPError, ValueError) as e:
+                # 与 test_e2e.py 同一条教训：后端冷启动或并发争用时 /status 会读超时，
+                # 一次抖动不该把整套 12 节断言打断（实测这样假红过一次）。
+                misses += 1
+                print(f"  [warn] status 轮询第 {misses} 次失败：{type(e).__name__}")
+                if misses >= 3:
+                    raise
             if final.get("status") in ("done", "failed"):
                 break
 

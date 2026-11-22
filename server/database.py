@@ -9,8 +9,9 @@
 """
 
 from collections.abc import Generator
+from datetime import datetime
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from config import get_settings
@@ -64,3 +65,19 @@ def get_db() -> Generator[Session, None, None]:
         yield db
     finally:
         db.close()  # 归还连接到池，不销毁引擎
+
+
+def db_now(db: Session) -> datetime:
+    """
+    取 DB 时钟的当前时刻，返回 naive UTC datetime
+
+    为什么需要它而不是 `datetime.now()`：全站时间列都由 `func.now()` 生成（§7.3——
+    容器钟与宿主机钟差 3–4 秒，两个时钟混用会算出负的耗时）。任何"和这些列比时间"的
+    逻辑（滚动窗口配额、注册上限）都必须用同一个时钟源，否则窗口会整体偏移。
+
+    Postgres 回来的是带时区的 datetime，SQLite（单测）回来的是字符串，这里统一归一。
+    """
+    raw = db.execute(select(func.now())).scalar_one()
+    if isinstance(raw, str):
+        return datetime.fromisoformat(raw.strip().replace("Z", ""))
+    return raw.replace(tzinfo=None) if raw.tzinfo else raw

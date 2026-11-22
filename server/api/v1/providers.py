@@ -21,8 +21,26 @@ from models.provider import ModelProvider
 from models.task import Task
 from models.user import User
 from schemas.provider import ProviderCreate, ProviderResponse, ProviderUpdate
+from services.errors import CODE_SECRET_CONFIG, tag
+from services.secrets import SecretError, encrypt_secret
 
 router = APIRouter()
+
+
+def _encrypt_or_400(plaintext: str) -> str:
+    """
+    加密失败要变成可行动的 500，而不是 Python 异常原文
+
+    `SecretError` 只有两种成因：没配 API_KEY_ENC_KEY，或密钥与库里密文不匹配。
+    两者都是服务端配置问题，用户什么都做不了——所以文案要明确"联系维护者"，
+    同时编号让它一眼可辨。绝不能为了"先让它能用"而退回明文入库。
+    """
+    try:
+        return encrypt_secret(plaintext)
+    except SecretError as e:
+        raise HTTPException(
+            500, tag(f"服务端未正确配置密钥加密，无法保存模型密钥。{e}", CODE_SECRET_CONFIG)
+        ) from e
 
 
 @router.get("", response_model=list[ProviderResponse])
@@ -65,7 +83,11 @@ def create_provider(
     if body.is_public and current.role != "admin":
         raise HTTPException(400, "只有管理员可以标记公共提供商")
     # user_id 从登录态取，绝不接受请求体传入（防越权写他人名下）
-    provider = ModelProvider(user_id=current.id, **body.model_dump())
+    # api_key 在进库前加密（services/secrets）；密钥未配置时这里会抛 SecretError → 500，
+    # 而不是把明文悄悄落库
+    payload = body.model_dump()
+    payload["api_key"] = _encrypt_or_400(payload["api_key"])
+    provider = ModelProvider(user_id=current.id, **payload)
     db.add(provider)
     db.commit()
     db.refresh(provider)
@@ -95,6 +117,10 @@ def update_provider(
     if updates.get("is_public") is not None and current.role != "admin":
         raise HTTPException(400, "只有管理员可以变更公共标记")
     for key, value in updates.items():
+        # 编辑时传了新密钥就要加密后再落库——否则"创建时密文、编辑后明文"，
+        # 这道闸等于形同虚设
+        if key == "api_key" and value is not None:
+            value = _encrypt_or_400(value)
         setattr(provider, key, value)
 
     db.commit()

@@ -64,11 +64,35 @@ class Settings(BaseSettings):
     upload_dir: str = "uploads"
     output_dir: str = "outputs"
 
+    # ---------- 上传规模上限 ----------
+    # 单个文件的字节上限（MB）。0 = 不限制。
+    # 为什么必须有：上传是"先整份读进内存再提取"，没有上限时陌生人一个请求就能把
+    # worker 内存吃光；而 PDF 还会整份传给 MinerU 云、**按页计费**，所以这条同时是
+    # 内存闸和账单闸。默认 20 MB——本机最大的真实夹具是 4.3 MB 的护理指南 PDF。
+    max_upload_mb: int = 20
+    # PDF 页数上限。0 = 不限制。按页计费的东西必须单独限：20 MB 里塞得下一份
+    # 两千页的文件，字节没超但钱会超。
+    max_pdf_pages: int = 300
+
+    # ---------- 密钥加密 ----------
+    # 给 provider.api_key 做字段级加密的 Fernet 密钥（urlsafe base64 的 32 字节）。
+    # 生成：python -c "from services.secrets import generate_key; print(generate_key())"
+    # ⚠ 丢失即不可恢复：库里所有模型密钥都会解不开，只能让用户重新填。必须单独备份。
+    # 留空 = 功能未启用，此时**保存或读取密钥都会响亮报错**，不会退回明文存储。
+    api_key_enc_key: str = ""
+
     # ---------- 跨域 ----------
     # 允许的源，逗号分隔多个
     # 必须在 Settings 里声明：pydantic-settings 只把 .env 的值喂给本对象，
     # 不会写入 os.environ。用 os.getenv("CORS_ORIGINS") 读 .env 永远读到 None
     cors_origins: str = "http://localhost:5173"
+
+    # ---------- 提供商地址的 SSRF 防护 ----------
+    # 用户自建 provider 的 base_url 是**由服务端发出请求**的，所以默认禁止指向
+    # 环回 / 私有网段 / 链路本地（云上的 169.254.169.254 元数据服务就在那里）。
+    # 置 true 会放开这条限制——**只应在开发机上为了连本地假端点或 LM Studio 时开**，
+    # 部署给别人用时绝对不要带这一行。
+    allow_private_provider_urls: bool = False
 
     # ---------- LLM 调用 ----------
     # 连接阶段超时（秒）：只管 TCP + TLS 建连，与模型生成快慢无关
@@ -88,6 +112,19 @@ class Settings(BaseSettings):
     # 判据用 processed_at（处理完成时刻）而不是 uploaded_at：上传不等于消耗，
     # 只统计真正发生过处理的次数才对得上成本。
     max_processes_per_day: int = 0
+
+    # ---------- 认证暴力破解防护 ----------
+    # 同一个 (客户端 IP, 用户名) 在锁定窗口内最多允许多少次失败登录。0 = 不启用。
+    # 计数器是**进程内**的：多 worker 下每个进程各算各的（同 §3.3 的 reaper、
+    # §3.6 的并发闸同一个单 worker 假设），重启即清零。开放注册给别人用之前必须有，
+    # 否则 /auth/login 就是一个可以无限试的免费口令校验接口。
+    login_max_failures: int = 8
+    # 锁定窗口（分钟），也是失败次数的遗忘时长
+    login_lockout_minutes: int = 15
+    # 24 小时内最多允许注册多少个新账号。0 = 不限制（默认，单机自用）。
+    # 为什么光有 MAX_PROCESSES_PER_DAY 不够：那个配额按**账号**算，脚本注册 50 个号
+    # 就有 50 份额度。注册上限才是真正兜住总消费的那道闸。
+    max_registrations_per_day: int = 0
     # 是否发送 enable_thinking 参数（DashScope 兼容端的思考开关）。
     # 默认 None = 请求体里不带这个字段，保持各家端点的原有行为；
     # 显式设 false 可把思考模型从 240s 压到 12s，代价是可能降低批改质量

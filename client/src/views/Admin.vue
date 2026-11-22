@@ -102,7 +102,9 @@ function formatDate(raw: string): string {
             @update:model-value="(v: unknown) => changeRole(row, v as UserRole)"
           >
             <el-option label="普通用户" value="user" />
-            <el-option label="管理员" value="admin" />
+            <!-- 系统固定只有一个管理员：选项保留只为让现有 admin 那行显示得出名字，
+                 disabled 才是关键——真正的封死在后端 update_role 的护栏 0，这里管手感 -->
+            <el-option label="管理员" value="admin" disabled />
           </el-select>
         </div>
         <div class="mrow-meta">
@@ -135,7 +137,9 @@ function formatDate(raw: string): string {
               @update:model-value="(v: unknown) => changeRole(row as AdminUserRow, v as UserRole)"
             >
               <el-option label="普通用户" value="user" />
-              <el-option label="管理员" value="admin" />
+              <!-- 系统固定只有一个管理员：选项保留只为让现有 admin 那行显示得出名字，
+                 disabled 才是关键——真正的封死在后端 update_role 的护栏 0，这里管手感 -->
+            <el-option label="管理员" value="admin" disabled />
             </el-select>
           </template>
         </el-table-column>

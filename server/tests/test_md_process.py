@@ -151,12 +151,19 @@ def test_update_md_task_other_fields_ok(session):
 
 # ---------- 上传 fail-fast：md + PDF 必须有 token ----------
 class _FakeUpload:
+    """
+    镜像 Starlette UploadFile 的关键接口：filename + **可带 size 的 async read()**。
+
+    上传链路现在分块读到上限就断（services/uploads.py），调的是 `read(n)`；
+    替身若只支持无参 read() 就等于把被测代码的形状改成了测试的样子。
+    """
+
     def __init__(self, filename, data):
         self.filename = filename
-        self._data = data
+        self._buf = io.BytesIO(data)
 
-    async def read(self):
-        return self._data
+    async def read(self, size: int = -1):
+        return self._buf.read(size)
 
 
 def test_upload_md_pdf_without_token_rejected(session, dirs, monkeypatch):
