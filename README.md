@@ -25,6 +25,7 @@
 - **规范库与条款召回**：上传校对规范 / 格式要求（`.docx` / `.pdf`）→ 按**条款边界**切块入库 → 批改时按相关度召回 top-k 条款注入提示词。本地 embedding 端点 + pgvector 精确余弦扫描 + 字二元组词法召回，两路 RRF 融合
 - **调用计量**：每次外呼记 token / 耗时 / 重试次数 / 用途到 `llm_calls`，成本可追溯（embedding 与 MinerU 按页计费没有 token，不编数字入账，成本用字符数代理）
 - **操作日志**：分页 + 状态筛选 + 文件名搜索 + 批注条数，失败可重试，完成可重新下载
+- **开放使用的护栏**：上传体积与 PDF 页数上限、模型端点 SSRF 防护（拒绝指向内网）、注册口令强度、登录失败锁定、按天处理配额与注册上限、API Key 字段级加密、磁盘产物与分块图状态按留存期回收；失败给人话文案 + 可报障的错误编号
 
 ## 技术栈
 
@@ -47,9 +48,13 @@ docker run -d --name fileagent-postgres -p 5434:5434 \
 
 # 2. 后端
 cd server
-cp .env.example .env          # 必填 DATABASE_URL 与 JWT_SECRET_KEY
+cp .env.example .env          # 必填 DATABASE_URL、JWT_SECRET_KEY、API_KEY_ENC_KEY
+                              # API_KEY_ENC_KEY 是模型密钥的加密密钥，留空则保存/读取 API Key 一律报错；
+                              #   生成：uv run python -c "from services.secrets import generate_key; print(generate_key())"
+                              #   ⚠ 丢了库里所有密钥不可恢复，要单独备份
                               # 要用规范库/RAG 再填 EMBEDDING_BASE_URL 与 EMBEDDING_MODEL
                               # 要处理扫描件 PDF / PPT / md 转换再填 MINERU_TOKEN（mineru.net 申请）
+                              # 开放给别人用之前还要设 MAX_PROCESSES_PER_DAY / MAX_REGISTRATIONS_PER_DAY（默认 0=不限制）
 uv sync
 uv run python run_backend.py  # Swagger: http://localhost:8000/docs
 
@@ -86,6 +91,11 @@ uv run uvicorn test_mineru_server:app --port 19002
 uv run python -m eval.retrieval            # 规范召回 recall@k，纯本地、零 token
 uv run python -m eval.runner --provider 5 --case clean   # 批改质量：⚠ 会调真实模型花钱，先单条
 
+# 维护脚本（都默认只读，加 --apply / 无 --check 才动手）
+uv run python cleanup_storage.py           # 回收过期产物、孤儿上传文件与分块图状态（RETENTION_DAYS 控留存期）
+uv run python cleanup_storage.py --apply     # 确认清单后真删；加 --vacuum 让表空间可复用
+uv run python check_doc_refs.py            # 文档里的 `文件:符号` 引用有没有断链
+
 cd ../client
 npm run build                 # vue-tsc 类型检查 + 构建（唯一的类型门禁）
 npm test                      # 前端用例（vitest，只测纯逻辑）
@@ -93,9 +103,12 @@ npm test                      # 前端用例（vitest，只测纯逻辑）
 
 ## 文档
 
-- [SPEC.md](SPEC.md) — 设计指南：Java→Python 对照、各阶段设计与交付、DDL、API 表、缺陷修复台账
+- [SPEC.md](SPEC.md) — 设计指南：Java→Python 对照、各阶段设计与交付、DDL、API 表、缺陷修复台账、§13 开放使用与部署加固
 - [AGENTS.md](AGENTS.md) — 编码智能体须知：项目约定、安全底线、已知陷阱与当前基线
+- `docs/` — 设计参考（`UI-REFERENCE.md`）与阶段交接记录（`HANDOFF-*.md`）；当前未入库，要长期共享就 `git add docs/UI-REFERENCE.md`
+
+想让别人连上（局域网试用）：`FA_HOSTS=127.0.0.1,::1,<本机内网IP> uv run python run_backend.py` + 前端 `npm run build && npm run preview`，Windows 防火墙要按端口放行——完整步骤与实测的两个坎见 AGENTS.md §2.1。
 
 ## 还没做
 
-限流、API Key 字段级加密、Alembic 迁移、多 worker 部署、docx/PDF 表格提取进批改正文、加密 PDF 解密、把问题清单写进交付 docx、长文档分块路径的人工确认分块方案、`checkpoints/` 体积治理与 TTL。详见 AGENTS.md §7。
+请求级滑动窗口限流（现有的是按天配额 + 登录失败锁定，属粗粒度替代）、Alembic 迁移、多 worker 部署、docx/PDF 表格提取进批改正文、加密 PDF 解密、把问题清单写进交付 docx、长文档分块路径的人工确认分块方案、把回收脚本挂上定时器（现在是手跑 `cleanup_storage.py`）。详见 AGENTS.md §7、SPEC.md §13。

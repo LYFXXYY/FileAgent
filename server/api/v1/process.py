@@ -84,6 +84,7 @@ from services.ppt_convert import PptConvertError, render_blocks_with_meta
 from services.ppt_layout import run_layout_loop
 from services.ppt_repair import find_defects, repair_defective_blocks
 from services.spec_retrieval import SpecContext, collect_spec_context
+from services.storage import resolve_dir
 from services.uploads import check_pdf_pages, read_capped
 from services.word import create_diff_docx, create_plain_docx, extract_text_from_docx
 
@@ -107,18 +108,6 @@ ALLOWED_EXTENSIONS = set(TEXT_EXTRACTORS)
 # error_message 列的长度上限。只在 _mark_failed 一处截，调用方不要再各自 [:2000]——
 # 双重截断既看不出真实上限，又会让人以为改一处就够了。
 _ERROR_MESSAGE_MAX_CHARS = 2000
-
-
-def _resolve_dir(subdir: str) -> str:
-    """把配置里的相对路径解析成绝对路径，并确保存在"""
-    path = (
-        subdir
-        if os.path.isabs(subdir)
-        else os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", subdir)
-    )
-    path = os.path.normpath(path)
-    os.makedirs(path, exist_ok=True)
-    return path
 
 
 @router.post("/upload", response_model=UploadResponse, status_code=201)
@@ -180,7 +169,7 @@ async def upload(
     # ASYNC230：写的是已在内存里的小 docx，阻塞时间极短；上面的 python-docx 解析同样是
     # 同步阻塞。若以后要支持大文件，应把解析+落盘整体丢进 run_in_threadpool。
     stored_name = f"{uuid.uuid4().hex}{ext}"
-    with open(os.path.join(_resolve_dir(settings.upload_dir), stored_name), "wb") as f:  # noqa: ASYNC230
+    with open(os.path.join(resolve_dir(settings.upload_dir), stored_name), "wb") as f:  # noqa: ASYNC230
         f.write(file_bytes)
 
     # 5. 建 pending 日志（provider_name 稍后 process 时补齐）。
@@ -357,7 +346,7 @@ async def _run_processing(log_id: int) -> None:
             if not log.stored_filename:
                 _mark_failed(db, log, "扫描件落盘记录缺失，请重新上传", code=CODE_FILE_MISSING)
                 return
-            stored_path = os.path.join(_resolve_dir(settings.upload_dir), log.stored_filename)
+            stored_path = os.path.join(resolve_dir(settings.upload_dir), log.stored_filename)
             try:
                 with open(stored_path, "rb") as f:  # noqa: ASYNC230
                     pdf_bytes = f.read()
@@ -393,7 +382,7 @@ async def _run_processing(log_id: int) -> None:
             # structured 留存是旁路：写盘失败只告警，不把已拿到的正文判成失败
             save_structured(
                 result,
-                os.path.join(_resolve_dir(settings.output_dir), "mineru", str(log.id)),
+                os.path.join(resolve_dir(settings.output_dir), "mineru", str(log.id)),
             )
 
         # 选 provider：任务指定 > 当前用户的默认 active（按 text 能力筛）
@@ -531,7 +520,7 @@ async def _run_md_conversion(db: Session, log: OperationLog) -> None:
     if not log.stored_filename:
         _mark_failed(db, log, "文件落盘记录缺失，请重新上传", code=CODE_FILE_MISSING)
         return
-    stored_path = os.path.join(_resolve_dir(settings.upload_dir), log.stored_filename)
+    stored_path = os.path.join(resolve_dir(settings.upload_dir), log.stored_filename)
     try:
         with open(stored_path, "rb") as f:  # noqa: ASYNC230
             file_bytes = f.read()
@@ -577,7 +566,7 @@ async def _run_md_conversion(db: Session, log: OperationLog) -> None:
         # structured 留存是旁路（图片给下载 zip 与后续 PPT 带图用），写盘失败只告警
         save_structured(
             result,
-            os.path.join(_resolve_dir(settings.output_dir), "mineru", str(log.id)),
+            os.path.join(resolve_dir(settings.output_dir), "mineru", str(log.id)),
         )
 
     _mark_done(db, log, needs_ocr=False)
@@ -597,7 +586,7 @@ async def _run_ppt_conversion(db: Session, log: OperationLog) -> None:
     if not log.stored_filename:
         _mark_failed(db, log, "文件落盘记录缺失，请重新上传", code=CODE_FILE_MISSING)
         return
-    stored_path = os.path.join(_resolve_dir(settings.upload_dir), log.stored_filename)
+    stored_path = os.path.join(resolve_dir(settings.upload_dir), log.stored_filename)
     try:
         with open(stored_path, "rb") as f:  # noqa: ASYNC230
             pdf_bytes = f.read()
@@ -673,7 +662,7 @@ async def _run_ppt_conversion(db: Session, log: OperationLog) -> None:
             logger.exception("版面循环内部异常 log_id=%s，交付当前版本", log.id)
             layout_calls = []
 
-    out_dir = _resolve_dir(os.path.join(settings.output_dir, "pptx"))
+    out_dir = resolve_dir(os.path.join(settings.output_dir, "pptx"))
     try:
         with open(os.path.join(out_dir, f"{log.id}.pptx"), "wb") as f:  # noqa: ASYNC230
             f.write(pptx_bytes)
@@ -721,7 +710,7 @@ async def _run_ppt_conversion(db: Session, log: OperationLog) -> None:
     # structured 留存是旁路（片2 坏块修复要拿区域原图 grounding），写盘失败只告警
     save_structured(
         result,
-        os.path.join(_resolve_dir(settings.output_dir), "mineru", str(log.id)),
+        os.path.join(resolve_dir(settings.output_dir), "mineru", str(log.id)),
     )
 
 
@@ -938,7 +927,7 @@ async def process_status(
 
 def _read_pptx_delivery(log_id: int) -> bytes | None:
     """读落盘的 PPT 交付件（同步，调用方丢线程池）；缺失返回 None 由路由转 400"""
-    path = os.path.join(_resolve_dir(settings.output_dir), "pptx", f"{log_id}.pptx")
+    path = os.path.join(resolve_dir(settings.output_dir), "pptx", f"{log_id}.pptx")
     if not os.path.isfile(path):
         return None
     with open(path, "rb") as f:
@@ -953,7 +942,7 @@ def _build_md_download(log: OperationLog, stem: str) -> tuple[io.BytesIO, str, s
     解压后 md 渲染器能直接找到图。
     """
     md_text = log.processed_content or ""
-    img_dir = os.path.join(_resolve_dir(settings.output_dir), "mineru", str(log.id), "images")
+    img_dir = os.path.join(resolve_dir(settings.output_dir), "mineru", str(log.id), "images")
     images: dict[str, bytes] = {}
     if os.path.isdir(img_dir):
         for name in sorted(os.listdir(img_dir)):

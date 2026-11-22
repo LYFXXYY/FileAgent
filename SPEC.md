@@ -1815,7 +1815,14 @@ POST `/file-urls/batch`（Bearer + `files:[{name,is_ocr:true}]`）→ PUT 预签
 | `EMBEDDING_*` | **没有默认值**：`BASE_URL` / `MODEL` 留空即报"未配置"。本机 LM Studio 端口随上次启动漂移，写死一个"看着能用"的默认值换来的是静默打到别的模型上。`DIMENSIONS` 必须与模型实际输出、`spec_chunks.embedding` 列宽三处一致；`QUERY_PREFIX` 按模型训练方式配（bge-m3 **不加**，bge-large-zh 那批才加） | AGENTS §3.12 / §3.13 |
 | `SPEC_*` | `CHUNK_CHARS` 语义是"**单条条款上限**"，不是装箱目标；`RETRIEVAL_MODE` 是消融开关（hybrid/vector/lexical），别当装饰；`RAG_ENABLED=false` 时批改链路与阶段 6 之前逐字一致；`QUERY_WINDOW_CHARS` / `MAX_WINDOWS` 是为绕开 bge 静默截断而存在的滑窗 | AGENTS §3.13 / §3.14 |
 | `PPT_RENDER_*` | `BACKEND=stub` 出 1×1 占位 PNG（零依赖）/ `soffice` 经 WSL LibreOffice 真渲染（要装 libreoffice-impress）；`TIMEOUT` 首次冷启动慢 | AGENTS §3.11 |
-| `MINERU_*` | `TOKEN` 留空 = 扫描件功能关闭，行为与接入前逐字一致。token 在 mineru.net/apiManage 申请，**有效期 90 天**，过期表现为 HTTP 200 + 业务码报错。`MAX_WAIT` 是单份文档的轮询总预算，`HTTP_TIMEOUT` 是单次请求超时，两回事。真实端点在境外，client `trust_env=True`，与 embedding 的 `trust_env=False` 刻意不同 | AGENTS §3.15 |
+| `MINERU_*` | `TOKEN` 留空 = 扫描件功能关闭，行为与接入前逐字一致。token 在 mineru.net/apiManage 申请，**有效期 90 天**，过期表现为 HTTP 200 + 业务码报错。`MAX_WAIT` 是单份文档的轮询总预算，`HTTP_TIMEOUT` 是单次请求超时，两回事。真实端点在境外，client `trust_env=True`，与 embedding 的 `trust_env=False` 刻意不同 |
+| `MAX_UPLOAD_MB` / `MAX_PDF_PAGES` | 上传体积闸与 PDF 页数闸，**0 = 不限制**。两回事：20 MB 里塞得下一份两千页的文件，字节没超、MinerU 按页计的钱会超。读取一律走 `services/uploads.py:read_capped`（分块读，超限即断，绝不先吸进内存再判断） | AGENTS §3.21 |
+| `ALLOW_PRIVATE_PROVIDER_URLS` | SSRF 闸的总开关，默认 false = 拒绝任何 provider 的 `base_url` 指向私有 / 环回 / 链路本地地址。**只有开发机设 true**（连 `http://127.0.0.1:1900x` 假端点和 LM Studio），部署时不要带这一行 | AGENTS §3.21 |
+| `LOGIN_MAX_FAILURES` / `LOGIN_LOCKOUT_MINUTES` / `MAX_REGISTRATIONS_PER_DAY` | 登录失败锁定按 **(客户端 IP, 用户名小写)** 计（只按任一键都能被绕过或拿来锁人）；窗口同时是遗忘时长；**登录成功必须清账**。注册上限是全局 24 小时窗口——按账号的配额挡不住批量注册。计数器是进程内字典，重启清零，属单 worker 假设 | AGENTS §3.22 |
+| `MAX_PROCESSES_PER_DAY` | **0 = 不限制**，而这是成本闸不是防刷闸：每次处理都花真钱。只计 `pending/processing/done`（失败没产出成果，不计），判据在 provider 解析之前 | AGENTS §3.21 |
+| `RETENTION_DAYS` | `cleanup_storage.py` 的留存天数（磁盘产物与图状态共用），**0 = 关闭过期清理而不是全删**。覆盖三类：磁盘产物（原件、`.pptx`、MinerU 三件套）、`uploads/` 孤儿、LangGraph 分块图状态四张表；docx 结果是下载时从库里现算的，不占磁盘。图状态的时间基准是 `coalesce(processed_at, uploaded_at)`——重试会刷新它，反复重试的长文才不会永远攒线程 | AGENTS §3.25 |
+| `API_KEY_ENC_KEY` | Fernet 密钥，`model_providers.api_key` 的字段级加密用。**丢了库里所有密钥不可恢复**，要单独备份；留空 = 保存/读取密钥一律 `E-CONFIG-SECRET` 失败，**不退回明文**。存量明文要先跑 `migrate_encrypt_api_keys.py` | AGENTS §3.24 |
+| `FA_HOSTS` | 逗号分隔的绑定地址，不设时 `run_backend.py` 只绑 `127.0.0.1,::1`。给局域网试用时才加本机内网 IP | AGENTS §2.1 | AGENTS §3.15 |
 
 ---
 
@@ -1889,6 +1896,29 @@ doProcess() 超时/异常
 | 细节 | 登录页表单 order:-1 置顶、营销区只留标题；Home 步骤条短标签（选择/上传/处理/下载，四字竖折实拍）；Logs 分页器手机端收掉 sizes 下拉 |
 
 验证：375×667 emulate 真机截图逐页过（TabBar 高亮/卡片渲染/更多弹层三项/弹窗 92vw/无横向溢出）；1280 桌面回归（胶囊导航+表格原样）；`npm run build` + 33 单测全绿。约定与坑记 AGENTS §4。
+
+## 13. 开放使用与部署加固（2026-11-22）
+
+用户决定：项目要开放给别人用（先局域网试用，再走 VPS + Docker Compose + Caddy）。本节只记**为什么这么排**与**做完到什么程度**；每条的不可违反细节在 AGENTS §3.21–§3.25，命令在 AGENTS §2.1 / §2。
+
+### 13.1 平台选型结论（实测与文档核对后）
+
+| 方案 | 结论 | 决定性理由 |
+|---|---|---|
+| Cloudflare Pages + Workers + D1 + R2（纯 serverless） | **不可用** | Workers Python 运行时是 Pyodide（无 psycopg / 无原生扩展）；D1 是 SQLite 语义（没有 `vector`、没有 `<=>`、没有原生枚举），阶段 6 整层向量检索无处安放 |
+| Cloudflare Containers + Workflows | 技术可行，等于重写一轮 | 真容器能跑 FastAPI，但鉴权、存储、后台任务、轮询协议全要按 CF 的模型重搭；工作量与"换一台 VPS 直接跑"不成比例 |
+| Vercel + Supabase | 前端能上，后端不能 | Vercel 的 Node/Python serverless 假设无状态短请求，本项目的处理链路是分钟级后台任务（MinerU 轮询最长 600s）。Supabase 本身**可以**当 Postgres 用（pgvector 有），是最省事的数据库托管选项 |
+| **VPS + Docker Compose + Caddy** | **推荐（零改写）** | 唯一保持"单进程 + 本地盘 + 同机 Postgres"这三条既有假设的方案，AGENTS §3.3 / §3.6 / §3.10 的单 worker 前置不用动 |
+
+### 13.2 上线前置清单的状态
+
+- **已做**：上传体积闸、PDF 页数闸、SSRF 防护、注册口令强度、登录失败锁定、注册全局上限、按账号处理配额、错误文案分层（人话 + 稳定编号，不再泄露上游报文）、`api_key` 字段级加密（含安全迁移脚本）、产物与图状态回收（磁盘 TTL + 孤儿文件 + LangGraph 四张表的过期/孤儿线程，可选 `VACUUM` 收尾）。
+- **仍未做，且已明确接受**：请求级滑动窗口限流（配额是它的粗粒度替代）、api_key 的 KMS 托管（现在是 `.env` 单密钥）、Alembic、多 worker（三道进程内闸都不支持多进程）、表格提取与加密 PDF 解密（功能边界，非缺陷）。
+- **上 Nginx / Caddy 之后必须改的一处**：`api/v1/auth.py:_failed_key` 读 `request.client.host`，反代后面会全是代理 IP，登录锁定会退化成"按代理 IP 全局锁定"。要改读 `X-Forwarded-For` 并校验代理链。
+
+### 13.3 部署时不要带的开发机配置
+
+`ALLOW_PRIVATE_PROVIDER_URLS=true`（本地假端点用）、`MAX_REGISTRATIONS_PER_DAY=60`（为 e2e 留的余量，公开注册后按真实期望调小）、`LLM_TRUST_ENV_PROXY=false` 只在代理与 `NO_PROXY` 冲突时才需要（见 §11 的 `LLM_*` 行）。
 
 ---
 

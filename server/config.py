@@ -64,6 +64,11 @@ class Settings(BaseSettings):
     upload_dir: str = "uploads"
     output_dir: str = "outputs"
 
+    # 产物留存天数（`cleanup_storage.py` 用）：磁盘文件与分块图状态共用。0 = 不做过期清理。
+    # 只影响"下载/重试要用的东西"：批改与普通 docx 是下载时从库里现算的，
+    # 不占磁盘，因此与这个数无关。
+    retention_days: int = 30
+
     # ---------- 上传规模上限 ----------
     # 单个文件的字节上限（MB）。0 = 不限制。
     # 为什么必须有：上传是"先整份读进内存再提取"，没有上限时陌生人一个请求就能把

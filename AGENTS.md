@@ -50,8 +50,9 @@ uv run python backfill_spec_embeddings.py      # 真编码回填：需 .env 的 
 uv run python migrate_add_log_needs_ocr.py --check  # 看 needs_ocr / stored_filename 两列现状（只读）
 uv run python migrate_add_fk_indexes.py --check    # 看两个 FK 索引在不在（只读，幂等）
 uv run python check_doc_refs.py                 # 文档里的 `文件:符号` 引用有没有断链（只读，改完代码后跑）
+uv run python cleanup_storage.py               # 列出会回收哪些磁盘产物与图状态线程（只读默认档）；加 --apply 才真删
 LONGDOC_CHUNK_CHARS=60 LLM_TRUST_ENV_PROXY=false uv run python run_backend.py    # 跑 test_e2e_structural 用这套环境
-uv run uvicorn test_llm_server:app --port 19000            # 假 OpenAI 文本端点（批改类 e2e 用）；文件里那套"幻灯片大纲"路由属已删除的阶段5链路，仅历史残留
+uv run uvicorn test_llm_server:app --port 19000            # 假 OpenAI 文本端点（批改类 e2e 用）；只回 GradingResult JSON——阶段5 大纲分支已随链路删除，别加回来
 uv run uvicorn test_vlm_server:app --port 19001            # 假 VLM 端点：② PPT 的坏块修复（[ppt-repair:]）与版面批评（[ppt-layout-thread:]）e2e 在用（test_e2e_ppt.py 第 9/10 节）
 uv run uvicorn test_mineru_server:app --port 19002         # 假 MinerU 云端点（扫描件 OCR 兜底 e2e 用）
 uv run python test_e2e.py                      # 端到端冒烟：需后端在 8000 已起 + 假 LLM 不用，见 §7.2
@@ -95,7 +96,10 @@ cd client && npm run build && npm run preview
    查当前网络归类：`Get-NetConnectionProfile`（本例 WLAN 是 **Public**，所以只有「公用」profile 的规则生效）。
 
 跑后端前需要 `server/.env`（不入库）：复制 `server/.env.example` 为 `.env`，填 `DATABASE_URL` 和 `JWT_SECRET_KEY`。
+**对外开放给别人用之前还要加三个**：`API_KEY_ENC_KEY`（不配则保存/读取模型密钥一律 `E-CONFIG-SECRET` 失败，见 §3.24）、`MAX_PROCESSES_PER_DAY`、`MAX_REGISTRATIONS_PER_DAY`（都默认 0=不限制，见 §2.1）。开发机另有 `ALLOW_PRIVATE_PROVIDER_URLS=true`（连本地假端点用，**部署时不要带**，见 §3.21）。
 全部字段见 `server/config.py`；**新增字段必须同时补进 `.env.example`**。
+
+**`server/` 根目录的脚本按前缀分类，刻意不收进子目录**：`migrate_*`（一次性幂等 DDL/数据改写）、`backfill_*` / `cleanup_*` / `reset_*` / `check_*`（运维与体检）、`test_e2e_*`（端到端）、`test_*_server`（假端点）。它们都靠 `sys.path[0] == server/` 直接 `import database` / `from config import ...`，收进 `scripts/` 就得全部改成 `python -m` 调用并逐条改本文的命令——**整洁不值这个代价**，新增脚本请按前缀命名放在根目录。
 
 ## 3. 后端不可违反的约定
 
@@ -213,11 +217,11 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - `SqliteStore` 构造函数要的是 `sqlite3.Connection`，**路径要走 `SqliteStore.from_conn_string()` 上下文并显式 `setup()`**；传字符串会炸在 `create_function` 上。图状态与按块缓存分两个 sqlite 文件（同文件两个连接会撞库锁）。
 - **别加图级 `RetryPolicy`**：`chat()` 已按白名单重试，再套一层就是同一个提示打两次、双倍烧钱（同 §3.6 的"降级 ≠ 重试"）。
 - 假 client 在扇出下**必须按请求内容路由**（见 `tests/test_grading_graph.py` 的 `_RouteClient`）：按脚本顺序吐响应会把 A 块的答复发给 B 块，测试通过只是在测运气。
-- `checkpoints/` 已 gitignore、只增不自缩，属定期清理项；`interrupt` 人工确认分块方案还没做（要先有 UI）。
+- `checkpoints/` 目录已 gitignore（阶段 4 后图状态进 Postgres，这个目录只是历史遗留）；**LangGraph 那四张表只增不自缩**，由 `cleanup_storage.py` 按留存期回收，见 §3.25。`interrupt` 人工确认分块方案还没做（要先有 UI）。
 
 ### 3.11 PPT 流水线（阶段 5 · 已整体删除，历史）
 
-⚠ **2026-11-21 整条大纲流水线已按用户决定删除**：`graphs/ppt_graph.py` / `services/pptx_builder.py` / `schemas/ppt_outline.py` / `schemas/vlm_critique.py` 及其 5 个单测已 `git rm`（历史可从 git 找回）。现役 pptx 链路是 §3.17–§3.19 的忠实转换；其中仍有效的机制已迁到：
+⚠ **2026-11-21 整条大纲流水线已按用户决定删除**：`graphs/ppt_graph.py` / `services/pptx_builder.py` / `schemas/ppt_outline.py` / `schemas/vlm_critique.py` 及其 5 个单测已 `git rm`（历史可从 git 找回）。**2026-11-22 补齐残留**：`services/ppt_outline.py` / `services/vlm_critic.py`（提示词构造层，删链时漏摘）也已删——它们只被 `test_llm_server.py` 的注释提到，没有任何 import。现役 pptx 链路是 §3.17–§3.19 的忠实转换；其中仍有效的机制已迁到：
 - **`render_pptx_to_images(pptx_bytes, slide_count)` 双后端派发点保留**（`services/pptx_renderer.py`，片3 版面循环在用）。`settings.ppt_render_backend`：`stub`（默认）/ `soffice`（WSL LibreOffice 真渲染）。**Windows↔WSL 文件交换必须走 `/mnt/<盘>` NTFS 挂载，禁用 `\\wsl.localhost` UNC**（见 SPEC §9.13 运行约定 2）。
 - **轮次语义**（批评调用数、默认 2 硬上限 5、pass 早停）与 **"解析失败绝不当通过"** 的边界已原样继承到 §3.19。
 - **VLM 走 `resolve_provider(user, None, "vision")`、不接受 provider_id 直传**（§3.3 capability 路由的延伸）——现役两处 VLM 都守这条。
@@ -340,7 +344,7 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - **对测试的连带义务（改这里必踩）**：五套 e2e 的 cleanup 现在都按 user_id 删默认任务/规范（否则 user 行 FK 删不掉）；`test_e2e_rag.py` 的"无规范库/删库归零"用例在注册后**先 GET+DELETE 清空默认规范**再测——新写涉及规范库断言的用例，主/他人两个账号都要清。
 
 
-## 3.21 规模上限与 SSRF 防护（2026-11-22，开放给别人用之前加的）
+### 3.21 规模上限与 SSRF 防护（2026-11-22，开放给别人用之前加的）
 
 - **三个上限都在 `config.py`，默认值本身就是策略**：`max_upload_mb=20`、`max_pdf_pages=300`、`allow_private_provider_urls=False`。前两个 **0 = 不限制**。为什么默认就开着而不是等上线：上传是"整份读进内存再提取"，不限大小一个请求就能打挂进程；而 PDF 会整份传给 MinerU 云**按页计费**——所以字节闸和页数闸是两件事，20 MB 里塞得下一份两千页的文件，字节没超、钱会超。默认 20 MB 的依据是本机最大的真实夹具 4.3 MB。
 - **读取必须走 `services/uploads.py`**：`read_capped`（async）与 `read_capped_sync`（同步路由用）分块读、超限即断，**绝不先把整个文件吸进内存再判断**；`check_pdf_pages` 只卡 PDF。两条上传链路（`api/v1/process.py` 的工作文档、`api/v1/specs.py` 的规范库）都必须用它——写两遍判据迟早只改一边。超限返 **413**，页数超限返 **400**。
@@ -349,10 +353,13 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
   - **已知边界（未做）**：校验时解析到的 IP 与真正建连时可能不同（DNS rebinding），彻底做法要在 httpx 连接层再判一次。
   - **`ALLOW_PRIVATE_PROVIDER_URLS=true` 只给开发机**（连本地假端点 19000 / LM Studio 用），**部署时不要带这一行**。五套 e2e 用的 `http://127.0.0.1:*` 提供商全靠它。
 - **单测里不要解析真实域名**：`_validate_base_url` 会走 `getaddrinfo`，测试只用**字面 IP**（数字地址不发 DNS 查询）和开关早退路径，否则离线环境一片红（§7.3 的"不出网"边界）。
+- **`max_processes_per_day`（0=不限制）是成本闸，不是防刷闸**：`api/v1/process.py:_quota_error` 在近 24 小时窗口内按 user_id 数 `operation_logs`，只计 `pending/processing/done`——**失败的没成功，不计**。超限返 429 `E-QUOTA-PROCESS`，判据在 `process()` 里、**provider 解析之前**（不该让没钱的人先走一遍模型选择）。为什么必须有：每次处理都花真钱（LLM 按 token、MinerU 按页），失败重试还会整条重跑。
+  - **异步 `async def process()` 里做这次 COUNT 必须 `run_in_threadpool` + 独立 `SessionLocal`**：直接在事件循环里查库是新增阻塞点（§3.3 的同步/异步约定），而且此刻请求级 `db` 还要用于返回响应。
+  - **已知取舍**：COUNT 与 INSERT 之间有竞态，并发请求可小幅超一点额度。刻意不加锁——小幅超额的代价远低于给每个处理请求加串行点。
 
 
 
-## 3.22 认证加固（2026-11-22，开放注册给别人用时加的）
+### 3.22 认证加固（2026-11-22，开放注册给别人用时加的）
 
 - **口令强度只作用于注册路径**：`schemas/auth.py:RegisterRequest` 是 `min_length=8` + `_reject_weak_password`（拒"整串只有一个字符类"：纯数字 / 纯字母）。**登录不校验长度**——`LoginRequest` 故意没有约束，否则存量短密码用户会被前端或后端拦在门外，等于自己把人锁住。前端 `Login.vue` 的 `rules` 因此是 `computed`，按 `tab` 切换：注册 tab 才带强度规则。改这条前先想"会不会把已有账号挡在外面"。
   不用"大小写+数字+符号"那套复杂度规则：它逼出 `Password123!`，既难记又是最常见的弱口令模板；长度才是主要防线。
@@ -364,7 +371,7 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 
 
 
-## 3.23 错误文案分层与错误编号（2026-11-22，开放给别人用之前做的）
+### 3.23 错误文案分层与错误编号（2026-11-22，开放给别人用之前做的）
 
 **分层规矩：`message` 给人看，`detail` 给排障用，`code` 是两者的桥。**
 
@@ -391,8 +398,10 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
   把 SQL 片段带进文案"，别删。
 - **B6 留存告知在 `Home.vue` 上传步骤**（`upload-notice`）：说清"存在哪、什么情况下会离开本机
   （扫描件整页送 MinerU 云）、别上传他人隐私"。改上传链路的外发行为时必须同步这段话。
+- **状态流转只有两个提交出口**：`api/v1/process.py:_mark_failed` / `_mark_done`（`**fields` 写业务列 + done + `processed_at`）。以前 done 路径在四个函数里手写 `status=done` + `processed_at` + commit + refresh，加公共字段要记 4 处、漏一处就是静默 NULL。**`_mark_done` 会先校验列名**——拼错的 kwarg 曾会一路 commit 成功然后消失，现在直接抛错。新增终态路径一律走这两个函数，不要再自己 commit 状态。
+- **`error_message` 长度上限（2000）只在 `_mark_failed` 一处截**。以前调用点各截一次，编号又被追加在截断之后，超限会写出 `…（E-XXX）` 长度失控；一处收口后不可能再出现"一半有号一半没号"。
 
-## 3.24 `api_key` 字段级加密（2026-11-22，Fernet）
+### 3.24 `api_key` 字段级加密（2026-11-22，Fernet）
 
 - **库里存的不再是明文**：`model_providers.api_key` 是 Fernet 密文，`String(512)`（输入上限 255，密文约 400 字符）。加解密只在两个边界：写入时 `api/v1/providers.py:_encrypt_or_400`（**create 和 update 都要**，漏一个就是"创建时密文、改一次退回明文"），读取时 `services/llm.py` 拼 `Authorization` 前 `decrypt_secret`。业务代码不应再直接读 `provider.api_key`。
 - **`services/secrets.py` 是严格模式：解不开就抛 `SecretError`，绝不"看着不像密文就当明文用"**。这不是洁癖——留一条明文后路，等于任何能写库的人都能让代码按明文处理，这道闸就形同虚设。因此**存量数据必须先跑 `migrate_encrypt_api_keys.py`**，否则那些 provider 一调用就报"模型密钥解密失败"。
@@ -401,6 +410,23 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - **展示路径不许因为密钥问题 500**：`mask_secret` 解不开返回 `"****"` 而不是抛错——列表页要永远打得开，真正该报错的是外呼路径。
 - **单测连带义务**：`tests/conftest.py` 给每个用例装一把固定测试密钥（`base64("0"*32)`，不用随机值以便复现）。凡构造 ORM `ModelProvider` 行的地方**必须写 `encrypt_secret(...)`**——写明文是在验证一条生产环境不存在的路径。
 - 没有 Alembic，所以列宽 255→512 也在同一个幂等脚本里做（`information_schema` 查 `character_maximum_length` 再 ALTER）。
+
+
+### 3.25 产物与图状态回收（2026-11-22，`services/storage.py` + `services/graph_state.py` + `cleanup_storage.py`）
+
+- **先认清"什么东西真的占磁盘"**：批改与普通任务的 .docx **不落盘**——下载时由 `create_diff_docx(log.original_content, log.processed_content)` 从库里现算，所以它们没有留存期问题。真正占地方的是三类：`uploads/{stored_filename}`（上传原件）、`outputs/pptx/{log_id}.pptx`、`outputs/mineru/{log_id}/`（含图片，目录）。
+- **两条回收口径分开，各自的判据不能混**：
+  - **过期**（`plan_expired`）：`status in (done, failed)` **且** `uploaded_at` 早于 `retention_days` 前。两个条件缺一不可——`processing` / `pending` 的产物正在被后台线程读写，按时间删会删掉跑一半的任务。历史行 `stored_filename` 为 NULL 时**只跳原件、仍然扫 outputs**（产物是按 log_id 落的，与有没有落盘名无关）。
+  - **孤儿**（`plan_orphans`）：`uploads/` 里 UUID 落盘名但 DB 无日志引用——e2e 强删 DB 行留下的。**只动匹配 `^[0-9a-f]{32}\.(docx|pdf)$` 的条目**，`server/uploads/` 里的具名文件是用户真实夹具（§7.2），一行代码都不碰；子目录整个跳过。
+- **`retention_days=0` = 关闭过期清理**，不是"全删"。
+- **默认只列不删**：`cleanup_storage.py` 无参数即只读，`--apply` 才动手（`execute`）。列清单时每类最多打 15 条，剩下的用一行汇总，免得几百条刷屏后关键信息被埋。
+- **删失败跳过而不是中止**：Windows 上文件常被 Word / WPS 占着，`execute` 逐条吞 `OSError` 并计入未删除数。
+- **目录解析也搬到这里了**（`resolve_dir`）：原来 `_resolve_dir` 在 `api/v1/process.py` 里且按 **cwd** 解析相对路径——上传走 `run_backend.py`、回收走脚本，同一个 `UPLOAD_DIR` 会指向两个不同目录。基准改成 `services/storage.py` 的上级目录（`server/`），任何入口一致。
+- **给 `TEXT_EXTRACTORS` 加新格式时记得改 `STORED_NAME` 正则**（`services/storage.py`），否则新格式永远扫不出孤儿。
+- **长文分块的图状态也在回收范围内，但判据不同**（`services/graph_state.py`）：它不在磁盘上，而是 LangGraph 自建的 `checkpoints` / `checkpoint_blobs` / `checkpoint_writes` / `store` 四张表，**实测它们之间没有外键**，所以删必须四张一起删——漏一张就是永久垃圾，`checkpoints.parent_checkpoint_id` 还会留下指向不存在行的 blob。线程号来自 `log-{operation_logs.id}`，按块缓存在 `store` 里的 `prefix` 是 `longdoc.log-{id}`，**只认这两种形态**，将来别的图不会被误删。
+- **时间基准用 `coalesce(processed_at, uploaded_at)` 而不是 `uploaded_at`**：图状态"最后一次被用到"是重试那一刻，用上传时间会让反复重试的长文永远攒线程。`failed` 在窗口内**必须留着**——那是重试命中按块缓存、不整篇重打（§3.10）的唯一依据，删了等于把钱烧回去。
+- **`--vacuum` 是可选收尾**：DELETE 之后 Postgres 不把表文件缩小（只标页可复用），`VACUUM (ANALYZE)` 让空间供后续写入复用；刻意不用 `VACUUM FULL`——它要排他锁，不该由运维脚本顺手要。
+- **孤儿线程与过期线程是两条独立判据**：日志行已经不在了（五套 e2e 都删自己的 DB 行）→ 与留存期无关，直接可回收。实测本机一次就清出 15 个线程 / 495 行。
 
 
 
@@ -439,7 +465,7 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 新增 ORM 类必须在 `server/models/__init__.py` 里 import，否则 `create_all()` 发现不了这张表。
 
 ⚠ **历史包袱（已了结）**：MySQL 时代本机老库是早期手工建表，与 ORM 声明长期漂移（外键规则 NO ACTION vs SET NULL、status 允许 NULL、TEXT vs LONGTEXT 不一致），§3.2 和 s2 修复都按这套假设写过。阶段 4（2026-11-16）一次性把业务表全量迁到 Postgres，**新库 `create_all()` 一次建齐，外键规则与 ORM 声明逐字匹配**，老库 vs 新库差异消失。`server/migrate_add_provider_*.py` 等三个 MySQL 方言脚本已废弃并于 2026-11-17 `git rm`（语法 `SHOW COLUMNS` 在 PG 上跑不了，新库也不需要——它们只是给老 MySQL 库做幂等 ALTER 用的；历史可从 git 找回）。
-**未来再要改列**：写 Postgres 方言的一次性脚本（先查 `information_schema.columns` 再 ALTER），或者直接重 `create_all()`（如果可丢数据）。现成范例：`migrate_add_spec_embedding.py`（加 vector 列）、`migrate_add_log_needs_ocr.py`（一次加 `needs_ocr` / `stored_filename` 两列，2026-11-20 已执行）。
+**未来再要改列**：写 Postgres 方言的一次性脚本（先查 `information_schema.columns` 再 ALTER），或者直接重 `create_all()`（如果可丢数据）。现成范例：`migrate_add_spec_embedding.py`（加 vector 列）、`migrate_add_log_needs_ocr.py`（一次加 `needs_ocr` / `stored_filename` 两列，2026-11-20 已执行）、`migrate_encrypt_api_keys.py`（**加宽列 + 改写既有数据**的组合：255→512 与明文→密文同一脚本做完，带 `--check` / `--dry-run`，见 §3.24）。
 
 ⚠ **`create_all()` 也不会给已存在的表补建索引**——所以模型里新加 `index=True` 同样要写一次性脚本落到现有库。范例：`migrate_add_fk_indexes.py`（`operation_logs.task_id` / `tasks.provider_id`，2026-11-22 已执行）。索引名沿用 SQLAlchemy 默认 `ix_<表>_<列>`，脚本与新库 `create_all()` 建出来的逐字一致，不留"两种库索引名不同"的差异。
 
@@ -492,8 +518,8 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
   - 本轮 6 份合计 35,181 token。成本只能事后从 `llm_calls` 看，`provider.max_tokens` 拦不住（见 §3.6）。
 ### 7.5 路线状态与未做
 
-- **路线 2026-11-16/17/19/20/21（见 SPEC §9.2）**：阶段 4（Postgres 基建，11-16）、阶段 5（PDF→PPT 大纲流水线，11-17 八切片；**11-21 被 ② 片1 忠实转换替换**）、任务 2（管理员 + 默认模型授权，11-17）、阶段 6（本地 embedding + pgvector 检索 + 条款注入，11-19 A1–A7）、MinerU 扫描件 OCR 兜底（11-20 A–E，见 §3.15 / SPEC §9.15）、① md 转换任务（11-20，零 LLM，见 §3.16 / SPEC §9.16）、**② PDF→PPT 忠实转换片1/片2/片3（11-21 全部完成：块驱动渲染器+B 重排/A 兜底 §3.17 / 坏块 VLM 修复 §3.18 / 版面批评循环 §3.19，详见 SPEC §9.17）** 均已完成。**阶段5 大纲流水线模块（ppt_graph / pptx_builder / ppt_outline / vlm_critique 及其单测）已于 11-21 按用户决定整体删除**（§3.11）、**注册默认配置（4 任务+通用参考文档，§3.20 / SPEC §9.18）已完成**。仍然没做：`interrupt` 人工确认分块方案（要先有 UI）、长文两段式摘要、`checkpoints/` 体积治理与 TTL、引用点击回跳规范原文、`format_tier` 落库（改表要先问）。
-- **更大的未做清单**：限流、api_key 字段级加密、Alembic、Docker / 多 worker、表格提取（docx 表格和 PDF 表格都不进正文）、加密 PDF 解密、成本价格表（计量只存 token 不算钱）、问题清单写进交付 docx、本地 OCR 推理（云兜底已做，见 §3.15）。评测台的下一步：真实文档夹具、第二厂商当裁判、同夹具跑重复轮次（单轮会漂）、把 `format_tier` 落进 `llm_calls`（改表结构，做前先问）。
+- **路线 2026-11-16/17/19/20/21（见 SPEC §9.2）**：阶段 4（Postgres 基建，11-16）、阶段 5（PDF→PPT 大纲流水线，11-17 八切片；**11-21 被 ② 片1 忠实转换替换**）、任务 2（管理员 + 默认模型授权，11-17）、阶段 6（本地 embedding + pgvector 检索 + 条款注入，11-19 A1–A7）、MinerU 扫描件 OCR 兜底（11-20 A–E，见 §3.15 / SPEC §9.15）、① md 转换任务（11-20，零 LLM，见 §3.16 / SPEC §9.16）、**② PDF→PPT 忠实转换片1/片2/片3（11-21 全部完成：块驱动渲染器+B 重排/A 兜底 §3.17 / 坏块 VLM 修复 §3.18 / 版面批评循环 §3.19，详见 SPEC §9.17）** 均已完成。**阶段5 大纲流水线模块（ppt_graph / pptx_builder / ppt_outline / vlm_critique 及其单测）已于 11-21 按用户决定整体删除**（§3.11）、**注册默认配置（4 任务+通用参考文档，§3.20 / SPEC §9.18）已完成**。仍然没做：`interrupt` 人工确认分块方案（要先有 UI）、长文两段式摘要、引用点击回跳规范原文、`format_tier` 落库（改表要先问）。
+- **更大的未做清单**：真正的请求级限流（已做的是按天配额 + 登录锁定，见 §3.21/§3.22，滑动窗口按用户/IP 仍未做）、Alembic、Docker / 多 worker、表格提取（docx 表格和 PDF 表格都不进正文）、加密 PDF 解密、成本价格表（计量只存 token 不算钱）、问题清单写进交付 docx、本地 OCR 推理（云兜底已做，见 §3.15）、**回收的定时化**（§3.25 的脚本是手跑的，没上 cron / 计划任务，长跑部署要补）。**已做**：api_key 字段级加密（§3.24）、上传字节/PDF 页数闸与 SSRF（§3.21）、口令强度与登录锁定（§3.22）、磁盘产物 + 图状态回收（§3.25）。评测台的下一步：真实文档夹具、第二厂商当裁判、同夹具跑重复轮次（单轮会漂）、把 `format_tier` 落进 `llm_calls`（改表结构，做前先问）。
 
 ### 7.6 已落地功能的决策记录
 - **管理员 + 默认模型授权（已于 2026-11-17 实施，简单版）**：`users.role` / `users.can_use_default` / `model_providers.is_public` 三列 + `require_admin` + `/admin/*` 三端点 + 前端 Admin 页。不做 audit / 跨用户 provider 管理（用户拍板）。授权判据集中在 `services/llm.py:provider_usable_by`，改任何 provider 可见性逻辑先看 SPEC §9.11 的实施清单。**admin 路由是 §3.1 隔离铁律的声明式例外**——新加管理端点挂 `require_admin` 即可，不要"顺手"补 user_id 过滤把 admin 视图废掉。
@@ -535,4 +561,5 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 ## 9. 提交
 
 SPEC §3.3 约定 conventional commits（`feat: ...` / `fix: ...`），现有历史是中文短语（"优化1"/"优化2"）；新提交按 SPEC 约定写。
+**文档分两处**：`AGENTS.md` / `SPEC.md` / `README.md` 在仓库根且入库；`docs/` 放设计参考（`UI-REFERENCE.md`——§4 引它当色彩与形态依据）与阶段交接记录（`HANDOFF-*.md`，本机快照）。这两类当前**未入库**：要长期给协作者看的只有 UI-REFERENCE，需要时 `git add docs/UI-REFERENCE.md`；HANDOFF 是会话产物，不必入库。`check_doc_refs.py` 的 `DOCS` 带着 `docs/UI-REFERENCE.md`，移动文档要同步改那里。
 **不要自动 push / 部署 / 发布**；删文件、删数据、清历史前先问。

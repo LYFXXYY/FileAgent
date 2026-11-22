@@ -21,9 +21,9 @@ import sys
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-# 脚本在 server/ 下，文档在仓库根
+# 脚本在 server/ 下，主文档在仓库根，交接与设计参考在 docs/
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DOCS = ["AGENTS.md", "SPEC.md", "README.md", "UI-REFERENCE.md"]
+DOCS = ["AGENTS.md", "SPEC.md", "README.md", "docs/UI-REFERENCE.md"]
 
 REF = re.compile(r"([A-Za-z0-9_./-]+\.(?:py|vue|ts|json|toml|md))[:：]([A-Za-z_][A-Za-z0-9_.]*)")
 
@@ -39,6 +39,11 @@ ARCHIVED = {
     ("ppt_graph.py", "plan_slides"),
     ("pptx_builder.py", "build_pptx"),
     ("vlm_critique.py", "Critique"),
+    # services/ppt_outline.py 与 services/vlm_critic.py 于 2026-11-22 随阶段5 残留一并删除
+    # （AGENTS §3.11），SPEC 的路线表与交付清单仍按历史事实提到它们
+    ("ppt_outline.py", "JSON"),
+    ("ppt_outline.py", "build_outline_messages"),
+    ("vlm_critic.py", "build_critic_messages"),
 }
 
 

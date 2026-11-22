@@ -61,6 +61,15 @@ const rules = computed<FormRules>(() => ({
       : [{ required: true, message: '请输入密码', trigger: 'blur' }],
 }))
 
+/**
+ * 密码框占位符跟着 tab 走
+ *
+ * 原先写死 "6-72 位"，是强度规则改到 8 位之后剩下的旧文案——用户照着它注册会被
+ * 自己的校验拦下，等于界面自相矛盾。登录侧不提长度：那里不校验，写了反而像门槛。
+ * 文案与校验规则共用 `weakPasswordHint`，避免两处各说一套。
+ */
+const passwordPlaceholder = computed(() => (tab.value === 'register' ? weakPasswordHint : '请输入密码'))
+
 async function handleSubmit() {
   // validate() 返回 boolean，字段不合法时会自动给 form-item 加红字错误
   const valid = await formRef.value?.validate().catch(() => false)
@@ -215,7 +224,7 @@ function switchTab(name: string | number) {
             <el-input
               v-model="form.password"
               type="password"
-              placeholder="6-72 位"
+              :placeholder="passwordPlaceholder"
               autocomplete="current-password"
               show-password
               @keyup.enter="handleSubmit"

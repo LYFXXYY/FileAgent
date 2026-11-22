@@ -357,6 +357,12 @@ async function toggleActive(row: Provider) {
         </el-form-item>
         <el-form-item label="API 基础地址" prop="base_url">
           <el-input v-model="form.base_url" placeholder="如：https://ark.cn-beijing.volces.com/api/v3" />
+          <div class="form-hint">
+            填公网可达的地址。后端会把它解析成 IP 再判断，指向内网 / 环回 / 保留地址一律拒绝
+            （服务端代表你的浏览器去请求，不加这道闸等于把内网暴露出来）；
+            本地 Ollama、LM Studio 这类 127.0.0.1 端点要服务端管理员在 .env 里开
+            ALLOW_PRIVATE_PROVIDER_URLS 才能填
+          </div>
         </el-form-item>
         <el-form-item label="模型标识" prop="model_name">
           <el-input v-model="form.model_name" placeholder="如：doubao-pro-128k" />
@@ -377,9 +383,17 @@ async function toggleActive(row: Provider) {
             show-password
             :placeholder="dialogMode === 'edit' ? '留空表示不改动' : '请输入 API Key'"
           />
+          <div class="form-hint">
+            密钥以密文存库，页面只回显前 4 位；备份要连服务端 .env 里的 API_KEY_ENC_KEY 一起留，
+            换密钥后旧记录解不开，只能重新填
+          </div>
         </el-form-item>
         <el-form-item label="Max Tokens">
           <el-input-number v-model="form.max_tokens" :min="1" :max="200000" />
+          <div class="form-hint">
+            上限是"请求里带上这个值"，部分端点会忽略它（实测有端点在 4096 下仍返回上万 token），
+            不要当成本闸门用；真实用量看操作日志的计量
+          </div>
         </el-form-item>
         <el-form-item label="Temperature">
           <el-slider v-model="form.temperature" :min="0" :max="2" :step="0.1" show-input />
