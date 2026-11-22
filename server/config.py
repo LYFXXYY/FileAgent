@@ -81,6 +81,13 @@ class Settings(BaseSettings):
     llm_max_retries: int = 2
     # 进程内并发闸：同时在飞的 LLM 请求数。多 worker 部署下每个进程各算各的
     llm_max_concurrency: int = 4
+    # 每个用户 24 小时内最多触发多少次处理。**0 = 不限制**（默认值，保持单机开发与
+    # 既有测试的行为逐字不变）。
+    # 为什么需要它：每一次处理都在花真钱——LLM 按 token、MinerU 按页计费，而且失败重试
+    # 会把整条链路再跑一遍。项目开放给别人用时，这是唯一能挡住"一个人脚本化刷爆账单"的闸。
+    # 判据用 processed_at（处理完成时刻）而不是 uploaded_at：上传不等于消耗，
+    # 只统计真正发生过处理的次数才对得上成本。
+    max_processes_per_day: int = 0
     # 是否发送 enable_thinking 参数（DashScope 兼容端的思考开关）。
     # 默认 None = 请求体里不带这个字段，保持各家端点的原有行为；
     # 显式设 false 可把思考模型从 240s 压到 12s，代价是可能降低批改质量

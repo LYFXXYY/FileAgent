@@ -20,12 +20,13 @@ import os
 import uuid
 import zipfile
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from config import get_settings
@@ -83,6 +84,10 @@ TEXT_EXTRACTORS = {
     ".pdf": extract_text_from_pdf,
 }
 ALLOWED_EXTENSIONS = set(TEXT_EXTRACTORS)
+
+# error_message 列的长度上限。只在 _mark_failed 一处截，调用方不要再各自 [:2000]——
+# 双重截断既看不出真实上限，又会让人以为改一处就够了。
+_ERROR_MESSAGE_MAX_CHARS = 2000
 
 
 def _resolve_dir(subdir: str) -> str:
@@ -184,6 +189,50 @@ async def upload(
     )
 
 
+def _db_now(db: Session) -> datetime:
+    """
+    取 DB 时钟的当前时刻
+
+    全站时间列都由 `func.now()` 生成（§7.3：容器钟与宿主机钟差 3–4 秒，
+    混用两个时钟会算出负的耗时）。配额窗口要跟这些列可比，基准就必须也取 DB 时钟，
+    不能在应用侧 `datetime.now()`。SQLite（单测）下 CURRENT_TIMESTAMP 回来是字符串，
+    Postgres 回来是 datetime，两种都归一成 naive UTC datetime。
+    """
+    raw = db.execute(select(func.now())).scalar_one()
+    if isinstance(raw, str):
+        return datetime.fromisoformat(raw.strip().replace("Z", ""))
+    return raw.replace(tzinfo=None) if raw.tzinfo else raw
+
+
+def _quota_error(db: Session, user_id: int) -> str | None:
+    """
+    近 24 小时处理次数是否已超上限；超了返回给用户看的文案，没超返回 None
+
+    `max_processes_per_day = 0` 表示不限制，此时一条 SQL 都不多问。
+    判据取 `processed_at` 落在窗口内、且状态已到 processing/done/failed 的日志——
+    上传本身不花钱，只有真正触发过处理才算成本。重试会计入，因为它确实又烧一遍。
+    """
+    limit = settings.max_processes_per_day
+    if limit <= 0:
+        return None
+    cutoff = _db_now(db) - timedelta(hours=24)
+    used = (
+        db.query(OperationLog)
+        .filter(
+            OperationLog.user_id == user_id,
+            OperationLog.status.in_([LogStatus.PROCESSING, LogStatus.DONE, LogStatus.FAILED]),
+            OperationLog.processed_at >= cutoff,
+        )
+        .count()
+    )
+    if used < limit:
+        return None
+    return (
+        f"最近 24 小时已处理 {used} 次，达到上限 {limit} 次。"
+        "请稍后再试，或联系维护者调整 MAX_PROCESSES_PER_DAY"
+    )
+
+
 @router.post("/process/{log_id}", response_model=ProcessResponse)
 async def process(
     log_id: int,
@@ -210,6 +259,12 @@ async def process(
     if log.status not in (LogStatus.PENDING, LogStatus.FAILED):
         msg = f"当前状态 {log.status.value} 不可处理（仅 pending/failed 可重试）"
         raise HTTPException(400, msg)
+
+    # 成本闸放在任何状态变更之前：超配额时这条日志必须原样停在 pending，
+    # 否则用户看到 429 但日志已经变 processing，前端会一直轮询一个不会跑的任务
+    quota = _quota_error(db, current.id)
+    if quota:
+        raise HTTPException(429, quota)
 
     # 关联任务（fail-fast：在返回前就校验，避免后台才发现任务没了）
     task = db.get(Task, log.task_id) if log.task_id is not None else None
@@ -290,7 +345,7 @@ async def _run_processing(log_id: int) -> None:
                     parse_pdf_via_mineru, pdf_bytes, log.original_filename
                 )
             except (MinerUError, OSError) as e:
-                _mark_failed(db, log, f"扫描件识别失败：{e}"[:2000])
+                _mark_failed(db, log, f"扫描件识别失败：{e}")
                 return
             except (httpx.HTTPError, httpx.InvalidURL) as e:
                 # 传输层异常（代理配置非法 / 连接中断等）文案对用户不可行动，
@@ -315,7 +370,7 @@ async def _run_processing(log_id: int) -> None:
         try:
             provider = resolve_provider(db, log.user_id, task.provider_id, "text")
         except LLMError as e:
-            _mark_failed(db, log, str(e)[:2000])
+            _mark_failed(db, log, str(e))
             return
 
         # 快照成普通值：计量写入要丢线程池，不能跨线程用这个 session 的 ORM 对象
@@ -359,42 +414,71 @@ async def _run_processing(log_id: int) -> None:
                 error=str(e),
                 attempts=e.attempts,
             )
-            _mark_failed(db, log, str(e)[:2000])
+            _mark_failed(db, log, str(e))
             return
 
         for call in output.calls:
             await _meter(log, provider_ref, purpose=call.purpose, result=call.result)
 
-        log.processed_content = output.revised_text
-        log.structured_output = output.structured
         # 记实际选中的 provider 名，不再事后回查默认提供商（回查会记错）
-        log.provider_name = provider_ref[1]
-        log.status = LogStatus.DONE
-        log.processed_at = func.now()
-        db.commit()
-        # 赋的是 SQL 表达式，commit 后 refresh 才能拿到 DB 时钟的真实值
-        db.refresh(log)
+        _mark_done(
+            db,
+            log,
+            processed_content=output.revised_text,
+            structured_output=output.structured,
+            provider_name=provider_ref[1],
+        )
     except Exception as e:
         db.rollback()
         logger.exception("后台处理 log_id=%s 失败", log_id)
         try:
             log = db.get(OperationLog, log_id)
             if log is not None and log.status == LogStatus.PROCESSING:
-                _mark_failed(db, log, f"内部错误：{e}"[:2000])
+                _mark_failed(db, log, f"内部错误：{e}")
         except Exception:
             db.rollback()
+            # 连"标成 failed"都写不下去（DB 此时多半已不可用）。不记日志的话
+            # 现场就只剩一条停在 processing 的僵尸行，排查时没有任何线索。
+            logger.exception("写入 failed 状态本身也失败，log_id=%s 将由启动期 reaper 兜底", log_id)
     finally:
         db.close()
 
 
 def _mark_failed(db: Session, log: OperationLog, message: str) -> None:
-    """把日志标记为 failed 并写入错误信息（统一提交点）"""
+    """把日志标记为 failed 并写入错误信息（统一提交点，长度上限只在这一处截）"""
     log.status = LogStatus.FAILED
-    log.error_message = message[:2000]
+    log.error_message = message[:_ERROR_MESSAGE_MAX_CHARS]
     # 时间列全站由 DB 时钟生成（uploaded_at 是 func.now()）。这里若用应用侧 now()，
     # 容器与宿主机的钟差会让 processed_at 反而早于 uploaded_at，耗时算出负数
     log.processed_at = func.now()
     db.commit()
+    db.refresh(log)
+
+
+def _mark_done(db: Session, log: OperationLog, **fields: object) -> None:
+    """
+    把日志标成 done 并写回结果字段（统一提交点，与 _mark_failed 对称）
+
+    为什么必须收成一个入口：done 收尾原先在批改 / md / pptx 三条链路各手写一遍
+    `status + processed_at + commit + refresh`。其中 `processed_at` 必须是 SQL 的
+    `func.now()` 而不是应用侧 datetime——容器钟比宿主机快 3–4 秒，写应用时钟就会
+    出现 processed_at 早于 uploaded_at、前端"处理耗时"相减得负（§7.3 实拍过的缺陷）。
+    这类"漏一行不会报错、只会静默给出错数据"的约定，写三遍就是三个可以漏的地方。
+
+    字段名必须真的是 OperationLog 的列：拼错一个字母会静默变成一个不会被 commit 的
+    实例属性——那比手写五件套更危险，所以在这里把它变成响亮错误。校验先整体过一遍
+    再赋值，免得第 3 个字段拼错时前 2 个已经脏了当前 session。
+    """
+    columns = log.__mapper__.columns
+    unknown = [name for name in fields if name not in columns]
+    if unknown:
+        raise ValueError(f"OperationLog 没有这些列：{', '.join(unknown)}，拒绝静默丢弃字段")
+    for name, value in fields.items():
+        setattr(log, name, value)
+    log.status = LogStatus.DONE
+    log.processed_at = func.now()
+    db.commit()
+    # processed_at 赋的是 SQL 表达式，commit 后 refresh 才能拿到 DB 时钟的真实值
     db.refresh(log)
 
 
@@ -422,7 +506,7 @@ async def _run_md_conversion(db: Session, log: OperationLog) -> None:
         try:
             markdown = await run_in_threadpool(docx_to_markdown, file_bytes)
         except Exception as e:
-            _mark_failed(db, log, f"Word 转 Markdown 失败：{e}"[:2000])
+            _mark_failed(db, log, f"Word 转 Markdown 失败：{e}")
             return
         if not markdown.strip():
             _mark_failed(db, log, "文档没有可转换的正文内容")
@@ -436,7 +520,7 @@ async def _run_md_conversion(db: Session, log: OperationLog) -> None:
                 parse_pdf_via_mineru, file_bytes, log.original_filename
             )
         except (MinerUError, OSError) as e:
-            _mark_failed(db, log, f"PDF 转 Markdown 失败：{e}"[:2000])
+            _mark_failed(db, log, f"PDF 转 Markdown 失败：{e}")
             return
         except (httpx.HTTPError, httpx.InvalidURL) as e:
             logger.warning("MinerU 传输层异常 log_id=%s：%r", log.id, e)
@@ -453,11 +537,7 @@ async def _run_md_conversion(db: Session, log: OperationLog) -> None:
             os.path.join(_resolve_dir(settings.output_dir), "mineru", str(log.id)),
         )
 
-    log.needs_ocr = False
-    log.status = LogStatus.DONE
-    log.processed_at = func.now()
-    db.commit()
-    db.refresh(log)
+    _mark_done(db, log, needs_ocr=False)
 
 
 async def _run_ppt_conversion(db: Session, log: OperationLog) -> None:
@@ -485,7 +565,7 @@ async def _run_ppt_conversion(db: Session, log: OperationLog) -> None:
     try:
         result = await run_in_threadpool(parse_pdf_via_mineru, pdf_bytes, log.original_filename)
     except (MinerUError, OSError) as e:
-        _mark_failed(db, log, f"PDF 转 PPT 失败：{e}"[:2000])
+        _mark_failed(db, log, f"PDF 转 PPT 失败：{e}")
         return
     except (httpx.HTTPError, httpx.InvalidURL) as e:
         logger.warning("MinerU 传输层异常 log_id=%s：%r", log.id, e)
@@ -523,7 +603,7 @@ async def _run_ppt_conversion(db: Session, log: OperationLog) -> None:
             render_blocks_with_meta, pages_for_render, result.images, result.page_sizes
         )
     except PptConvertError as e:
-        _mark_failed(db, log, f"PPT 渲染失败：{e}"[:2000])
+        _mark_failed(db, log, f"PPT 渲染失败：{e}")
         return
 
     # 片3 版面检查循环：只调分流/字号两个旋钮，文字一字不动。
@@ -577,14 +657,14 @@ async def _run_ppt_conversion(db: Session, log: OperationLog) -> None:
     # 扫描件上传时没有预览文本，用归一化纯文本补底本；文字型保留上传时的提取结果
     if not log.original_content:
         log.original_content = markdown_to_plain_text(result.markdown)
-    log.structured_output = None
     # 只有真发生过 VLM 外呼才记模型名——"无需模型"的语义对没坏块也没跑循环的文档仍然成立
-    log.provider_name = vision_ref[1] if (repair_calls or layout_calls) else None
-    log.needs_ocr = False
-    log.status = LogStatus.DONE
-    log.processed_at = func.now()
-    db.commit()
-    db.refresh(log)
+    _mark_done(
+        db,
+        log,
+        structured_output=None,
+        provider_name=vision_ref[1] if (repair_calls or layout_calls) else None,
+        needs_ocr=False,
+    )
     # structured 留存是旁路（片2 坏块修复要拿区域原图 grounding），写盘失败只告警
     save_structured(
         result,

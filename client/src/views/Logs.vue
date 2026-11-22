@@ -18,6 +18,7 @@ import type { LogEntry } from '@/api/types'
 import TableEmpty from '@/components/TableEmpty.vue'
 import MobileCardList from '@/components/MobileCardList.vue'
 import { useIsMobile } from '@/composables/useIsMobile'
+import { resolveFilename, saveBlob } from '@/utils/download'
 
 const { isMobile } = useIsMobile()
 
@@ -36,6 +37,7 @@ const loading = ref(false)
 const filterStatus = ref<string>('') // '' 表示全部
 const filterFilename = ref<string>('')
 const retryingId = ref<number | null>(null) // 正在重试的行 ID
+const downloadingId = ref<number | null>(null) // 正在下载的行 ID，防双击出两个文件
 
 const statusType = {
   pending: 'info',
@@ -111,16 +113,19 @@ function onResetFilters() {
 // 下载处理结果
 async function downloadLog(row: LogEntry) {
   if (row.status !== 'done') return
+  downloadingId.value = row.id
   try {
     const resp = await processApi.download(row.id)
-    const url = URL.createObjectURL(resp.data)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `result_${row.original_filename}`
-    a.click()
-    URL.revokeObjectURL(url)
+    // 交付名以服务端为准：扩展名由 task.output_format 决定，与输入文件名没有推导关系
+    const filename = resolveFilename(
+      resp.headers['content-disposition'] as string | undefined,
+      `result_${row.original_filename}`,
+    )
+    saveBlob(resp.data, filename)
   } catch (err) {
     ElMessage.error(extractErrorMessage(err))
+  } finally {
+    downloadingId.value = null
   }
 }
 
@@ -150,8 +155,12 @@ async function retryProcess(row: LogEntry) {
     } else if (resp.data.status === 'failed') {
       ElMessage.error(resp.data.error_message ?? '处理失败')
       await load()
+    } else {
+      // 受理成功但仍在后台跑。日志页不做轮询（那是工作台的事），
+      // 不刷新的话界面毫无变化，用户只能认为重试失败
+      ElMessage.info('已转入后台处理，稍后刷新查看结果')
+      await load()
     }
-    // processing 状态不轮询（日志页非工作台），用户稍后刷新即可
   } catch (err) {
     ElMessage.error(extractErrorMessage(err))
   } finally {
@@ -246,6 +255,7 @@ async function retryProcess(row: LogEntry) {
             v-if="canDownload(row.status)"
             type="primary"
             size="small"
+            :loading="downloadingId === row.id"
             @click="downloadLog(row)"
           >
             下载
@@ -259,6 +269,8 @@ async function retryProcess(row: LogEntry) {
           >
             重试
           </el-button>
+          <!-- pending/processing 两个按钮都不出现，不给兜底会留一行空操作区 -->
+          <span v-else class="text-muted">—</span>
         </div>
       </template>
     </MobileCardList>
@@ -312,6 +324,7 @@ async function retryProcess(row: LogEntry) {
               v-if="canDownload(row.status)"
               type="primary"
               size="small"
+              :loading="downloadingId === row.id"
               @click="downloadLog(row as LogEntry)"
             >
               下载

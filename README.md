@@ -56,7 +56,7 @@ uv run python run_backend.py  # Swagger: http://localhost:8000/docs
 # 3. 前端（另开终端）
 cd client
 npm install
-npm run dev                   # http://localhost:5173
+npm run dev                   # http://localhost:5241
 ```
 
 ⚠ **别用 `uv run uvicorn main:app` 起后端**。uvicorn 在 win32 非子进程模式下硬编码 ProactorEventLoop，与 psycopg3 异步模式冲突，长文档分块批改跑到中途必炸；`run_backend.py` 会先切 Selector 事件循环再打补丁。首次启动自动建表。

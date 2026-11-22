@@ -57,9 +57,14 @@ if __name__ == "__main__":
     # host 传列表：同时绑 IPv4 与 IPv6 环回。
     # 只绑 127.0.0.1 时，浏览器/Vite 代理解析 localhost 会先试 ::1 吃一次连接拒绝再回退，
     # 本机实测每个请求凭空多 ~220ms（health 端点 0.004s → 0.23s），这就是"界面加载慢"的主因。
+    #
+    # FA_HOSTS 用于"让别人也能连上"：逗号分隔，例如 `FA_HOSTS=127.0.0.1,::1,10.201.211.9`
+    # 把服务额外绑到局域网网卡上。默认只绑环回——不设这个变量时行为和从前逐字一致，
+    # 不会因为拉了一次代码就把 API 暴露到局域网。
+    hosts = [h.strip() for h in os.environ.get("FA_HOSTS", "127.0.0.1,::1").split(",") if h.strip()]
     uvicorn.run(
         "main:app",
-        host=["127.0.0.1", "::1"],
+        host=hosts,
         # FA_PORT 给 e2e 用：test_e2e_mineru.py 要带 MinerU 环境变量另起一个后端，
         # 不占用日常开发的 8000
         port=int(os.environ.get("FA_PORT", "8000")),

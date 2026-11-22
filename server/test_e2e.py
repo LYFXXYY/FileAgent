@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import sys
 import time
+import traceback
 
 # 强制 stdout 用 UTF-8，避免 Windows 控制台 GBK 编码问题
 if hasattr(sys.stdout, "reconfigure"):
@@ -87,6 +88,9 @@ provider_id = None
 task_id = None
 log_id = None
 other = f"other_{SUFFIX}"
+
+# 主体是否抛过异常。必须单独记：见下面 except / finally 的说明
+CRASHED = False
 
 try:
     # ---------- 0. Health ----------
@@ -285,6 +289,14 @@ try:
     # ---------- 汇总 ----------
     print(f"\n===== 结果：{PASS} 通过 / {FAIL} 失败 =====")
 
+except Exception:
+    # 主体崩了必须说出来。以前这里没有 except，异常一路冲进 finally，
+    # 而 finally 里的 sys.exit 会把它连同 traceback 一起替换掉——于是
+    # "半途而废的 e2e" 既不打错误、退出码还是 0，看起来跟全绿一模一样。
+    # 实测这样藏了两轮才被发现，别再让它有机会沉默。
+    traceback.print_exc()
+    CRASHED = True
+
 finally:
     section("清理")
     try:
@@ -292,4 +304,4 @@ finally:
         print(f"  已清理 DB 记录（user={user_id}, other={other}）")
     except Exception as e:
         print(f"  清理失败: {e}")
-    sys.exit(0 if FAIL == 0 else 1)
+    sys.exit(0 if (FAIL == 0 and not CRASHED) else 1)

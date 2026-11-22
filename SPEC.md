@@ -205,7 +205,7 @@ app = FastAPI(title="FileAgent")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=_cors_origins,  # 由 .env 的 CORS_ORIGINS 逗号分隔派生，见 main.py
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -229,7 +229,7 @@ uv run uvicorn main:app --reload --port 8000
 # 启动前端
 cd client
 npm run dev
-# 访问 http://localhost:5173 看到 Vue 页面即成功
+# 访问 http://localhost:5241 看到 Vue 页面即成功
 ```
 
 ### 4.5 文件结构总览

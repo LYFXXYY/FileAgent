@@ -29,6 +29,12 @@ interface HomeState {
   processing: boolean
   downloading: boolean
   processingError: string | null
+  /**
+   * 本轮等待的截止时间戳（ms）。null = 还没开始等或已清账。
+   * 放在 store 而不是组件里，是为了让"切页再切回""刷新浏览器"都不能把它清零——
+   * 否则超时上限形同虚设，用户可以靠来回切换无限等下去。
+   */
+  pollDeadlineAt: number | null
   processedContent: string | null
   gradingIssues: GradingIssue[] | null
   gradingDegraded: boolean
@@ -47,6 +53,7 @@ export const useHomeStore = defineStore('home', () => {
   const processing = ref(false)
   const downloading = ref(false)
   const processingError = ref<string | null>(null)
+  const pollDeadlineAt = ref<number | null>(null)
   const processedContent = ref<string | null>(null)
   const gradingIssues = ref<GradingIssue[] | null>(null)
   const gradingDegraded = ref(false)
@@ -64,6 +71,7 @@ export const useHomeStore = defineStore('home', () => {
         processing: processing.value,
         downloading: downloading.value,
         processingError: processingError.value,
+        pollDeadlineAt: pollDeadlineAt.value,
         processedContent: processedContent.value,
         gradingIssues: gradingIssues.value,
         gradingDegraded: gradingDegraded.value,
@@ -87,6 +95,7 @@ export const useHomeStore = defineStore('home', () => {
       processing,
       downloading,
       processingError,
+      pollDeadlineAt,
       processedContent,
       gradingIssues,
       gradingDegraded,
@@ -110,6 +119,7 @@ export const useHomeStore = defineStore('home', () => {
         processing.value = parsed.processing ?? false
         downloading.value = parsed.downloading ?? false
         processingError.value = parsed.processingError ?? null
+        pollDeadlineAt.value = parsed.pollDeadlineAt ?? null
         processedContent.value = parsed.processedContent ?? null
         gradingIssues.value = parsed.gradingIssues ?? null
         gradingDegraded.value = parsed.gradingDegraded ?? false
@@ -132,6 +142,7 @@ export const useHomeStore = defineStore('home', () => {
     processing.value = false
     downloading.value = false
     processingError.value = null
+    pollDeadlineAt.value = null
     processedContent.value = null
     gradingIssues.value = null
     gradingDegraded.value = false
@@ -147,6 +158,7 @@ export const useHomeStore = defineStore('home', () => {
     processing,
     downloading,
     processingError,
+    pollDeadlineAt,
     processedContent,
     gradingIssues,
     gradingDegraded,

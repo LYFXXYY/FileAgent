@@ -25,6 +25,7 @@ import os
 import shutil
 import sys
 import time
+import traceback
 from datetime import datetime
 from urllib.parse import unquote
 
@@ -40,6 +41,8 @@ API = os.environ.get("FA_API", "http://127.0.0.1:8000/api/v1")
 LLM = os.environ.get("FA_MOCK_LLM", "http://127.0.0.1:19000/v1")
 
 PASS = FAIL = 0
+# 主体是否抛过异常，见 finally 前那个 except 的说明
+CRASHED = False
 
 
 def check(name: str, condition: bool, extra: str = ""):
@@ -454,6 +457,13 @@ def main():
         print("\n===== 汇总 =====")
         print(f"结果：{PASS} 通过 / {FAIL} 失败")
 
+    except Exception:
+        # 与 test_e2e.py 同一条教训：finally 里的 sys.exit 会替换掉正在冒泡的异常，
+        # traceback 消失、退出码还按 FAIL 算成 0，半途而废看起来跟全绿没区别。
+        global CRASHED
+        traceback.print_exc()
+        CRASHED = True
+
     finally:
         print("\n===== 清理 =====")
         try:
@@ -461,7 +471,7 @@ def main():
             print(f"  已清理 DB 记录 + checkpoints/（user={user}）")
         except Exception as e:
             print(f"  清理失败: {e}")
-        sys.exit(0 if FAIL == 0 else 1)
+        sys.exit(0 if (FAIL == 0 and not CRASHED) else 1)
 
 
 if __name__ == "__main__":

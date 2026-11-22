@@ -28,12 +28,35 @@ export default defineConfig({
   },
 
   server: {
+    // 5173 落在 Windows 保留端口段 5141–5240 内（netsh interface ipv4 show excludedportrange），
+    // 永远绑不上，所以这里钉 5241。
     port: 5241,
+    // 占不到 5241 就直接启动失败，而不是静默漂到 5242/5243/…：
+    // 漂移过一次，README 与 AGENTS 里的端口就一直和实际不符，且前端代理照常工作、
+    // 没人发现，直到下次会话照文档去开 5241 才撞墙。
+    strictPort: true,
     // 开发代理：/api 前缀的请求转发到后端 8000
     // 【为什么用 proxy？】浏览器直连 http://localhost:8000 会触发 CORS，
     // 虽然我们在后端加了 CORS 中间件解决，但用 proxy 更彻底：
     // 前端所有 fetch 都是同源请求，浏览器压根不检查跨域
     // 生产环境用 Nginx 反代实现同样效果（见 SPEC.md 第 8 节）
+    proxy: {
+      '/api': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+    },
+  },
+
+  // 预览构建产物用（`npm run build && npm run preview`）。
+  // host: true 才会绑到 0.0.0.0，局域网里的别人的机器才连得进来；
+  // dev server 默认只绑环回，靠 --host 传参容易忘，所以这条写进配置。
+  // 代理必须在这里再写一遍：preview 不读 server.proxy，漏了就是"页面打得开、
+  // 每个 /api 请求 404"。
+  preview: {
+    host: true,
+    port: 5241,
+    strictPort: true,
     proxy: {
       '/api': {
         target: 'http://localhost:8000',

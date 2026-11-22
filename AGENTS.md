@@ -48,6 +48,8 @@ uv lock --check                                # 依赖锁一致性
 uv run python backfill_spec_embeddings.py --check   # 看规范库还欠多少向量（只读）
 uv run python backfill_spec_embeddings.py      # 真编码回填：需 .env 的 EMBEDDING_* 指向在跑的端点
 uv run python migrate_add_log_needs_ocr.py --check  # 看 needs_ocr / stored_filename 两列现状（只读）
+uv run python migrate_add_fk_indexes.py --check    # 看两个 FK 索引在不在（只读，幂等）
+uv run python check_doc_refs.py                 # 文档里的 `文件:符号` 引用有没有断链（只读，改完代码后跑）
 LONGDOC_CHUNK_CHARS=60 LLM_TRUST_ENV_PROXY=false uv run python run_backend.py    # 跑 test_e2e_structural 用这套环境
 uv run uvicorn test_llm_server:app --port 19000            # 假 OpenAI 文本端点（批改类 e2e 用）；文件里那套"幻灯片大纲"路由属已删除的阶段5链路，仅历史残留
 uv run uvicorn test_vlm_server:app --port 19001            # 假 VLM 端点：② PPT 的坏块修复（[ppt-repair:]）与版面批评（[ppt-layout-thread:]）e2e 在用（test_e2e_ppt.py 第 9/10 节）
@@ -73,9 +75,24 @@ uv run python -m eval.runner --provider 5 --case clean   # 评测台冒烟：**�
 
 ```bash
 npm install
-npm run dev      # 5173，/api 代理到 8000
+npm run dev      # 5241（config 里钉死且 strictPort=true；5173 落在 Windows 保留段 5141–5240 内绑不上），/api 代理到 8000
 npm run build    # = vue-tsc -b && vite build，唯一的类型门禁（无 eslint / prettier）
+npm run preview  # 伺服 dist/，同样 5241；preview 不读 server.proxy，代理在 vite.config.ts 的 preview 块里另写了一遍
 ```
+
+### 2.1 让别人也能连上（局域网试用，2026-11-22 实测）
+
+```bash
+# 后端额外绑到局域网网卡（不设 FA_HOSTS 时只绑环回，行为与单机自用逐字一致）
+cd server && FA_HOSTS=127.0.0.1,::1,<本机局域网IP> uv run python run_backend.py
+# 前端用构建产物伺服：vite.config.ts 的 preview 块已写 host: true，绑 0.0.0.0
+cd client && npm run build && npm run preview
+```
+对方访问 `http://<本机局域网IP>:5241`。**两道实测出来的坎**：
+1. **`MAX_PROCESSES_PER_DAY` 必须设**（默认 0 = 不限制）。每次处理都在花真钱（LLM 按 token、MinerU 按页），失败重试还会整条重跑，没这道闸一个人脚本化就能刷爆账单。
+2. **Windows 防火墙按程序路径放行，不按端口**。本机实测：`D:\python\3.12\python.exe` 已有「公用」profile 入站规则（所以 8000 通），但 node 走的是 `D:\aiagent\app\nodejs\node.exe`，而规则只覆盖 `D:\aiagent\app\nvm\v24.15.0\node.exe` → **5241 被拦**。用端口规则最稳（不受 nvm 切版本影响），需管理员权限：
+   `netsh advfirewall firewall add rule name="FileAgent preview" dir=in action=allow protocol=TCP localport=5241`
+   查当前网络归类：`Get-NetConnectionProfile`（本例 WLAN 是 **Public**，所以只有「公用」profile 的规则生效）。
 
 跑后端前需要 `server/.env`（不入库）：复制 `server/.env.example` 为 `.env`，填 `DATABASE_URL` 和 `JWT_SECRET_KEY`。
 全部字段见 `server/config.py`；**新增字段必须同时补进 `.env.example`**。
@@ -329,7 +346,7 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - **token 双写**：登录成功同时写 Pinia store 和 `localStorage`；axios 拦截器只读 `localStorage`（在 API 层拿不到 store）。key 常量集中在 `client/src/api/client.ts`（`fileagent_token` / `fileagent_username`），别处不要硬编码。
 - 401 处理要排除 `/auth/login`（那是密码错误），用 `window.location.replace` 带 `redirect` 参数（拦截器层拿不到 router 实例）。
 - 自动重试**只针对无响应的 GET**，1 次 / 800ms；写操作绝不重试。
-- 处理结果**一律靠轮询 `status` 拿**，不要依赖 `POST /process` 的响应体（它只返回 processing）。`POLL_INTERVAL=5000`、`MAX_POLL_COUNT=120`（10 分钟上限）。
+- 处理结果**一律靠轮询 `status` 拿**，不要依赖 `POST /process` 的响应体（它只返回 processing）。`POLL_INTERVAL=5000`，等待上限是**墙钟**：`stores/home.ts:pollDeadlineAt`（`POLL_TIMEOUT_MS`=20 分钟，持久化，**切页与刷新都不重置**）。以前是 `MAX_POLL_COUNT=120` 计数，但 `startPolling()` 每次把计数清零而 `onActivated` 会重新调它——来回切页就永远到不了上限。超时**不是失败**：只 `stopPolling`，出口是"继续等待"（`resumeWaiting`，只重查状态）或去日志页；**绝不能在超时态把按钮挂回 `doProcess`**，那会重跑整条流水线再烧一次 MinerU 配额与 token。预算必须大于后端最坏路径（`mineru_max_wait=600s` + 修复与版面两段 VLM 外呼）。
 - `AppLayout.vue` 的 `<keep-alive>` 包住 router-view，工作台切页不销毁 → 必须成对处理 `onActivated`（恢复状态 + 重启轮询）/ `onDeactivated`（停轮询）。
 - **Pinia setup store 只用 `ref` + `watch`**，不要用对象字面量 getter/setter 代理闭包变量：Pinia 会把访问器转成普通数据属性，导致 `restore()` 后 UI 拿不到值、setter 不触发保存（`client/src/stores/home.ts` 文件头"持久化策略"注释已写明这条）。
 - 持久化用 `sessionStorage`（key `fileagent_home_state`），**不存 File 对象**，恢复时 `pickedFile` 置 null。
@@ -359,6 +376,8 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 
 ⚠ **历史包袱（已了结）**：MySQL 时代本机老库是早期手工建表，与 ORM 声明长期漂移（外键规则 NO ACTION vs SET NULL、status 允许 NULL、TEXT vs LONGTEXT 不一致），§3.2 和 s2 修复都按这套假设写过。阶段 4（2026-11-16）一次性把业务表全量迁到 Postgres，**新库 `create_all()` 一次建齐，外键规则与 ORM 声明逐字匹配**，老库 vs 新库差异消失。`server/migrate_add_provider_*.py` 等三个 MySQL 方言脚本已废弃并于 2026-11-17 `git rm`（语法 `SHOW COLUMNS` 在 PG 上跑不了，新库也不需要——它们只是给老 MySQL 库做幂等 ALTER 用的；历史可从 git 找回）。
 **未来再要改列**：写 Postgres 方言的一次性脚本（先查 `information_schema.columns` 再 ALTER），或者直接重 `create_all()`（如果可丢数据）。现成范例：`migrate_add_spec_embedding.py`（加 vector 列）、`migrate_add_log_needs_ocr.py`（一次加 `needs_ocr` / `stored_filename` 两列，2026-11-20 已执行）。
+
+⚠ **`create_all()` 也不会给已存在的表补建索引**——所以模型里新加 `index=True` 同样要写一次性脚本落到现有库。范例：`migrate_add_fk_indexes.py`（`operation_logs.task_id` / `tasks.provider_id`，2026-11-22 已执行）。索引名沿用 SQLAlchemy 默认 `ix_<表>_<列>`，脚本与新库 `create_all()` 建出来的逐字一致，不留"两种库索引名不同"的差异。
 
 ## 6. 注释与代码风格
 

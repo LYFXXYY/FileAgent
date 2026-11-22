@@ -11,6 +11,8 @@
  * - 处理中如果浏览器刷新或 axios 超时，后端可能仍在处理
  * - 通过 setInterval 定期查询 status 接口，完成后自动推进到下载步骤
  * - 组件失活时暂停轮询，重新激活时恢复
+ * - 等待上限是墙钟（store 里的 pollDeadlineAt），切页和刷新都不重置它；
+ *   到点后前端只停手，出口是"继续等待"或去看操作日志，绝不是重新提交处理
  */
 import { computed, onActivated, onDeactivated, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
@@ -23,6 +25,7 @@ import type { ChunkProgress, GradingIssue, Provider, SpecRef, Task } from '@/api
 import GradingResult from '@/components/GradingResult.vue'
 import { useIsMobile } from '@/composables/useIsMobile'
 import { useHomeStore } from '@/stores/home'
+import { resolveFilename, saveBlob } from '@/utils/download'
 
 const homeStore = useHomeStore()
 const { isMobile } = useIsMobile()
@@ -96,13 +99,29 @@ const processHint = computed(() => {
 // 处理中如果浏览器刷新或 axios 超时，后端可能仍在处理
 // 通过定期查询 status 接口，完成后自动推进到下载步骤
 const POLL_INTERVAL = 5000 // 5 秒轮询一次
-const MAX_POLL_COUNT = 120 // 最多轮询 120 次（10 分钟）
+// 等待预算走墙钟（store 里的 pollDeadlineAt），不是"轮询次数"。
+// 上限必须大于后端最坏路径：MinerU 轮询上限 mineru_max_wait=600s，之后还要跑
+// 坏块修复与版面批评两段 VLM 外呼。取 20 分钟，给版面循环留出至少两轮的时间。
+const POLL_TIMEOUT_MS = 20 * 60 * 1000
+// 文案里的分钟数跟着预算走，别写成第二个字面量
+const POLL_TIMEOUT_MINUTES = Math.round(POLL_TIMEOUT_MS / 60000)
 let pollingTimer: ReturnType<typeof setInterval> | null = null
-let pollCount = 0
+// 只是"前端不再等了"，不代表后端失败——两者UI出口必须不同
+const waitTimedOut = ref(false)
 
 function startPolling() {
   stopPolling()
-  pollCount = 0
+  if (homeStore.pollDeadlineAt === null) {
+    homeStore.pollDeadlineAt = Date.now() + POLL_TIMEOUT_MS
+  }
+  // 切页回来或刷新时，截止时间可能已经过了。落回超时态，
+  // 而不是再开一张永远到不了期的表——旧实现每次 startPolling 把计数清零，
+  // 用户来回切页就能无限等，上限形同虚设。
+  if (Date.now() > homeStore.pollDeadlineAt) {
+    markWaitTimedOut()
+    return
+  }
+  waitTimedOut.value = false
   pollingTimer = setInterval(pollOnce, POLL_INTERVAL)
 }
 
@@ -113,13 +132,27 @@ function stopPolling() {
   }
 }
 
+// 前端停止等待：不清 logId、不改状态机，后端那单还在跑
+function markWaitTimedOut() {
+  stopPolling()
+  processing.value = false
+  waitTimedOut.value = true
+  syncToStore()
+}
+
+// 超时后唯一的出口应该是"接着查"，不是"重新提交"——后者会再烧一次
+// MinerU 配额与模型 token，而文档本身没变。
+function resumeWaiting() {
+  homeStore.pollDeadlineAt = Date.now() + POLL_TIMEOUT_MS
+  processing.value = true
+  waitTimedOut.value = false
+  startPolling()
+  syncToStore()
+}
+
 async function pollOnce() {
-  pollCount++
-  if (pollCount > MAX_POLL_COUNT) {
-    stopPolling()
-    processing.value = false
-    processingError.value = '等待超时，请稍后在操作日志中查看结果'
-    syncToStore()
+  if (homeStore.pollDeadlineAt !== null && Date.now() > homeStore.pollDeadlineAt) {
+    markWaitTimedOut()
     return
   }
 
@@ -130,15 +163,19 @@ async function pollOnce() {
     const resp = await processApi.status(logId)
     applyProgress(resp.data)
     if (resp.data.status === 'done') {
+      homeStore.pollDeadlineAt = null
       stopPolling()
       currentStep.value = 3
       processing.value = false
+      waitTimedOut.value = false
       applyResult(resp.data)
       ElMessage.success('处理完成')
       syncToStore()
     } else if (resp.data.status === 'failed') {
+      homeStore.pollDeadlineAt = null
       stopPolling()
       processing.value = false
+      waitTimedOut.value = false
       processingError.value = resp.data.error_message ?? '处理失败'
       ElMessage.error(processingError.value)
       syncToStore()
@@ -213,6 +250,12 @@ onMounted(async () => {
   specRefs.value = homeStore.specRefs
   specNote.value = homeStore.specNote
   pickedFile.value = null // File 对象不可序列化，恢复时重置
+  // 超时态不单独持久化：截止时间在 store 里，过期与否按当前时刻重算一次即可。
+  // 漏了这步，刷新后会停在第 2 步——没有转圈、没有报错、也没有超时提示。
+  waitTimedOut.value =
+    homeStore.pollDeadlineAt !== null &&
+    Date.now() > homeStore.pollDeadlineAt &&
+    homeStore.processedContent === null
 
   // 如果恢复时仍处于处理中，查询一次后端真实状态，避免前端显示 stale 状态
   await refreshProcessingStatus()
@@ -260,14 +303,18 @@ async function refreshProcessingStatus() {
       const resp = await processApi.status(logId)
       applyProgress(resp.data)
       if (resp.data.status === 'done') {
+        homeStore.pollDeadlineAt = null
         stopPolling()
         currentStep.value = 3
         processing.value = false
+        waitTimedOut.value = false
         applyResult(resp.data)
         syncToStore()
       } else if (resp.data.status === 'failed') {
+        homeStore.pollDeadlineAt = null
         stopPolling()
         processing.value = false
+        waitTimedOut.value = false
         processingError.value = resp.data.error_message ?? '处理失败'
         syncToStore()
       } else {
@@ -325,6 +372,9 @@ async function doProcess() {
   if (!uploadResult.value) return
   processing.value = true
   processingError.value = null
+  // 新一轮等待要有自己的截止时间，不能沿用上一轮剩下的（可能已过期）
+  homeStore.pollDeadlineAt = null
+  waitTimedOut.value = false
   // 上一轮的块数进度不能留到这一轮：换了文档切成几块都可能变了
   chunkProgress.value = null
   syncToStore()
@@ -339,6 +389,7 @@ async function doProcess() {
       ElMessage.success('处理完成')
       syncToStore()
     } else if (resp.data.status === 'failed') {
+      homeStore.pollDeadlineAt = null
       processing.value = false
       processingError.value = resp.data.error_message ?? '处理失败'
       ElMessage.error(processingError.value)
@@ -365,21 +416,16 @@ async function doDownload() {
   downloading.value = true
   try {
     const resp = await processApi.download(uploadResult.value.log_id)
-    // 文件名以服务端 Content-Disposition 为准（批改_x.docx / 演示_x.pptx /
-    // 转换_x.md 或 .zip）。自己拼 original_filename 会把 PDF 输入的结果
-    // 命名成 .pdf 的 docx，md 任务更是连扩展名都对不上
-    const disp = resp.headers['content-disposition'] as string | undefined
-    const match = disp?.match(/filename\*=UTF-8''([^;]+)/i)
-    const filename = match
-      ? decodeURIComponent(match[1])
-      : `result_${uploadResult.value.original_filename}`
-    // 浏览器 blob 下载：造 URL + 挂 <a> + 触发点击
-    const url = URL.createObjectURL(resp.data)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = filename
-    a.click()
-    URL.revokeObjectURL(url) // 释放内存
+    // 文件名以服务端 Content-Disposition 为准（批改_x.docx / 转换_x.pptx /
+    // 转换_x.md 或 .zip，前缀与扩展名都在后端定）。自己拼 original_filename 会把
+    // PDF 输入的结果命名成 .pdf 的 docx，md 任务更是连扩展名都对不上
+    saveBlob(
+      resp.data,
+      resolveFilename(
+        resp.headers['content-disposition'] as string | undefined,
+        `result_${uploadResult.value.original_filename}`,
+      ),
+    )
   } catch (err) {
     ElMessage.error(extractErrorMessage(err))
   } finally {
@@ -393,6 +439,8 @@ function goBackToUpload() {
   stopPolling()
   processing.value = false
   processingError.value = null
+  waitTimedOut.value = false
+  homeStore.pollDeadlineAt = null
   chunkProgress.value = null
   currentStep.value = 1
   syncToStore()
@@ -406,6 +454,8 @@ function processNewFile() {
   uploadResult.value = null
   processing.value = false
   processingError.value = null
+  waitTimedOut.value = false
+  homeStore.pollDeadlineAt = null
   processedContent.value = null
   gradingIssues.value = null
   gradingDegraded.value = false
@@ -427,13 +477,14 @@ function reset() {
   processing.value = false
   downloading.value = false
   processingError.value = null
+  waitTimedOut.value = false
   processedContent.value = null
   gradingIssues.value = null
   gradingDegraded.value = false
   specRefs.value = null
   specNote.value = null
   chunkProgress.value = null
-  homeStore.clear() // 清空 store 中的持久化状态
+  homeStore.clear() // 清空 store 中的持久化状态（含 pollDeadlineAt）
 }
 </script>
 
@@ -615,7 +666,23 @@ function reset() {
               但已成功的块不会重复调用模型、也不会重复花钱
             </p>
           </div>
-          <div class="step-actions">
+          <!-- 超时不等于失败：后端那单可能还在跑。这里的出口只能是"接着查"
+               或"去看日志"，绝不能挂 doProcess——那会重跑整条流水线，
+               再烧一次 MinerU 配额和模型 token，而文档一个字没变。 -->
+          <el-alert
+            v-if="waitTimedOut"
+            :title="`已等待 ${POLL_TIMEOUT_MINUTES} 分钟仍未拿到结果`"
+            type="warning"
+            description="文档可能仍在后台处理。继续等待只是重新查询状态，不会重新提交处理，也不会二次计费。"
+            :closable="false"
+            show-icon
+            style="margin-bottom: 16px"
+          />
+          <div v-if="waitTimedOut" class="step-actions">
+            <el-button @click="$router.push('/logs')">查看操作日志</el-button>
+            <el-button type="primary" @click="resumeWaiting">继续等待</el-button>
+          </div>
+          <div v-else class="step-actions">
             <el-button @click="goBackToUpload" :disabled="processing">上一步</el-button>
             <el-button
               type="primary"

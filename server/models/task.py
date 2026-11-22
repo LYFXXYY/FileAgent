@@ -36,8 +36,9 @@ class Task(Base):
 
     # 外键 → model_providers.id。可为 NULL：不选 provider 时由系统决定用哪个
     # ondelete=SET NULL：提供商被删除时，任务的 provider_id 自动置空而非报错
+    # index=True：删提供商的路由按 provider_id 做全表 UPDATE 置空引用，没索引就是顺序扫描
     provider_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("model_providers.id", ondelete="SET NULL"), nullable=True
+        Integer, ForeignKey("model_providers.id", ondelete="SET NULL"), index=True, nullable=True
     )
 
     # 任务名称，如 "作文批改""文本润色"

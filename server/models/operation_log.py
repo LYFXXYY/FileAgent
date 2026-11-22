@@ -55,8 +55,9 @@ class OperationLog(Base):
     )
     # 关联的任务（可为 NULL：支持任务被删除后日志仍保留）
     # ondelete=SET NULL：任务被删除时自动置空，日志靠 task_name 快照仍可读
+    # index=True：删任务的路由按 task_id 做全表 UPDATE 置空引用，没索引就是顺序扫描
     task_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True
+        Integer, ForeignKey("tasks.id", ondelete="SET NULL"), index=True, nullable=True
     )
 
     # ---------- 任务快照 ----------

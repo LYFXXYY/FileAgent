@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 
 from database import get_db
 from middleware.auth import get_current_user
@@ -83,11 +83,23 @@ def get_spec_chunks(
     db: Session = Depends(get_db),
     current: User = Depends(get_current_user),
 ):
-    """读规范文档的全部块。先校验 doc 归属再读 chunks，越权 404 不区分 doc 还是 chunk"""
+    """
+    读规范文档的全部块。先校验 doc 归属再读 chunks，越权 404 不区分 doc 还是 chunk
+
+    向量列必须 defer 掉：响应模型只含 seq/text/start/end，但 SELECT * 会把每块的
+    vector(1024) 拉成 Python list 再丢掉。一份 66 条款的规范就是六十多次无谓的
+    反序列化，块数随用户入库量线性涨。
+    """
     doc = db.query(SpecDoc).filter(SpecDoc.id == doc_id, SpecDoc.user_id == current.id).first()
     if doc is None:
         raise HTTPException(status_code=404, detail="规范文档不存在")
-    return db.query(SpecChunk).filter(SpecChunk.doc_id == doc.id).order_by(SpecChunk.seq).all()
+    return (
+        db.query(SpecChunk)
+        .options(defer(SpecChunk.embedding))
+        .filter(SpecChunk.doc_id == doc.id)
+        .order_by(SpecChunk.seq)
+        .all()
+    )
 
 
 @router.delete("/{doc_id}", status_code=204)
