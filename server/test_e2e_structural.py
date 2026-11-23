@@ -36,6 +36,9 @@ import httpx
 import pymupdf
 from docx import Document
 
+import e2e_support
+from e2e_support import require_private_providers
+
 API = os.environ.get("FA_API", "http://127.0.0.1:8000/api/v1")
 # 假端点地址。改端口时两个环境变量要一起设
 LLM = os.environ.get("FA_MOCK_LLM", "http://127.0.0.1:19000/v1")
@@ -146,6 +149,7 @@ def main():
         r = c.post(f"{API}/auth/login", json={"username": user, "password": "secret123"})
         check("登录 200", r.status_code == 200, r.text)
         tok = {"Authorization": f"Bearer {r.json()['access_token']}"}
+        require_private_providers(c, API, tok)
 
         print("\n===== 2. 假 LLM 提供商（能力 text） =====")
         r = c.post(
@@ -481,7 +485,7 @@ def main():
             print(f"  已清理 DB 记录 + checkpoints/（user={user}）")
         except Exception as e:
             print(f"  清理失败: {e}")
-        sys.exit(0 if (FAIL == 0 and not CRASHED) else 1)
+        sys.exit(4 if e2e_support.BLOCKED else (0 if (FAIL == 0 and not CRASHED) else 1))
 
 
 if __name__ == "__main__":

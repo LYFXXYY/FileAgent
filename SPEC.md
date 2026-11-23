@@ -644,6 +644,7 @@ CREATE TABLE llm_calls (
 | POST | /api/v1/auth/register | 否 | 注册 |
 | POST | /api/v1/auth/login | 否 | 登录，返回 JWT |
 | GET | /api/v1/auth/me | 是 | 身份快照（前端启动时刷新 role / can_use_default） |
+| POST | /api/v1/auth/change-password | 是 | 自助改密：原密码错计入登录锁定计数，成功返 204（前端清 token 重登） |
 | GET | /api/v1/providers | 是 | 提供商列表 |
 | POST | /api/v1/providers | 是 | 添加提供商 |
 | PUT | /api/v1/providers/:id | 是 | 更新 |
@@ -1918,7 +1919,17 @@ doProcess() 超时/异常
 
 ### 13.3 部署时不要带的开发机配置
 
-`ALLOW_PRIVATE_PROVIDER_URLS=true`（本地假端点用）、`MAX_REGISTRATIONS_PER_DAY=60`（为 e2e 留的余量，公开注册后按真实期望调小）、`LLM_TRUST_ENV_PROXY=false` 只在代理与 `NO_PROXY` 冲突时才需要（见 §11 的 `LLM_*` 行）。
+`ALLOW_PRIVATE_PROVIDER_URLS=true`（本机已注释掉，默认 false；跑 e2e 时由脚本或启动行临时注入，见 AGENTS §3.21）、`MAX_REGISTRATIONS_PER_DAY=60`（为 e2e 留的余量，公开注册后按真实期望调小）、`LLM_TRUST_ENV_PROXY=false` 只在代理与 `NO_PROXY` 冲突时才需要（见 §11 的 `LLM_*` 行）。
+
+### 13.4 局域网开放（2026-11-23 实测完成）
+
+P0 里"零重写先跑起来"这一档已落地，记录实际形态与踩到的三处环境约束：
+
+- **入口**：`npm run dev` 与 `npm run preview` 都写了 `host: true`（绑 `0.0.0.0`），所以日常启动命令本身就是"别人能连"的形态；后端保持只绑环回，访客的 `/api` 由 Vite 在本机反代。
+- **HTTPS**：Caddy（winget 装的 2.11.9）反代到 5241，配置在 `deploy/Caddyfile`。三处实测坑：① 本机 80 与 443 被 Watt Toolkit 占着，入口只能用 **8443**；② Caddy 默认要监听 :80 做 HTTP→HTTPS 跳转，被占就必须 `auto_https disable_redirects`；③ 不写 `bind` 会监听 `0.0.0.0`，把 Docker/WSL 虚拟网卡一起暴露，所以写死 WLAN 网卡 IP。
+- **SSRF 闸默认生效**：`.env` 里 `ALLOW_PRIVATE_PROVIDER_URLS` 注释掉。代价是五套 e2e 的假端点都在 127.0.0.1，适配方式见 AGENTS §3.21 与 §2 的启动行。
+- **配额**：`MAX_REGISTRATIONS_PER_DAY=20` × `MAX_PROCESSES_PER_DAY=20`（用户拍板：先不设全局总量闸，因为谁能用默认模型由管理员逐个授权）。
+- **仍未闭合**：访客要真能用起来还差"给用户授 `can_use_default`"（管理员在界面点，不是代码问题）；公网部署（域名 + 真证书 + VPS + compose）没做。
 
 ---
 

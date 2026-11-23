@@ -10,7 +10,7 @@
 
 ## 功能
 
-- **账号与数据隔离**：注册 / 登录（JWT），任务、模型提供商、操作日志、规范库全部按用户隔离；越权一律 404 而不是 403
+- **账号与数据隔离**：注册 / 登录（JWT）/ 自助改密，任务、模型提供商、操作日志、规范库全部按用户隔离；越权一律 404 而不是 403
 - **注册即开箱可用**：新账号自动获得 4 个预置任务（作文批改 / 文本润色 / PDF 转 PPT / 文档转 Markdown）和一份通用校对规范（进你的规范库）；embedding 端点没配也不挡注册
 - **模型提供商**：任意 OpenAI 兼容端点（豆包 / 通义 / DeepSeek / GPT / Ollama / LM Studio），网页上填 `base_url + api_key + model_name` 就能换模型；API Key 只回显掩码，每个提供商标 `text / vision / embedding` 能力，用途不匹配直接报错，不偷偷换模型
 - **管理员与默认模型授权**：管理员可把某个提供商设为公共、给用户授予"可使用官方默认模型"，改完用户下次进入应用即生效，无需重登
@@ -107,7 +107,7 @@ npm test                      # 前端用例（vitest，只测纯逻辑）
 - [AGENTS.md](AGENTS.md) — 编码智能体须知：项目约定、安全底线、已知陷阱与当前基线
 - `docs/` — 设计参考（`UI-REFERENCE.md`）与阶段交接记录（`HANDOFF-*.md`）；当前未入库，要长期共享就 `git add docs/UI-REFERENCE.md`
 
-想让别人连上（局域网试用）：`FA_HOSTS=127.0.0.1,::1,<本机内网IP> uv run python run_backend.py` + 前端 `npm run build && npm run preview`，Windows 防火墙要按端口放行——完整步骤与实测的两个坎见 AGENTS.md §2.1。
+想让别人连上（同 WiFi 试用）：`npm run dev` 或 `npm run preview` 都已绑 0.0.0.0，后端保持只绑环回即可（`/api` 由 Vite 在本机反代）。访客地址 `http://<本机IP>:5241`；要加密就再跑一层 Caddy：`caddy run --config deploy/Caddyfile --adapter caddyfile`，入口 `https://<本机IP>:8443`（本机 443 已被其他软件占用）。**还有一步是界面里的**：新注册的用户默认不能用任何模型，要在「用户管理」勾上「可使用官方默认模型」，否则他点处理只会得到一条失败。防火墙规则、端口保留段与根证书分发的实测坑见 AGENTS.md §2.1。
 
 ## 还没做
 

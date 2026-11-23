@@ -24,3 +24,18 @@ def _encryption_key(monkeypatch):
     settings = get_settings()
     monkeypatch.setattr(settings, "api_key_enc_key", TEST_FERNET_KEY)
     yield
+
+
+@pytest.fixture(autouse=True)
+def _ssrf_gate_open(monkeypatch):
+    """
+    单测里默认放行指向本地的 base_url
+
+    测试构造的 provider 一律写 `http://127.0.0.1:19000/v1` 这种字面地址（不发真实请求，
+    见 AGENTS §7.3 的"不出网"边界），而 SSRF 闸默认拒绝私有地址——真实 `.env` 里那行注释掉之后，
+    这些用例会整片卡在 `ProviderCreate` 的校验上，报的错还和它们要测的东西毫无关系。
+    闸本身由 `tests/test_upload_guards.py` 自己把 `get_settings` 换成 true/false 两臂来测，
+    它在自己用例里覆盖本 fixture，互不干扰。
+    """
+    monkeypatch.setattr(get_settings(), "allow_private_provider_urls", True)
+    yield

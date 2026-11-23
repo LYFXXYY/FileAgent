@@ -19,10 +19,16 @@ from config import get_settings
 from database import db_now, get_db
 from middleware.auth import get_current_user
 from models.user import User
-from schemas.auth import LoginRequest, RegisterRequest, TokenResponse, UserResponse
+from schemas.auth import (
+    ChangePasswordRequest,
+    LoginRequest,
+    RegisterRequest,
+    TokenResponse,
+    UserResponse,
+)
 from services.auth import create_access_token, hash_password, verify_password
 from services.defaults import init_user_defaults
-from services.errors import CODE_LOGIN_LOCKED, CODE_QUOTA_REGISTER, tag
+from services.errors import CODE_LOGIN_LOCKED, CODE_PASSWORD_OLD, CODE_QUOTA_REGISTER, tag
 
 router = APIRouter()
 settings = get_settings()
@@ -59,6 +65,30 @@ def _recent_failures(key: tuple[str, str], now, window: timedelta) -> list:
         for k in [k for k, v in _FAILED_LOGINS.items() if not [t for t in v if now - t < window]]:
             _FAILED_LOGINS.pop(k, None)
     return times
+
+
+def _ensure_not_locked(
+    key: tuple[str, str], now, window: timedelta, limit: int, *, label: str
+) -> None:
+    """
+    登录与自助改密共用同一把闸
+
+    改密接口自己数失败次数的话，它就成了一条**绕过登录锁定的爆破通道**：目标只有一个账号、
+    不需要猜用户名、还不用面对那套 429。所以两处必须走同一个键、同一份判据。
+    """
+    if limit <= 0:
+        return
+    times = _recent_failures(key, now, window)
+    if len(times) >= limit:
+        # 不告诉攻击者还剩几次，也不告诉他这个用户名存不存在
+        wait = max(1, int((window - (now - times[0])).total_seconds() // 60) + 1)
+        message = f"{label}失败次数过多，请约 {wait} 分钟后再试"
+        raise HTTPException(429, tag(message, CODE_LOGIN_LOCKED))
+
+
+def _record_failure(key: tuple[str, str], now, limit: int) -> None:
+    if limit > 0:
+        _FAILED_LOGINS.setdefault(key, []).append(now)
 
 
 @router.get("/me", response_model=UserResponse)
@@ -121,19 +151,11 @@ def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)):
     key = _failed_key(request, body.username)
     now = db_now(db)
 
-    if limit > 0:
-        times = _recent_failures(key, now, window)
-        if len(times) >= limit:
-            # 不告诉攻击者还剩几次，也不告诉他这个用户名存不存在
-            wait = max(1, int((window - (now - times[0])).total_seconds() // 60) + 1)
-            raise HTTPException(
-                429, tag(f"登录失败次数过多，请约 {wait} 分钟后再试", CODE_LOGIN_LOCKED)
-            )
+    _ensure_not_locked(key, now, window, limit, label="登录")
 
     user = db.query(User).filter(User.username == body.username).first()
     if user is None or not verify_password(body.password, user.password_hash):
-        if limit > 0:
-            _FAILED_LOGINS.setdefault(key, []).append(now)
+        _record_failure(key, now, limit)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="用户名或密码错误",
@@ -151,3 +173,41 @@ def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)):
         role=user.role,
         can_use_default=user.can_use_default,
     )
+
+
+@router.post("/change-password", status_code=status.HTTP_204_NO_CONTENT)
+def change_password(
+    body: ChangePasswordRequest,
+    request: Request,
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    自助修改密码
+
+    只改 `get_current_user` 解析出来的自己（§3.1：user_id 绝不从请求体取）。
+    原密码校验失败**计入与登录同一把锁定计数**，见 `_ensure_not_locked` 的说明。
+
+    已知边界：JWT 无状态、也没有 token 版本列，所以别处已签发的 token 在过期前照样能用
+    （`JWT_EXPIRE_HOURS`，默认 2 小时）。前端在成功后清 token 跳登录，等价于踢掉自己当前
+    会话；要做到"改完立刻全端失效"得给 users 加版本戳并在鉴权依赖里比对，那是改表。
+    """
+    window = timedelta(minutes=settings.login_lockout_minutes)
+    limit = settings.login_max_failures
+    key = _failed_key(request, current.username)
+    now = db_now(db)
+
+    _ensure_not_locked(key, now, window, limit, label="修改密码")
+
+    if not verify_password(body.old_password, current.password_hash):
+        _record_failure(key, now, limit)
+        raise HTTPException(400, tag("原密码不正确", CODE_PASSWORD_OLD))
+
+    if body.new_password == body.old_password:
+        # 不改任何事却把锁定计数清了，等于白送一次"我验过了"的信号
+        raise HTTPException(400, "新密码不能与原密码相同")
+
+    current.password_hash = hash_password(body.new_password)
+    db.commit()
+    _FAILED_LOGINS.pop(key, None)
+    return None

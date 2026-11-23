@@ -1,0 +1,13 @@
+{
+	# 443/80 都被 Watt Toolkit 占着（本机实测），只开 8443 这一个口，
+	# 所以关掉 Caddy 默认的 HTTP→HTTPS 自动跳转（它要去监听 :80）
+	auto_https disable_redirects
+}
+
+10.201.211.9:8443 {
+	# 只绑这张网卡：不写 bind 的话 Caddy 会监听 0.0.0.0，
+	# Docker / WSL 的虚拟网卡也就一起被暴露出去了
+	bind 10.201.211.9
+	tls internal
+	reverse_proxy 127.0.0.1:5241
+}

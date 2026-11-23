@@ -120,6 +120,9 @@ def start_backend() -> subprocess.Popen:
         "MINERU_POLL_INTERVAL": "0.2",
         "MINERU_MAX_WAIT": "30",
         "LLM_TRUST_ENV_PROXY": "false",
+        # 假端点在 127.0.0.1，SSRF 闸默认拒绝私有地址；日常 .env 里这行是注释掉的，
+        # 由脚本自己注入，这样"别人也能用"的安全默认不会挡住端到端回归
+        "ALLOW_PRIVATE_PROVIDER_URLS": "true",
         # MinerU client 是 trust_env=True（真实端点在境外要能走代理），
         # 但本机 NO_PROXY 含裸 [::1] 会让 httpx 抛 InvalidURL——e2e 里覆盖成干净值
         "NO_PROXY": "127.0.0.1,localhost",

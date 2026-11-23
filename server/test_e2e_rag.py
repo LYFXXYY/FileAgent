@@ -28,6 +28,8 @@ if hasattr(sys.stdout, "reconfigure"):
 import httpx
 from docx import Document
 
+from e2e_support import require_private_providers
+
 API = os.environ.get("FA_API", "http://127.0.0.1:8000/api/v1")
 LLM = os.environ.get("FA_MOCK_LLM", "http://127.0.0.1:19000/v1")
 
@@ -215,7 +217,7 @@ def main() -> int:
         user_id = r.json().get("id") if r.status_code == 201 else None
         r = c.post(f"{API}/auth/login", json={"username": user, "password": "secret123"})
         tok = {"Authorization": f"Bearer {r.json()['access_token']}"}
-
+        require_private_providers(c, API, tok)
         r = c.post(f"{API}/auth/register", json={"username": other, "password": "secret123"})
         other_id = r.json().get("id") if r.status_code == 201 else None
         r = c.post(f"{API}/auth/login", json={"username": other, "password": "secret123"})

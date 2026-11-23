@@ -21,6 +21,9 @@ if hasattr(sys.stdout, "reconfigure"):
 import httpx
 from docx import Document
 
+import e2e_support
+from e2e_support import require_private_providers
+
 BASE = "http://localhost:8000"
 API = f"{BASE}/api/v1"
 # trust_env=False：与 test_e2e_structural.py 一致。e2e 只打 localhost，系统代理无关；
@@ -133,6 +136,7 @@ try:
     check("登录成功 200", r.status_code == 200, f"got {r.status_code} {r.text}")
     token = r.json()["access_token"]
     AUTH = {"Authorization": f"Bearer {token}"}
+    require_private_providers(CLIENT, API, AUTH)  # 假端点在 127.0.0.1，先确认 SSRF 闸已放行
 
     # ---------- 2. 认证保护 ----------
     section("2. 未认证访问受保护接口")
@@ -315,4 +319,4 @@ finally:
         print(f"  已清理 DB 记录（user={user_id}, other={other}）")
     except Exception as e:
         print(f"  清理失败: {e}")
-    sys.exit(0 if (FAIL == 0 and not CRASHED) else 1)
+    sys.exit(4 if e2e_support.BLOCKED else (0 if (FAIL == 0 and not CRASHED) else 1))

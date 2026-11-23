@@ -26,12 +26,14 @@ import { useAuthStore } from '@/stores/auth'
 import { markReady } from '@/router/notice'
 import { useIsMobile } from '@/composables/useIsMobile'
 import BrandMark from '@/components/BrandMark.vue'
+import ChangePasswordDialog from '@/components/ChangePasswordDialog.vue'
 
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 const { isMobile } = useIsMobile()
 const moreOpen = ref(false)
+const pwdOpen = ref(false)
 
 // 挂载即刷新身份快照：role / can_use_default 是登录时冻结进 localStorage 的，
 // 管理员在 Admin 页改了授权，被改动者下次进入应用就能看到正确视图（无需重登）。
@@ -47,6 +49,11 @@ const activeMenu = computed(() => route.path)
 
 // "更多"里装着规范库/用户管理——这些路由激活时"更多"按钮也要亮
 const isMoreRoute = computed(() => activeMenu.value === '/specs' || activeMenu.value === '/admin')
+
+function openPasswordDialog() {
+  moreOpen.value = false // 手机端：弹层和弹窗不该同时开着
+  pwdOpen.value = true
+}
 
 async function handleLogout() {
   moreOpen.value = false
@@ -150,6 +157,7 @@ async function handleLogout() {
       <div class="header-right">
         <span class="user-dot" aria-hidden="true"></span>
         <span class="username">{{ auth.username }}</span>
+        <el-button link type="primary" @click="openPasswordDialog">修改密码</el-button>
         <el-button link type="primary" @click="handleLogout">退出</el-button>
       </div>
     </header>
@@ -208,6 +216,7 @@ async function handleLogout() {
         <div class="more-sheet">
           <router-link class="more-item" to="/specs" @click="moreOpen = false">规范库</router-link>
           <router-link v-if="auth.isAdmin" class="more-item" to="/admin" @click="moreOpen = false">用户管理</router-link>
+          <button class="more-item" type="button" @click="openPasswordDialog">修改密码</button>
           <button class="more-item more-danger" type="button" @click="handleLogout">退出登录</button>
         </div>
       </el-popover>
@@ -223,6 +232,9 @@ async function handleLogout() {
         </keep-alive>
       </RouterView>
     </main>
+
+    <!-- 账号级动作挂在布局上，桌面与手机端共用同一个实例 -->
+    <ChangePasswordDialog v-model="pwdOpen" />
   </div>
 </template>
 

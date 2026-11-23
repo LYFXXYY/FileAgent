@@ -55,6 +55,9 @@ CODE_OCR_EMPTY = "E-OCR-EMPTY"
 CODE_QUOTA_PROCESS = "E-QUOTA-PROCESS"
 CODE_QUOTA_REGISTER = "E-QUOTA-REGISTER"
 CODE_LOGIN_LOCKED = "E-LOGIN-LOCKED"
+# 自助改密时原密码不对——和登录失败同一个语义（凭证校验没过），但要有自己的号，
+# 否则运维分不清"有人在爆破登录口"还是"有人在改密口试旧密码"
+CODE_PASSWORD_OLD = "E-AUTH-OLDPASSWORD"
 
 # ---------- 服务端配置 ----------
 # 密钥加密没配好（API_KEY_ENC_KEY 缺失或与密文不匹配）——这是运维问题，

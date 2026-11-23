@@ -14,6 +14,13 @@ import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 
 import { useAuthStore } from '@/stores/auth'
 import BrandMark from '@/components/BrandMark.vue'
+import {
+  PASSWORD_MAX,
+  PASSWORD_MIN,
+  checkPasswordStrength,
+  passwordPlaceholder as registerPasswordPlaceholder,
+  weakPasswordHint,
+} from '@/utils/passwordPolicy'
 
 const auth = useAuthStore()
 const router = useRouter()
@@ -36,16 +43,8 @@ const form = reactive({
  * 登录与注册共用一个表单，但**登录侧绝不能套长度规则**：存量用户里有人是 6 位密码，
  * 前端一改下限就会在发请求之前把这些人拦下——等于自己把人锁在门外，而且后端其实
  * 还能验通。真正的强度校验在 `schemas/auth.py`，只管注册路径，这里与它同源。
+ * 文案与校验函数都从 `utils/passwordPolicy` 取，改密弹窗用的是同一份。
  */
-const weakPasswordHint = '密码至少 8 位，且不能只用数字或只用字母'
-
-function checkPasswordStrength(_rule: unknown, value: string, callback: (e?: Error) => void) {
-  if (!value) return callback()
-  if (/^\d+$/.test(value)) return callback(new Error('密码不能只用数字'))
-  if (/^[\p{L}]+$/u.test(value)) return callback(new Error('密码不能只用字母，请混入数字或符号'))
-  return callback()
-}
-
 const rules = computed<FormRules>(() => ({
   username: [
     { required: true, message: '请输入用户名', trigger: 'blur' },
@@ -55,20 +54,26 @@ const rules = computed<FormRules>(() => ({
     tab.value === 'register'
       ? [
           { required: true, message: '请输入密码', trigger: 'blur' },
-          { min: 8, max: 72, message: weakPasswordHint, trigger: 'blur' },
+          {
+            min: PASSWORD_MIN,
+            max: PASSWORD_MAX,
+            message: weakPasswordHint,
+            trigger: 'blur',
+          },
           { validator: checkPasswordStrength, trigger: 'blur' },
         ]
       : [{ required: true, message: '请输入密码', trigger: 'blur' }],
 }))
 
 /**
- * 密码框占位符跟着 tab 走
+ * 占位符只写短句，完整规则放在输入框下方的常驻提示里
  *
- * 原先写死 "6-72 位"，是强度规则改到 8 位之后剩下的旧文案——用户照着它注册会被
- * 自己的校验拦下，等于界面自相矛盾。登录侧不提长度：那里不校验，写了反而像门槛。
- * 文案与校验规则共用 `weakPasswordHint`，避免两处各说一套。
+ * 原先把整句校验文案塞进 placeholder，卡片宽度不够时被省略号截断，用户看不到完整要求。
+ * 登录侧不提长度：那里不校验（存量短密码用户不能被前端挡在门外），写了反而像门槛。
  */
-const passwordPlaceholder = computed(() => (tab.value === 'register' ? weakPasswordHint : '请输入密码'))
+const passwordPlaceholder = computed(() =>
+  tab.value === 'register' ? registerPasswordPlaceholder : '请输入密码'
+)
 
 async function handleSubmit() {
   // validate() 返回 boolean，字段不合法时会自动给 form-item 加红字错误
@@ -130,10 +135,10 @@ function switchTab(name: string | number) {
       </h1>
 
       <p class="hero-desc">
-        上传 <code>.docx</code> 或文字型 <code>.pdf</code>，用一段你自己写的 Prompt
-        定义要做什么——批改、润色、摘要、翻译，或者把 PDF 整成一份 PPT，走的都是同一条链路。
+        上传 <code>.docx</code> 或 <code>.pdf</code>——文字型直接提取，扫描版走云端识别——
+        用一段你自己写的 Prompt 定义要做什么：批改、润色、摘要、翻译，转成
+        <code>Markdown</code>，或把 PDF 整成一份可编辑的 <code>PPT</code>，走的都是同一条链路。
       </p>
-      <p class="hero-note">文档类型与操作会随能力接入继续增加。</p>
 
       <ul class="hero-points">
         <li>
@@ -156,7 +161,7 @@ function switchTab(name: string | number) {
               <path d="M8 12l4-6h8M8 12h10M8 12l4 6h8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
           </span>
-          <span><b>它给结果</b><i>同一条链路，可以有多种产出形态</i></span>
+          <span><b>它给结果</b><i>批改给红字 diff，转换给 .md 与可编辑 .pptx</i></span>
         </li>
         <li>
           <span class="point-icon">
@@ -166,17 +171,17 @@ function switchTab(name: string | number) {
               <path d="M20 20l-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
             </svg>
           </span>
-          <span><b>全程可追溯</b><i>每条意见都带原文位置，点一下就跳过去</i></span>
+          <span><b>全程可追溯</b><i>意见带原文位置，还能召回你上传的校对规范</i></span>
         </li>
         <li>
           <span class="point-icon">
-            <!-- 会长大：方框里的加号 -->
+            <!-- 长文批得动：分层（一篇长文被切成多块并行处理） -->
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
-              <rect x="3" y="3" width="18" height="18" rx="5.5" stroke="currentColor" stroke-width="2"/>
-              <path d="M12 8v8M8 12h8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+              <path d="M12 3l9 5-9 5-9-5 9-5Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+              <path d="M3 13.5l9 5 9-5" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
             </svg>
           </span>
-          <span><b>能力会长大</b><i>新的文档类型与操作会持续接入</i></span>
+          <span><b>长文批得动</b><i>超预算自动分块批改，重试只补没成功的块</i></span>
         </li>
       </ul>
     </section>
@@ -230,6 +235,8 @@ function switchTab(name: string | number) {
               @keyup.enter="handleSubmit"
             />
           </div>
+          <!-- 完整规则常驻显示，不靠占位符：占位符一旦超出框宽就会被省略号截断 -->
+          <p v-if="tab === 'register'" class="field-tip">{{ weakPasswordHint }}</p>
         </el-form-item>
         <el-form-item>
           <el-button
@@ -242,6 +249,11 @@ function switchTab(name: string | number) {
           </el-button>
         </el-form-item>
       </el-form>
+
+      <p v-if="tab === 'register'" class="card-footnote">
+        注册即自动登录，并预置作文批改、文本润色、PDF 转 PPT、文档转 Markdown
+        四个任务和一份通用校对规范
+      </p>
     </div>
   </div>
 </template>
@@ -322,13 +334,6 @@ function switchTab(name: string | number) {
   border-radius: 3px;
   background: color-mix(in oklab, var(--fa-accent-pop) 38%, transparent);
   transform: rotate(-1.4deg);
-}
-
-/* 扩展说明刻意压到次要层级，不跟主叙事抢注意力 */
-.hero-note {
-  margin: 0 0 var(--space-xl);
-  font-size: var(--fa-text-xs);
-  color: var(--el-text-color-placeholder);
 }
 
 .hero-title {
@@ -458,11 +463,12 @@ function switchTab(name: string | number) {
   border: 1px solid color-mix(in oklab, var(--fa-ink) 8%, transparent);
 }
 
-/* ============ 右侧卡片：只留图标，文字交给左侧 ============ */
+/* ============ 右侧卡片 ============ */
+/* 420px 是按"注册 tab 的完整口令提示要放得下"定的：380 时占位符与提示行都会被挤断 */
 .login-card {
-  width: 380px;
+  width: 420px;
   flex-shrink: 0;
-  padding: var(--space-xl);
+  padding: var(--space-xl) 34px;
   background: color-mix(in oklab, var(--fa-surface) 88%, transparent);
   -webkit-backdrop-filter: blur(24px);
   backdrop-filter: blur(24px);
@@ -482,21 +488,42 @@ function switchTab(name: string | number) {
   transform: translateY(-3px);
 }
 
-/* Tab 切换：去渐变，激活态用墨色细条 */
-:deep(.el-tabs__nav-wrap::after) {
-  height: 1px;
-  background: color-mix(in oklab, var(--fa-ink) 8%, transparent);
+/* Tab 切换做成分段控件：整块轨道 + 墨色胶囊，比下划线更像"两种模式" */
+:deep(.el-tabs__header) {
+  margin-bottom: 26px;
 }
 
-:deep(.el-tabs__item) {
-  font-weight: 500;
-  transition: color var(--fa-duration-fast) ease-out;
+:deep(.el-tabs__nav-wrap::after) {
+  display: none;
+}
+
+:deep(.el-tabs__nav) {
+  display: flex;
+  width: 100%;
+  padding: 4px;
+  border-radius: var(--fa-radius-pill);
+  background: color-mix(in oklab, var(--fa-ink) 6%, var(--fa-bg));
 }
 
 :deep(.el-tabs__active-bar) {
+  display: none;
+}
+
+:deep(.el-tabs__item) {
+  flex: 1;
+  height: 36px;
+  line-height: 36px;
+  border-radius: var(--fa-radius-pill);
+  font-weight: 600;
+  color: var(--el-text-color-secondary);
+  transition:
+    background var(--fa-duration-fast) var(--fa-ease-spring),
+    color var(--fa-duration-fast) var(--fa-ease-spring);
+}
+
+:deep(.el-tabs__item.is-active) {
+  color: var(--fa-surface);
   background: var(--fa-ink);
-  height: 2px;
-  border-radius: 1px;
 }
 
 /* 输入框前缀图标 */
@@ -507,7 +534,7 @@ function switchTab(name: string | number) {
 
 .input-icon {
   position: absolute;
-  left: 12px;
+  left: 14px;
   top: 50%;
   transform: translateY(-50%);
   color: var(--el-text-color-placeholder);
@@ -517,21 +544,71 @@ function switchTab(name: string | number) {
   align-items: center;
 }
 
+/* 字段之间留够呼吸：错误红字与常驻提示都挤在同一格里 */
+:deep(.el-form-item) {
+  margin-bottom: 22px;
+}
+
+:deep(.el-form-item__label) {
+  padding-bottom: 6px;
+  font-size: var(--fa-text-sm);
+  font-weight: 600;
+  color: var(--fa-ink);
+}
+
 :deep(.el-input__wrapper) {
-  padding-left: 36px;
+  min-height: 46px;
+  padding: 6px 14px 6px 38px;
+  border-radius: var(--fa-radius-card);
   transition: box-shadow var(--fa-duration-fast) ease-out;
 }
 
+:deep(.el-input__wrapper:hover) {
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--fa-ink) 22%, transparent) inset;
+}
+
 :deep(.el-input__wrapper.is-focus) {
-  box-shadow: 0 0 0 1px var(--fa-ink) inset !important;
+  box-shadow: 0 0 0 1.5px var(--fa-ink) inset !important;
 }
 
 /* 提交按钮：全圆胶囊 + 近黑，渐变外观交给主题层 */
 .submit-btn {
   width: 100%;
-  height: 42px;
+  height: 46px;
+  font-size: var(--fa-text-base);
   font-weight: 600;
   letter-spacing: 0.5px;
+  transition:
+    transform var(--fa-duration-fast) var(--fa-ease-spring),
+    box-shadow var(--fa-duration-fast) var(--fa-ease-spring);
+}
+
+.submit-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--fa-shadow-lg);
+}
+
+/* 占位符之外的常驻说明：短、次要色，不跟校验红字抢层级 */
+.field-tip {
+  width: 100%;
+  margin: 6px 0 0;
+  font-size: var(--fa-text-xs);
+  line-height: 1.6;
+  color: var(--el-text-color-secondary);
+}
+
+/* 已经报错就别再叠一条灰字说明：同一格里两句提示只会互相淹掉 */
+.login-card :deep(.el-form-item.is-error .field-tip) {
+  display: none;
+}
+
+.card-footnote {
+  margin: 6px 0 0;
+  padding-top: 16px;
+  border-top: 1px solid color-mix(in oklab, var(--fa-ink) 8%, transparent);
+  font-size: var(--fa-text-xs);
+  line-height: 1.75;
+  color: var(--el-text-color-secondary);
 }
 
 /* ============ 装饰层：漂浮纸片 + 批注圈 + 星点 ============ */
@@ -679,7 +756,6 @@ function switchTab(name: string | number) {
   }
 
   .hero-desc,
-  .hero-note,
   .hero-points {
     display: none;
   }

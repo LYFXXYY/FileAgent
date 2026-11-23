@@ -51,7 +51,10 @@ uv run python migrate_add_log_needs_ocr.py --check  # 看 needs_ocr / stored_fil
 uv run python migrate_add_fk_indexes.py --check    # 看两个 FK 索引在不在（只读，幂等）
 uv run python check_doc_refs.py                 # 文档里的 `文件:符号` 引用有没有断链（只读，改完代码后跑）
 uv run python cleanup_storage.py               # 列出会回收哪些磁盘产物与图状态线程（只读默认档）；加 --apply 才真删
-LONGDOC_CHUNK_CHARS=60 LLM_TRUST_ENV_PROXY=false uv run python run_backend.py    # 跑 test_e2e_structural 用这套环境
+# 跑需要「外部已起后端」的三套 e2e（test_e2e / structural / rag）用这套环境：
+# ALLOW_PRIVATE_PROVIDER_URLS 是必需的——假端点在 127.0.0.1，SSRF 闸默认拒绝私有地址。
+# 少了它，这三套会在开场第 1 节后以退出码 4 停下并打印本行（e2e_support.py），不会跑到中途才炸。
+ALLOW_PRIVATE_PROVIDER_URLS=true LONGDOC_CHUNK_CHARS=60 LLM_TRUST_ENV_PROXY=false uv run python run_backend.py
 uv run uvicorn test_llm_server:app --port 19000            # 假 OpenAI 文本端点（批改类 e2e 用）；只回 GradingResult JSON——阶段5 大纲分支已随链路删除，别加回来
 uv run uvicorn test_vlm_server:app --port 19001            # 假 VLM 端点：② PPT 的坏块修复（[ppt-repair:]）与版面批评（[ppt-layout-thread:]）e2e 在用（test_e2e_ppt.py 第 9/10 节）
 uv run uvicorn test_mineru_server:app --port 19002         # 假 MinerU 云端点（扫描件 OCR 兜底 e2e 用）
@@ -68,7 +71,7 @@ uv run python -m eval.runner --provider 5 --case clean   # 评测台冒烟：**�
 
 ⚠ **`test_e2e_structural.py` 第 10 节要后端带 `LONGDOC_CHUNK_CHARS=60` 启动**才会真的切块；用默认 6000 时那节 12 项断言会失败（不是回归，是预算没到分块门槛）。跑完 `server/checkpoints/` 会被脚本自动清理。
 
-⚠ **8000 端口在本机可能"看不见地被占用"**：WSL 侧若有服务监听 8000，因 mirrored 网络，Windows `netstat` 查不到该监听，现象是 uvicorn 报 `[Errno 10048]` 而 `curl localhost:8000` 却能收到对方的 404。查证要跑 `wsl -e bash -lc "ss -ltnp | grep ':8000'"`。换端口时 `test_e2e_structural.py` 走 `FA_API` / `FA_MOCK_LLM` 环境变量，`test_e2e.py` 仍是硬编码 8000。
+⚠ **8000 端口在本机可能"看不见地被占用"**：WSL 侧若有服务监听 8000，因 mirrored 网络，Windows `netstat` 查不到该监听，现象是 uvicorn 报 `[Errno 10048]` 而 `curl localhost:8000` 却能收到对方的 404。查证要跑 `wsl -e bash -lc "ss -ltnp | grep ':8000'"`。换端口时 `test_e2e_structural.py` 走 `FA_API` / `FA_MOCK_LLM` 环境变量，`test_e2e.py` 仍是硬编码 8000。⚠ **`FA_API` 必须带 `/api/v1` 后缀**（该脚本直接拼请求路径），只给 `host:port` 的结果是每步 404，看起来像后端挂了。
 
 ⚠ **`run_backend.py` 的 host 必须是 `["127.0.0.1", "::1"]` 双栈绑定**：只绑 `127.0.0.1` 时，浏览器和 Vite 代理解析 `localhost` 会先试 IPv6 `::1` 吃一次连接拒绝再回退，本机实测**每个请求凭空多 ~220ms**（health 端点 0.004s → 0.23s），这就是"前端界面加载慢"的真正根因——诊断法：同一端点分别用 `localhost` 和 `127.0.0.1` 计时，差值大就是这个坑。
 
@@ -84,22 +87,40 @@ npm run preview  # 伺服 dist/，同样 5241；preview 不读 server.proxy，�
 ### 2.1 让别人也能连上（局域网试用，2026-11-22 实测）
 
 ```bash
-# 后端额外绑到局域网网卡（不设 FA_HOSTS 时只绑环回，行为与单机自用逐字一致）
-cd server && FA_HOSTS=127.0.0.1,::1,<本机局域网IP> uv run python run_backend.py
-# 前端用构建产物伺服：vite.config.ts 的 preview 块已写 host: true，绑 0.0.0.0
-cd client && npm run build && npm run preview
+# 前端：dev 与 preview 都写了 host: true，绑 0.0.0.0，日常启动命令本身就是"别人能连"的形态
+cd client && npm run dev                      # 或 npm run build && npm run preview（给构建产物）
+# 后端不用改：访客的 /api 由 Vite 在本机反代到 127.0.0.1:8000，所以后端只绑环回也够。
+# FA_HOSTS=127.0.0.1,::1,<本机局域网IP> 只在你想让别人直接打开 8000 的 Swagger 时才需要。
+cd server && uv run python run_backend.py
 ```
-对方访问 `http://<本机局域网IP>:5241`。**两道实测出来的坎**：
+对方访问 `http://<本机局域网IP>:5241`。要 HTTPS 就再套一层 Caddy（配置在 `deploy/Caddyfile`）：
+
+```bash
+# 443 在本机被 Watt Toolkit（Steam++.Accelerator.exe）占着，所以入口用 8443
+# 证书由 Caddy 内置 CA 签发；访客设备跑一次 `caddy trust` 装根证书就无警告，
+# 否则首次访问点"继续前往"。`bind` 写死 WLAN 网卡，免得把 Docker/WSL 的虚拟网卡也暴露出去
+caddy run --config deploy/Caddyfile --adapter caddyfile     # 访客地址 https://<本机IP>:8443
+```
+
+**三道实测出来的坎**：
 1. **`MAX_PROCESSES_PER_DAY` 必须设**（默认 0 = 不限制）。每次处理都在花真钱（LLM 按 token、MinerU 按页），失败重试还会整条重跑，没这道闸一个人脚本化就能刷爆账单。
 2. **Windows 防火墙按程序路径放行，不按端口**。本机实测：`D:\python\3.12\python.exe` 已有「公用」profile 入站规则（所以 8000 通），但 node 走的是 `D:\aiagent\app\nodejs\node.exe`，而规则只覆盖 `D:\aiagent\app\nvm\v24.15.0\node.exe` → **5241 被拦**。用端口规则最稳（不受 nvm 切版本影响），需管理员权限：
    `netsh advfirewall firewall add rule name="FileAgent preview" dir=in action=allow protocol=TCP localport=5241`
    查当前网络归类：`Get-NetConnectionProfile`（本例 WLAN 是 **Public**，所以只有「公用」profile 的规则生效）。
+3. **换 HTTPS 端口不是免费的**：上面那条规则只放行 5241，走 8443 就要再加一条；而且 Windows 会保留一段 TCP 端口（实测 `netsh int ipv4 show excludedportrange protocol=tcp` 里有 3390–3489、4748–4847 这类区间），挑端口前先确认没落在保留段内——5173 就是因为落在保留段才永远绑不上。
+   ```powershell
+   # 需要管理员权限（普通 shell 里跑会报"请求的操作需要提升"）
+   netsh advfirewall firewall add rule name="FileAgent HTTPS" dir=in action=allow protocol=TCP localport=8443
+   ```
+4. **命令行验证 HTTPS 会撞到两个假故障**，别当成证书没装好：① 本机系统代理（Watt Toolkit）会拦 `https://<内网IP>:8443`，加 `--noproxy '*'`；② Windows 的 curl 走 schannel，对本地 CA 签发的证书硬做吊销检查，报 `CRYPT_E_NO_REVOCATION_CHECK` 而 Caddy 的本地 CA 没有 OCSP/CRL——加 `--ssl-no-revoke`。**浏览器不受这条影响**：`caddy trust` 装好根证书后实测 `isSecureContext=true`、无警告页、`/api/health` 正常返回。
+
+**本机当前状态（2026-11-23 实测）**：5241 与 8443 两条入站规则都已加上（`Get-NetFirewallRule -DisplayName 'FileAgent*'` 可查，`Profile=Any`）。访客地址两个都行：`https://<本机IP>:8443`（加密，推荐）与 `http://<本机IP>:5241`。要在访客设备上彻底去掉证书警告，把 `C:\Users\<user>\AppData\Roaming\Caddy\pki\authorities\local\root.crt` 拷过去装进「受信任的根证书颁发机构」——**只给 `root.crt`，同目录的 `root.key` 是这把本地 CA 的私钥，外传等于把签发权交出去**。
 
 跑后端前需要 `server/.env`（不入库）：复制 `server/.env.example` 为 `.env`，填 `DATABASE_URL` 和 `JWT_SECRET_KEY`。
-**对外开放给别人用之前还要加三个**：`API_KEY_ENC_KEY`（不配则保存/读取模型密钥一律 `E-CONFIG-SECRET` 失败，见 §3.24）、`MAX_PROCESSES_PER_DAY`、`MAX_REGISTRATIONS_PER_DAY`（都默认 0=不限制，见 §2.1）。开发机另有 `ALLOW_PRIVATE_PROVIDER_URLS=true`（连本地假端点用，**部署时不要带**，见 §3.21）。
+**对外开放给别人用之前还要加三个**：`API_KEY_ENC_KEY`（不配则保存/读取模型密钥一律 `E-CONFIG-SECRET` 失败，见 §3.24）、`MAX_PROCESSES_PER_DAY`、`MAX_REGISTRATIONS_PER_DAY`（都默认 0=不限制，见 §2.1）。`ALLOW_PRIVATE_PROVIDER_URLS` 在 `.env` 里默认注释掉（= SSRF 闸生效）；跑需要本地假端点的 e2e 时用命令行注入，见 §2 的启动行。
 全部字段见 `server/config.py`；**新增字段必须同时补进 `.env.example`**。
 
-**`server/` 根目录的脚本按前缀分类，刻意不收进子目录**：`migrate_*`（一次性幂等 DDL/数据改写）、`backfill_*` / `cleanup_*` / `reset_*` / `check_*`（运维与体检）、`test_e2e_*`（端到端）、`test_*_server`（假端点）。它们都靠 `sys.path[0] == server/` 直接 `import database` / `from config import ...`，收进 `scripts/` 就得全部改成 `python -m` 调用并逐条改本文的命令——**整洁不值这个代价**，新增脚本请按前缀命名放在根目录。
+**`server/` 根目录的脚本按前缀分类，刻意不收进子目录**：`migrate_*`（一次性幂等 DDL/数据改写）、`backfill_*` / `cleanup_*` / `reset_*` / `check_*`（运维与体检）、`test_e2e_*`（端到端）、`test_*_server`（假端点）、`e2e_support.py`（五套 e2e 共用的开场检查，被 import 而非直接跑）。它们都靠 `sys.path[0] == server/` 直接 `import database` / `from config import ...`，收进 `scripts/` 就得全部改成 `python -m` 调用并逐条改本文的命令——**整洁不值这个代价**，新增脚本请按前缀命名放在根目录。
 
 ## 3. 后端不可违反的约定
 
@@ -351,7 +372,7 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - **`check_pdf_pages` 对打不开的 PDF 一律放过**：损坏件、带密码的加密件在 `services/pdf.py` 各有专门文案，这里抢判据会把"文件已加密"误报成"页数超限"，比不拦更糟。
 - **`base_url` 的 SSRF 校验在 `schemas/provider.py:_validate_base_url`，必须解析成 IP 再判**。base_url 不是给用户浏览器打开的链接，而是**服务端**发 POST 的目标，任何登录用户填 `http://169.254.169.254/` 就能让服务器替他去够云元数据。字符串黑名单挡不住 `127.1` / `0177.0.0.1` / `[::1]` / `127.0.0.1.nip.io`，所以先 `getaddrinfo` 再逐个判 `is_private / is_loopback / is_link_local / is_reserved / is_multicast / is_unspecified`。`ProviderUpdate` 也过一遍——否则"建号合规、编辑改成内网"就绕过去了。
   - **已知边界（未做）**：校验时解析到的 IP 与真正建连时可能不同（DNS rebinding），彻底做法要在 httpx 连接层再判一次。
-  - **`ALLOW_PRIVATE_PROVIDER_URLS=true` 只给开发机**（连本地假端点 19000 / LM Studio 用），**部署时不要带这一行**。五套 e2e 用的 `http://127.0.0.1:*` 提供商全靠它。
+  - **`ALLOW_PRIVATE_PROVIDER_URLS=true` 只给开发机**（连本地假端点 19000 / LM Studio 用），**部署时不要带这一行**；本机 `.env` 里它现在是注释掉的，默认值 false 才是运行态。五套 e2e 的提供商都指向 `http://127.0.0.1:*`，所以适配方式是：**自起后端的套件（mineru / ppt）在自己的 env 里注入它**，**依赖外部后端的套件（test_e2e / structural / rag）靠启动行注入**，并且开场用 `e2e_support.require_private_providers` 探一次——没开就退出码 4 + 打印正确启动行，而不是跑到第 2 节才收到一条像「后端坏了」的 422。
 - **单测里不要解析真实域名**：`_validate_base_url` 会走 `getaddrinfo`，测试只用**字面 IP**（数字地址不发 DNS 查询）和开关早退路径，否则离线环境一片红（§7.3 的"不出网"边界）。
 - **`max_processes_per_day`（0=不限制）是成本闸，不是防刷闸**：`api/v1/process.py:_quota_error` 在近 24 小时窗口内按 user_id 数 `operation_logs`，只计 `pending/processing/done`——**失败的没成功，不计**。超限返 429 `E-QUOTA-PROCESS`，判据在 `process()` 里、**provider 解析之前**（不该让没钱的人先走一遍模型选择）。为什么必须有：每次处理都花真钱（LLM 按 token、MinerU 按页），失败重试还会整条重跑。
   - **异步 `async def process()` 里做这次 COUNT 必须 `run_in_threadpool` + 独立 `SessionLocal`**：直接在事件循环里查库是新增阻塞点（§3.3 的同步/异步约定），而且此刻请求级 `db` 还要用于返回响应。
@@ -429,6 +450,27 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - **孤儿线程与过期线程是两条独立判据**：日志行已经不在了（五套 e2e 都删自己的 DB 行）→ 与留存期无关，直接可回收。实测本机一次就清出 15 个线程 / 495 行。
 
 
+### 3.26 自助改密（2026-11-22，`api/v1/auth.py:change_password`）
+
+- **改密口必须复用登录那把锁定计数**（`_ensure_not_locked(key, now, window, limit, label=...)`）。
+  自己另数一套的话，这个接口就是**绕过 §3.22 登录锁定的爆破通道**：目标只有一个账号、
+  不用猜用户名、还不用面对 429。键仍是 `(客户端 IP, 用户名小写)`，成功一次清账。
+- **原密码不做强度校验，新密码走注册同一套规则**：`schemas/auth.py:_reject_weak_password_value`
+  是注册与改密共用的函数——两处各写一份迟早漂，漂了就是"注册挡得住的弱口令改密口设得进去"。
+  前端同理，文案与校验函数只在 `client/src/utils/passwordPolicy.ts` 放一份。
+- **只改 token 里那个人**：请求体没有 `user_id` 字段（`test_change_password.py` 有专门一条钉这件事），
+  新旧相同要显式拒绝——否则"什么都没改还把锁定计数清了"等于白送一次"我验过了"的信号。
+- **已知边界：改完不会让别处的 token 立刻失效**。JWT 无状态、没有 token 版本列，
+  已签发的 token 在 `JWT_EXPIRE_HOURS`（默认 2 小时）内照样能用。前端成功后清 token 跳登录，
+  只等价于踢掉当前会话。要做全端即时失效得给 `users` 加版本戳并在 `get_current_user` 里比对，
+  那是改表（§5），做之前先问。
+- **不做"管理员替别人重置密码"**：§3.22 刚把管理员收窄成"只有一个 admin、不能提升任何人"，
+  而"admin 能改别人密码"正是账号接管面里最大的一块。忘了密码的兜底是运维在服务器上手跑
+  `reset_user_password.py`（它重算 bcrypt hash、保留该账号全部数据，`--create` 还能建号）。
+- **入口两处成对加**（AGENTS §4 的手机端规矩）：桌面在用户名旁、手机端在"更多"弹层里，
+  共用 `components/ChangePasswordDialog.vue` 一个实例。
+
+
 
 ## 4. 前端不可违反的约定
 
@@ -448,6 +490,8 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - **色彩分工**：`success/warning/danger/info` 只用于**状态**（日志状态、删除按钮）；属性标记（批改=是、`.pptx`、官方）一律 `type="primary"`。主色已是近黑，所以"处理中"用 `warning` 而不是 `primary`——否则与 `pending` 的灰阶糊在一起（UI-REFERENCE §4.5 预告的代价，实测踩到）。
 - **状态值不给用户看英文枚举**：`Logs.vue` 的 `statusLabel` 从 `statusOptions` 派生，筛选下拉与表格列共用一份中文文案；新增枚举时改这一处。
 - 改了样式装载方式，验证不能只看 `npm run build` 过了：把 `dist/assets/*.css` 拼起来 grep 每个用过的 `el-*` 类名，才能确认样式真的进了产物（`el-option` / `el-tab-pane` / `el-config-provider` 三个是名字对不上，不是缺样式——它们的 style 入口引的是父组件 CSS）。**弹窗样式、loading 遮罩、分页中文、状态中文标签、批注清单联动、手机端 TabBar/卡片列表/弹窗宽度已在 2026-11-21 真浏览器逐项走过并存档结论**，别再写"未验证"；仍未在浏览器里跑的是深色模式（明确不做）。
+- **口令策略只有一份**：`client/src/utils/passwordPolicy.ts` 导出 `PASSWORD_MIN/MAX`、`weakPasswordHint`、`passwordPlaceholder`、`checkPasswordStrength`、`makeConfirmValidator`，登录页注册 tab 与改密弹窗都从这里取。后端权威在 `schemas/auth.py:_reject_weak_password_value`（见 §3.26），改一处必须同时改另一处。
+- **规则说明不要塞进 `placeholder`**：Element 的占位符超出输入框宽度会被省略号截断，而卡片宽度受响应式影响（登录卡片实测 420px 才放得下"至少 8 位，混入数字或符号"）。做法是**占位符只写短句 + 完整规则放 `.field-tip` 常驻说明**，并且 `:deep(.el-form-item.is-error .field-tip)` 隐藏它——同一格里灰字说明与红字报错并存时，用户两句都读不进去。校验文案与说明必须同源（`Login.vue` 的 `weakPasswordHint`），否则又是一处改一处漏。
 - **手机端专门布局（2026-11-21，375px 真机实测）**：判定唯一入口 `composables/useIsMobile.ts`（matchMedia 768px）——**768 阈值三处同源**（useIsMobile / style.css 断点 / theme.css 手机端层），改一处要想起另两处。形态：AppLayout 双渲染（桌面悬浮胶囊 / ≤768 细顶栏 + 底部 TabBar 5 项，规范库·用户管理·退出收进"更多"弹层）；五个列表页用 `MobileCardList`（泛型外壳 + 页面插槽）v-if 分支替换 el-table；弹窗/消息框宽度在 theme.css 手机端层收 92vw/86vw；Home 步骤条手机端换两字短标签（选择/上传/处理/下载，四字会竖折实拍）。新加列表页照 Logs.vue 的双分支写法，别只做桌面表格。
 - provider 的 `capabilities` 后端存逗号分隔**字符串**、表单要的是**数组**，转换只认 `KNOWN_CAPABILITIES` 里的已知值（`client/src/views/Providers.vue` 的 `toCapabilityList()` / `buildPayload()`）——顺带做了顺序归一化和脏值丢弃，未知标记不会把表单卡死也不会吃 422。提交**必须走 `buildPayload()`**，别把带 `capabilityList` 临时字段的 form 整个发出去。
 - 上传格式只在两处声明：`Home.vue` 的 `accept=".docx,.pdf"` 和上传区文案。**前端不做扩展名校验**，`accept` 只管文件选择对话框，拖拽照样能拖进 `.txt`——真校验在后端白名单，400 文案已是给用户看的。加格式时要同时改这两处 + 后端派发表。
@@ -485,13 +529,13 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 
 ### 7.1 门禁与验证快照
 
-最近一次全绿实测（2026-11-21，② PDF→PPT 忠实转换片1 之后）：**pytest / ruff check / ruff format --check / uv lock --check / npm run build / npm test / e2e 各套全过**（清单见 §7.2）。唯一 skip 的那条单测是 win32 下 `os.environ` 大小写不敏感、测不了小写 `no_proxy` 键，属平台限制不是回归。
+最近一次全绿实测（2026-11-23，自助改密 + 图状态回收 + 局域网/HTTPS 开放之后）：**pytest / ruff check / ruff format --check / uv lock --check / npm run build / npm test / e2e 各套全过**（清单见 §7.2）。唯一 skip 的那条单测是 win32 下 `os.environ` 大小写不敏感、测不了小写 `no_proxy` 键，属平台限制不是回归。
 
 ⚠ **具体条数（pytest 的 passed 数、e2e 的 N/M）不再抄进文档**。这个位置历史上写过 204 / 277 / 322 / 363 四个版本，每抄一次就要跟着每次改动重改，而且已经出现过 §2 写"41 项"、本节写"46/0"这种同仓库互相打脸的数字。想知道条数就跑命令，别相信文档里的快照。
 
 **真实云端冒烟（2026-11-20，用户自填 MINERU_TOKEN）**：合成 2 页扫描件全链路通过（59s，OCR 写回 + 批改定位 100% + structured 三件套落盘 + 计量只有 grading 行、无 MinerU 行）；md 转换浏览器走查 docx→md（本地，4s，标题/表格转 md）与 PDF→md（真实 MinerU，纯 .md 无图）均 done，扫描件上传提示正确。**只发合成件，用户真实文档绝不进云**。
 
-`test_e2e_rag.py` 比其他几套多一个前置——**本地 embedding 端点必须在跑**，脚本开头探活，缺了直接退出（返回码 4）而不是让断言一片红。
+`test_e2e_rag.py` 比其他几套多一个前置——**本地 embedding 端点必须在跑**，脚本开头探活，缺了直接退出（返回码 4）而不是让断言一片红。**依赖外部后端的三套（`test_e2e.py` / `structural` / `rag`）还多一道开场探针**（`e2e_support.require_private_providers`）：假端点在 127.0.0.1，后端没带 `ALLOW_PRIVATE_PROVIDER_URLS=true` 启动时它在第 1 节后就以退出码 4 停下并打印正确启动行——因为 `.env` 里那个开关现在默认是注释掉的（闸生效）。
 
 ### 7.2 e2e 脚本清单（都是现役脚本，别删）
 - **`server/test_e2e.py` 是仓库自带的端到端冒烟脚本，不是遗留物，别删**：需后端已在 8000 运行、连真实 Postgres。它会注册 `tester_*` / `other_*` 两个临时账号，造 1 条日志和 1 个上传文件；**跑完自动清理 DB 记录**（llm_calls → logs → tasks → providers → users）。落盘文件自 2026-11-20 起有 `stored_filename` 列可精确回溯（`test_e2e_mineru.py` 已按它清理）；**历史行该列为 NULL**，老产物仍只能按命名规则清：`ls uploads | grep -E '^[0-9a-f]{32}\.(docx|pdf)$' | xargs -I{} rm uploads/{}`。⚠ 用户放进 `uploads/` 的**具名文件是真实文档夹具**，不属于清理范围（2026-11-19 按这条清了 35 个 e2e 产物，6 份具名文档一个没碰）。第 7 节现在真走重试路径（连不上假 provider → 重试 3 次 → failed），第 10 节直接改库把日志置为 done 来验证下载，都属预期行为。

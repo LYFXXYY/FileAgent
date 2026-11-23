@@ -84,6 +84,9 @@ def start_backend() -> subprocess.Popen:
         "MINERU_POLL_INTERVAL": "0.2",
         "MINERU_MAX_WAIT": "30",
         "LLM_TRUST_ENV_PROXY": "false",
+        # 假 MinerU / 假 VLM 都在 127.0.0.1，SSRF 闸默认拒绝私有地址；日常 .env 里这行
+        # 是注释掉的，由脚本自己注入，这样"别人也能用"的安全默认不会挡住端到端回归
+        "ALLOW_PRIVATE_PROVIDER_URLS": "true",
         # 版面循环走 stub 渲染（1×1 占位 PNG）：e2e 测的是循环机制与计量归因，
         # 真 soffice 渲染留给本机日常与人工目检，不在 CI 路径里烧 WSL 时间
         "PPT_RENDER_BACKEND": "stub",

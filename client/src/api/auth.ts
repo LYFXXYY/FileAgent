@@ -19,4 +19,11 @@ export const authApi = {
   me() {
     return http.get<User>('/auth/me')
   },
+  /** 自助改密：改的永远是 token 里那个人，请求体不带 user_id */
+  changePassword(oldPassword: string, newPassword: string) {
+    return http.post<void>('/auth/change-password', {
+      old_password: oldPassword,
+      new_password: newPassword,
+    })
+  },
 }
