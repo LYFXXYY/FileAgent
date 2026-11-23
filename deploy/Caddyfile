@@ -9,5 +9,34 @@
 	# Docker / WSL 的虚拟网卡也就一起被暴露出去了
 	bind 10.201.211.9
 	tls internal
+
+	# 访问日志落盘。Caddy 默认只把日志打到自己进程的 stderr，重定向文件一重启就没了；
+	# 这份是"谁在访问这个项目"最直接的证据。
+	# 路径相对 **运行 caddy 的目录**，而 §2.1 的命令是从仓库根启动的，所以写全 deploy/。
+	# format 只有 json / console 两个可选（实测 2.11.9 没有 common_log 编码器，
+	# 写 `format common` 会让整份配置加载失败）
+	log {
+		output file deploy/logs/caddy-access.log {
+			roll_size 5MiB
+			roll_keep 5
+		}
+		format console
+	}
+
+	# 安全响应头。放在反代层而不是后端：这样 http 直连 5241 之外、走 HTTPS 入口的请求
+	# 都统一带上，前端一行代码不用改。
+	# 刻意**没有**加 Strict-Transport-Security：这是自签证书的内网 IP，HSTS 会把浏览器
+	# 锁在"必须 https 且端口一致"上，将来换端口或临时回退 http 调试会被硬拒，收益不抵代价。
+	# CSP 的 style-src 必须留 'unsafe-inline'：Element Plus 会注入内联样式；
+	# connect-src 带 ws: 是因为 Vite dev 的热更新走 websocket。
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+		Permissions-Policy "geolocation=(), microphone=(), camera=()"
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss: blob:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'"
+	}
+
+	# 前端（dev 或 preview）自己已经把 /api 反代到后端 8000，整体转给 5241 就够
 	reverse_proxy 127.0.0.1:5241
 }

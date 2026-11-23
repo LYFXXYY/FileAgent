@@ -96,6 +96,10 @@ uv run python cleanup_storage.py           # 回收过期产物、孤儿上传�
 uv run python cleanup_storage.py --apply     # 确认清单后真删；加 --vacuum 让表空间可复用
 uv run python check_doc_refs.py            # 文档里的 `文件:符号` 引用有没有断链
 
+# 运行日志（落盘 + 轮转；LOG_FILE 留空则只打 stdout）
+#   server/logs/backend.log       业务日志 + uvicorn 访问日志（谁在打这个服务）
+#   deploy/logs/caddy-access.log  反代侧访问记录（走 HTTPS 入口时）
+
 cd ../client
 npm run build                 # vue-tsc 类型检查 + 构建（唯一的类型门禁）
 npm test                      # 前端用例（vitest，只测纯逻辑）
@@ -106,6 +110,7 @@ npm test                      # 前端用例（vitest，只测纯逻辑）
 - [SPEC.md](SPEC.md) — 设计指南：Java→Python 对照、各阶段设计与交付、DDL、API 表、缺陷修复台账、§13 开放使用与部署加固
 - [AGENTS.md](AGENTS.md) — 编码智能体须知：项目约定、安全底线、已知陷阱与当前基线
 - `docs/` — 设计参考（`UI-REFERENCE.md`）与阶段交接记录（`HANDOFF-*.md`）；当前未入库，要长期共享就 `git add docs/UI-REFERENCE.md`
+- `deploy/` — 局域网入口与启停：`start-fileagent.bat [https]` / `stop-fileagent.bat`、`Caddyfile`（8443 反代 + 安全响应头）
 
 想让别人连上（同 WiFi 试用）：`npm run dev` 或 `npm run preview` 都已绑 0.0.0.0，后端保持只绑环回即可（`/api` 由 Vite 在本机反代）。访客地址 `http://<本机IP>:5241`；要加密就再跑一层 Caddy：`caddy run --config deploy/Caddyfile --adapter caddyfile`，入口 `https://<本机IP>:8443`（本机 443 已被其他软件占用）。**还有一步是界面里的**：新注册的用户默认不能用任何模型，要在「用户管理」勾上「可使用官方默认模型」，否则他点处理只会得到一条失败。防火墙规则、端口保留段与根证书分发的实测坑见 AGENTS.md §2.1。
 

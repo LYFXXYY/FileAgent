@@ -32,6 +32,10 @@ client/src/components.d.ts
 server/uploads/
 server/outputs/
 
+# 运行日志（后端 RotatingFileHandler 与 Caddy access log），本机排障用，不入库
+server/logs/
+deploy/logs/
+
 # 评测台每轮的 run JSON（本机跑出来的数字，入库会让对比基线到处漂；数字抄进 SPEC §9.6）
 server/eval/runs/
 

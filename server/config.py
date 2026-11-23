@@ -90,7 +90,12 @@ class Settings(BaseSettings):
     # 允许的源，逗号分隔多个
     # 必须在 Settings 里声明：pydantic-settings 只把 .env 的值喂给本对象，
     # 不会写入 os.environ。用 os.getenv("CORS_ORIGINS") 读 .env 永远读到 None
-    cors_origins: str = "http://localhost:5173"
+    #
+    # 默认值写 5241 而不是 5173：5173 落在本机 Windows 保留端口段（5141–5240）里
+    # 永远绑不上，把它当默认值等于给新环境一个用不了的地址。
+    # 另外正常路径其实用不到 CORS——前端走 Vite/Caddy 同源代理 `/api`，
+    # 只有"前后端分开部署在不同源"时才需要动这里。
+    cors_origins: str = "http://localhost:5241"
 
     # ---------- 提供商地址的 SSRF 防护 ----------
     # 用户自建 provider 的 base_url 是**由服务端发出请求**的，所以默认禁止指向
@@ -220,6 +225,12 @@ class Settings(BaseSettings):
     # ---------- 日志 ----------
     # root logger 级别。排查重试/并发问题时调成 DEBUG
     log_level: str = "INFO"
+    # 运行日志落盘路径（相对 server/）。留空 = 只打 stdout、不落盘。
+    # 落盘才谈得上"事后查问题"：stdout 重定向的文件每次重启就被覆盖
+    log_file: str = "logs/backend.log"
+    # 单个日志文件上限与保留份数（RotatingFileHandler），5 MB × 5 ≈ 最坏情况 25 MB
+    log_max_mb: int = 5
+    log_backup_count: int = 5
 
     class Config:
         env_file = ENV_FILE  # 指定 .env 文件路径

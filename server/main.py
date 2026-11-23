@@ -29,30 +29,41 @@ import models  # noqa: F401    （导入触发 models/__init__.py 里的所有 O
 from api.v1 import api_router  # 汇总好的 v1 路由
 from config import get_settings, normalize_no_proxy_env
 from services.llm import LLMError, close_client, get_client
+from services.logging_setup import attach_uvicorn_logs, build_file_handler
 
 logger = logging.getLogger("fileagent")
 
 LOG_FORMAT = "%(asctime)s %(levelname)-5s [%(name)s] %(message)s"
 
 
-def _setup_logging() -> None:
+def _setup_logging() -> logging.Handler | None:
     """
     配置 root logger —— 项目此前一个 handler 都没装，root 停在 WARNING，
     结果 logger.info(...) 全部静默丢弃，只有 WARNING 及以上经 lastResort 打到 stderr。
     重试、并发、计量这类运行信息看不见，调优就无从谈起，所以这里补上。
 
     force=True：--reload 会反复重新导入本模块，不清掉旧 handler 每行会打印两遍。
+
+    返回文件 handler（没配 LOG_FILE 时是 None），交给 lifespan 再挂给 uvicorn ——
+    见 `services/logging_setup` 的模块 docstring：uvicorn 启动时会重配自己的 logger，
+    这一步在 import 期做不掉。
     """
+    settings = get_settings()
     stream = logging.StreamHandler(sys.stdout)
     stream.setFormatter(logging.Formatter(LOG_FORMAT, datefmt="%H:%M:%S"))
-    logging.basicConfig(
-        level=get_settings().log_level.upper(),
-        handlers=[stream],
-        force=True,
+    handlers: list[logging.Handler] = [stream]
+
+    file_handler = build_file_handler(
+        settings.log_file, settings.log_max_mb * 1024 * 1024, settings.log_backup_count
     )
+    if file_handler:
+        handlers.append(file_handler)
+
+    logging.basicConfig(level=settings.log_level.upper(), handlers=handlers, force=True)
+    return file_handler
 
 
-_setup_logging()
+_FILE_HANDLER = _setup_logging()
 
 # trust_env=True 的 httpx 客户端构造前必须清掉裸 [::1]（见 config 函数注释）。
 # mineru._get_client 也会调一次（独立脚本不经过 main），幂等无副作用
@@ -73,6 +84,9 @@ async def lifespan(app: FastAPI):
     lifespan 是推荐写法，可以访问 app.state、更清晰地管理资源。
     """
     # ---------- Startup ----------
+    # uvicorn 已经按它自己的 dictConfig 配好 logger 了，文件 handler 只能现在补挂，
+    # 否则访问日志（谁在打这个服务）永远只进 stdout
+    attach_uvicorn_logs(_FILE_HANDLER)
     # create_all(): 检查数据库中是否存在这些表，不存在则 CREATE TABLE
     # 类比 Hibernate 的 spring.jpa.hibernate.ddl-auto=update
     # ⚠ 仅适合开发阶段！生产环境用 Alembic 做 schema 迁移

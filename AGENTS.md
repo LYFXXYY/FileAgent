@@ -122,6 +122,27 @@ caddy run --config deploy/Caddyfile --adapter caddyfile     # 访客地址 https
 
 **`server/` 根目录的脚本按前缀分类，刻意不收进子目录**：`migrate_*`（一次性幂等 DDL/数据改写）、`backfill_*` / `cleanup_*` / `reset_*` / `check_*`（运维与体检）、`test_e2e_*`（端到端）、`test_*_server`（假端点）、`e2e_support.py`（五套 e2e 共用的开场检查，被 import 而非直接跑）。它们都靠 `sys.path[0] == server/` 直接 `import database` / `from config import ...`，收进 `scripts/` 就得全部改成 `python -m` 调用并逐条改本文的命令——**整洁不值这个代价**，新增脚本请按前缀命名放在根目录。
 
+### 2.2 启动脚本、备份与安全头（2026-11-23）
+
+- **最简服务化**：`deploy/start-fileagent.bat`（后端 + 前端各开一个窗口；加 `https` 参数再开 Caddy）
+  与 `deploy/stop-fileagent.bat`（按端口 8000/5241/8443 找进程杀，不依赖窗口标题）。
+  要开机自启就把 start 脚本的快捷方式放进 `shell:startup`（Win+R 输入它即可打开），
+  不需要管理员权限，也不需要 NSSM / 计划任务那套。
+- **备份**：`D:\backups\fileagent\<日期>\`，一份 `pg_dump -Fc` + `secrets.env` + `MANIFEST.txt`。
+  ⚠ **恢复从未演练过**（用户 2026-11-23 明确"备份一次但不用演练"），所以这份备份的可信度
+  只到"pg_restore --list 能看到 13 张表的定义与 TABLE DATA、vector 扩展和 logstatus 枚举"为止。
+  `secrets.env` 里含 `API_KEY_ENC_KEY` 与 `JWT_SECRET_KEY`，**永远不要放进仓库**（仓库内的
+  `.gitignore` 管不到仓库外的文件，靠的是它压根不在仓库里）。
+- **安全响应头在反代层**（`deploy/Caddyfile`）：nosniff / X-Frame-Options DENY / Referrer-Policy /
+  Permissions-Policy / CSP。刻意不加 HSTS：自签证书的内网 IP 上加 HSTS，将来换端口或临时回退
+  http 调试会被浏览器硬拒。CSP 里两个"看着不安全"的口子是有原因的：`style-src 'unsafe-inline'`
+  因为 Element Plus 与 Vue 组件会注入内联样式，`connect-src ws:` 因为 Vite dev 的热更新走 websocket。
+  实测加完整 CSP 后登录页样式正常、控制台零 violation（**没测过**去掉 style-src 会怎样，别把这条当实测结论）。
+  ⚠ 这些头只在走 8443 时生效，直连 5241 没有——所以"给别人用"要发 https 地址。
+- `cors_origins` 默认值已从 `http://localhost:5173` 改成 `http://localhost:5241`：5173 落在
+  本机 Windows 保留端口段（5141–5240）内永远绑不上，把它当默认值等于给新环境一个用不了的地址。
+  正常部署其实走不到 CORS（前端同源代理 `/api`），只有前后端分源才需要动。
+
 ## 3. 后端不可违反的约定
 
 ### 3.1 数据隔离（安全底线）
@@ -162,6 +183,7 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 
 - 同步/异步约定：纯 DB 操作用 `def`（FastAPI 自动丢线程池），涉及外部 HTTP 才 `async def`。已知同步阻塞点用 `# noqa: ASYNC230` 并写明理由（`process.py` 里落盘与读回 PDF 那三处 `open(...)`）。
 - 日志用 `logging.getLogger("fileagent...")`，**不要 print**（Windows GBK 控制台中文乱码）；独立脚本需 `sys.stdout.reconfigure(encoding="utf-8")`。root handler 已在 `main.py:_setup_logging()` 里配好，级别走 `LOG_LEVEL`。⚠ 那个 `basicConfig(force=True)` 不能省——`--reload` 会反复重导入模块，不清掉旧 handler 每行日志会打印两遍。
+- **运行日志现在落盘**（2026-11-23）：`LOG_FILE`（默认 `logs/backend.log`，相对 `server/`）+ `LOG_MAX_MB` / `LOG_BACKUP_COUNT`，`RotatingFileHandler(encoding="utf-8")`。留空 = 只打 stdout，行为与之前逐字一致。三条不可违反的细节在 `services/logging_setup.py` 的模块 docstring 里：① 构造 handler 的函数必须是纯函数——测试一 import `main` 就会动全局 root logger；② **`uvicorn` / `uvicorn.access` 是 `propagate=False` 的独立 logger，uvicorn 启动时会用自己的 dictConfig 把 handler 冲掉**，所以文件 handler 只能在 `lifespan` 里 `attach_uvicorn_logs()` 补挂一次，挂在 import 期等于没挂——少了这一步，文件里就只有业务日志、恰恰少了"谁在访问"那份；③ encoding 必须显式 utf-8，否则 Windows 按 locale(cp936) 写，日志文件全是 GBK 字节。排障入口：`server/logs/backend.log*`（业务 + 访问）、`deploy/logs/caddy-access.log*`（反代侧，带 remote_ip 与状态码）。Caddy 那边 `format` 只认 `json` / `console`，写 `common` 会让整份配置加载失败（实测 2.11.9）。
 - `LogStatus` 是 `enum.StrEnum`，配 `Enum(..., values_callable=...)` 存 **value**（`"pending"`）而非 name；阶段 4 后 Postgres 用原生枚举类型 `logstatus`（`CREATE TYPE logstatus AS ENUM(...)`，由 `create_all()` 自动建）。改枚举要连带回归后端状态流转与前端字符串比较。
 - 正文权威副本在 `operation_logs.original_content`，磁盘文件只是审计留存。两列声明已是 `Text()`——Postgres 的 TEXT 没有大小上限，原 MySQL 时代的 `with_variant(LONGTEXT, "mysql")` 已撤。`structured_output` 同样是 `Text`。
 - 提取层两条硬边界：`extract_text_from_docx` **只读 `doc.paragraphs`**（不含表格/文本框），`extract_text_from_pdf` **不读表格、不做 OCR**——已知功能边界，不是 bug。细则见 §3.8。

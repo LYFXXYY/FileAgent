@@ -1913,8 +1913,8 @@ doProcess() 超时/异常
 
 ### 13.2 上线前置清单的状态
 
-- **已做**：上传体积闸、PDF 页数闸、SSRF 防护、注册口令强度、登录失败锁定、注册全局上限、按账号处理配额、错误文案分层（人话 + 稳定编号，不再泄露上游报文）、`api_key` 字段级加密（含安全迁移脚本）、产物与图状态回收（磁盘 TTL + 孤儿文件 + LangGraph 四张表的过期/孤儿线程，可选 `VACUUM` 收尾）。
-- **仍未做，且已明确接受**：请求级滑动窗口限流（配额是它的粗粒度替代）、api_key 的 KMS 托管（现在是 `.env` 单密钥）、Alembic、多 worker（三道进程内闸都不支持多进程）、表格提取与加密 PDF 解密（功能边界，非缺陷）。
+- **已做**：上传体积闸、PDF 页数闸、SSRF 防护、注册口令强度、登录失败锁定、注册全局上限、按账号处理配额、错误文案分层（人话 + 稳定编号，不再泄露上游报文）、`api_key` 字段级加密（含安全迁移脚本）、产物与图状态回收（磁盘 TTL + 孤儿文件 + LangGraph 四张表的过期/孤儿线程，可选 `VACUUM` 收尾）、自助改密、运行日志落盘轮转（业务 + 访问 + 反代 access log）、反代安全响应头、数据库与密钥的一次离线备份（`D:\backups\fileagent\<日期>`）。
+- **仍未做，且已明确接受**：请求级滑动窗口限流（配额是它的粗粒度替代）、api_key 的 KMS 托管（现在是 `.env` 单密钥）、Alembic、多 worker（三道进程内闸都不支持多进程）、表格提取与加密 PDF 解密（功能边界，非缺陷）。- **仍未做，属于工程基线**：备份**恢复演练**（用户决定暂不做）、CI（门禁全靠手跑）、pre-commit、Dockerfile / compose、LICENSE、指标与告警（无 `/metrics`，出问题只能事后翻日志）、备份里不含 `uploads/` 与 `outputs/` 磁盘文件（丢了最多让用户重传一次）。
 - **上 Nginx / Caddy 之后必须改的一处**：`api/v1/auth.py:_failed_key` 读 `request.client.host`，反代后面会全是代理 IP，登录锁定会退化成"按代理 IP 全局锁定"。要改读 `X-Forwarded-For` 并校验代理链。
 
 ### 13.3 部署时不要带的开发机配置
@@ -1929,6 +1929,7 @@ P0 里"零重写先跑起来"这一档已落地，记录实际形态与踩到的
 - **HTTPS**：Caddy（winget 装的 2.11.9）反代到 5241，配置在 `deploy/Caddyfile`。三处实测坑：① 本机 80 与 443 被 Watt Toolkit 占着，入口只能用 **8443**；② Caddy 默认要监听 :80 做 HTTP→HTTPS 跳转，被占就必须 `auto_https disable_redirects`；③ 不写 `bind` 会监听 `0.0.0.0`，把 Docker/WSL 虚拟网卡一起暴露，所以写死 WLAN 网卡 IP。
 - **SSRF 闸默认生效**：`.env` 里 `ALLOW_PRIVATE_PROVIDER_URLS` 注释掉。代价是五套 e2e 的假端点都在 127.0.0.1，适配方式见 AGENTS §3.21 与 §2 的启动行。
 - **配额**：`MAX_REGISTRATIONS_PER_DAY=20` × `MAX_PROCESSES_PER_DAY=20`（用户拍板：先不设全局总量闸，因为谁能用默认模型由管理员逐个授权）。
+- **运行日志**：此前只有 stdout（重启即覆盖），现已落盘轮转——`LOG_FILE=logs/backend.log`（`RotatingFileHandler`，显式 utf-8）+ Caddy 侧 `deploy/logs/caddy-access.log`。访问日志要挂两次：uvicorn 会用自己的 dictConfig 冲掉 import 期挂的 handler，所以 `attach_uvicorn_logs` 必须在 lifespan 里做（AGENTS §3.5）。
 - **仍未闭合**：访客要真能用起来还差"给用户授 `can_use_default`"（管理员在界面点，不是代码问题）；公网部署（域名 + 真证书 + VPS + compose）没做。
 
 ---
