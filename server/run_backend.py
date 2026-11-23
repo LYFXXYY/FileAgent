@@ -69,4 +69,10 @@ if __name__ == "__main__":
         # 不占用日常开发的 8000
         port=int(os.environ.get("FA_PORT", "8000")),
         log_level="info",
+        # 只信本机这几跳转发的 X-Forwarded-For。uvicorn 的 proxy_headers 默认就是 True，
+        # 写出来是为了让"访客真实 IP 从哪来"这件事在代码里可见：
+        # 前端代理必须带 xfwd（client/vite.config.ts），Caddy 的 reverse_proxy 默认就带。
+        # 不带的话所有访客在登录锁定与限流眼里都是同一个 ::1（AGENTS §3.22）。
+        # 容器化时 Caddy 来自 docker 网段，要用 FORWARDED_ALLOW_IPS 把那个网段加进来。
+        forwarded_allow_ips=os.environ.get("FORWARDED_ALLOW_IPS", "127.0.0.1,::1"),
     )

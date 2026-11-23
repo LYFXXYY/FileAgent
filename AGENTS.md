@@ -50,6 +50,8 @@ uv run python backfill_spec_embeddings.py      # 真编码回填：需 .env 的 
 uv run python migrate_add_log_needs_ocr.py --check  # 看 needs_ocr / stored_filename 两列现状（只读）
 uv run python migrate_add_fk_indexes.py --check    # 看两个 FK 索引在不在（只读，幂等）
 uv run python check_doc_refs.py                 # 文档里的 `文件:符号` 引用有没有断链（只读，改完代码后跑）
+uv run python check_usage_daily.py --days 7  # 用量与成本体检（只读）：注册数、失败率、按 purpose 的 token、磁盘
+uv run python delete_user_data.py <用户名>   # 删账号及其全部数据（默认只列清单，加 --apply 才删，不可恢复）
 uv run python cleanup_storage.py               # 列出会回收哪些磁盘产物与图状态线程（只读默认档）；加 --apply 才真删
 # 跑需要「外部已起后端」的三套 e2e（test_e2e / structural / rag）用这套环境：
 # ALLOW_PRIVATE_PROVIDER_URLS 是必需的——假端点在 127.0.0.1，SSRF 闸默认拒绝私有地址。
@@ -120,7 +122,7 @@ caddy run --config deploy/Caddyfile --adapter caddyfile     # 访客地址 https
 **对外开放给别人用之前还要加三个**：`API_KEY_ENC_KEY`（不配则保存/读取模型密钥一律 `E-CONFIG-SECRET` 失败，见 §3.24）、`MAX_PROCESSES_PER_DAY`、`MAX_REGISTRATIONS_PER_DAY`（都默认 0=不限制，见 §2.1）。`ALLOW_PRIVATE_PROVIDER_URLS` 在 `.env` 里默认注释掉（= SSRF 闸生效）；跑需要本地假端点的 e2e 时用命令行注入，见 §2 的启动行。
 全部字段见 `server/config.py`；**新增字段必须同时补进 `.env.example`**。
 
-**`server/` 根目录的脚本按前缀分类，刻意不收进子目录**：`migrate_*`（一次性幂等 DDL/数据改写）、`backfill_*` / `cleanup_*` / `reset_*` / `check_*`（运维与体检）、`test_e2e_*`（端到端）、`test_*_server`（假端点）、`e2e_support.py`（五套 e2e 共用的开场检查，被 import 而非直接跑）。它们都靠 `sys.path[0] == server/` 直接 `import database` / `from config import ...`，收进 `scripts/` 就得全部改成 `python -m` 调用并逐条改本文的命令——**整洁不值这个代价**，新增脚本请按前缀命名放在根目录。
+**`server/` 根目录的脚本按前缀分类，刻意不收进子目录**：`migrate_*`（一次性幂等 DDL/数据改写）、`backfill_*` / `cleanup_*` / `reset_*` / `check_*` / `delete_*`（运维与体检，其中 `delete_user_data.py` 默认只列清单）、`test_e2e_*`（端到端）、`test_*_server`（假端点）、`e2e_support.py`（五套 e2e 共用的开场检查，被 import 而非直接跑）。它们都靠 `sys.path[0] == server/` 直接 `import database` / `from config import ...`，收进 `scripts/` 就得全部改成 `python -m` 调用并逐条改本文的命令——**整洁不值这个代价**，新增脚本请按前缀命名放在根目录。
 
 ### 2.2 启动脚本、备份与安全头（2026-11-23）
 
@@ -128,6 +130,7 @@ caddy run --config deploy/Caddyfile --adapter caddyfile     # 访客地址 https
   与 `deploy/stop-fileagent.bat`（按端口 8000/5241/8443 找进程杀，不依赖窗口标题）。
   要开机自启就把 start 脚本的快捷方式放进 `shell:startup`（Win+R 输入它即可打开），
   不需要管理员权限，也不需要 NSSM / 计划任务那套。
+- **回收已挂定时**：计划任务 `FileAgent-Cleanup`，每天 04:30 跑 `cleanup_storage.py --apply --vacuum`，输出追加到 `server/logs/cleanup.log`。创建/查看/删除：`schtasks /Query /TN FileAgent-Cleanup`、`schtasks /Delete /TN FileAgent-Cleanup /F`。实测手动 `/Run` 一次跑通（那次清掉了 1 个孤儿上传文件）。
 - **备份**：`D:\backups\fileagent\<日期>\`，一份 `pg_dump -Fc` + `secrets.env` + `MANIFEST.txt`。
   ⚠ **恢复从未演练过**（用户 2026-11-23 明确"备份一次但不用演练"），所以这份备份的可信度
   只到"pg_restore --list 能看到 13 张表的定义与 TABLE DATA、vector 扩展和 logstatus 枚举"为止。
@@ -415,7 +418,7 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 
 ### 3.21 规模上限与 SSRF 防护（2026-11-22，开放给别人用之前加的）
 
-- **三个上限都在 `config.py`，默认值本身就是策略**：`max_upload_mb=20`、`max_pdf_pages=300`、`allow_private_provider_urls=False`。前两个 **0 = 不限制**。为什么默认就开着而不是等上线：上传是"整份读进内存再提取"，不限大小一个请求就能打挂进程；而 PDF 会整份传给 MinerU 云**按页计费**——所以字节闸和页数闸是两件事，20 MB 里塞得下一份两千页的文件，字节没超、钱会超。默认 20 MB 的依据是本机最大的真实夹具 4.3 MB。
+- **三个上限都在 `config.py`，默认值本身就是策略**：`max_upload_mb=20`、`max_pdf_pages=50`（2026-11-23 从 300 降下来：转换类任务**不需要管理员授权模型**就能走 MinerU——`resolve_provider` 管的是 LLM，MinerU 只看服务端 token——所以页数是唯一能挡住「20 个新号 × 20 次 × 300 页 = 12 万页/天」这种账单敞口的闸；本机最大真实夹具 26 页，50 页够用），`allow_private_provider_urls=False`。前两个 **0 = 不限制**。为什么默认就开着而不是等上线：上传是"整份读进内存再提取"，不限大小一个请求就能打挂进程；而 PDF 会整份传给 MinerU 云**按页计费**——所以字节闸和页数闸是两件事，20 MB 里塞得下一份两千页的文件，字节没超、钱会超。默认 20 MB 的依据是本机最大的真实夹具 4.3 MB。
 - **读取必须走 `services/uploads.py`**：`read_capped`（async）与 `read_capped_sync`（同步路由用）分块读、超限即断，**绝不先把整个文件吸进内存再判断**；`check_pdf_pages` 只卡 PDF。两条上传链路（`api/v1/process.py` 的工作文档、`api/v1/specs.py` 的规范库）都必须用它——写两遍判据迟早只改一边。超限返 **413**，页数超限返 **400**。
 - **`check_pdf_pages` 对打不开的 PDF 一律放过**：损坏件、带密码的加密件在 `services/pdf.py` 各有专门文案，这里抢判据会把"文件已加密"误报成"页数超限"，比不拦更糟。
 - **`base_url` 的 SSRF 校验在 `schemas/provider.py:_validate_base_url`，必须解析成 IP 再判**。base_url 不是给用户浏览器打开的链接，而是**服务端**发 POST 的目标，任何登录用户填 `http://169.254.169.254/` 就能让服务器替他去够云元数据。字符串黑名单挡不住 `127.1` / `0177.0.0.1` / `[::1]` / `127.0.0.1.nip.io`，所以先 `getaddrinfo` 再逐个判 `is_private / is_loopback / is_link_local / is_reserved / is_multicast / is_unspecified`。`ProviderUpdate` 也过一遍——否则"建号合规、编辑改成内网"就绕过去了。
@@ -433,7 +436,8 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - **口令强度只作用于注册路径**：`schemas/auth.py:RegisterRequest` 是 `min_length=8` + `_reject_weak_password`（拒"整串只有一个字符类"：纯数字 / 纯字母）。**登录不校验长度**——`LoginRequest` 故意没有约束，否则存量短密码用户会被前端或后端拦在门外，等于自己把人锁住。前端 `Login.vue` 的 `rules` 因此是 `computed`，按 `tab` 切换：注册 tab 才带强度规则。改这条前先想"会不会把已有账号挡在外面"。
   不用"大小写+数字+符号"那套复杂度规则：它逼出 `Password123!`，既难记又是最常见的弱口令模板；长度才是主要防线。
 - **登录失败锁定在 `api/v1/auth.py`**，键是 **(客户端 IP, 用户名小写)**：只按用户名会被拿来锁人（拿错密码把受害者锁在门外），只按 IP 则挡不住分布式脚本。窗口 `login_lockout_minutes` 同时是遗忘时长；**登录成功必须清账**。`login_max_failures=0` = 关闭。不存在的用户名同样计数并返 429，否则 401/429 的差异又能枚举用户名。
-  ⚠ 两条已知边界：① 计数器是**进程内**字典，属 §3.3 reaper / §3.6 并发闸同一个**单 worker 假设**，重启清零；② `request.client.host` 在反向代理后面会全是代理 IP——**上 Nginx 之后必须改读 `X-Forwarded-For` 并校验代理链**，否则这道闸退化成"按 IP 全局锁定"。
+  ⚠ 边界 ①：计数器是**进程内**字典，属 §3.3 reaper / §3.6 并发闸同一个**单 worker 假设**，重启清零。
+- **访客真实 IP 已经打通**（2026-11-23，之前这里是个真缺陷）：前端代理不带 `X-Forwarded-For` 时，后端看到的客户端 IP 全是 `::1`，登录锁定于是退化成「一个人打错密码，所有人一起被锁」。现在三处一起改：`client/vite.config.ts` 两处代理都加 `xfwd: true`；`run_backend.py` 显式传 `forwarded_allow_ips`（默认 `127.0.0.1,::1`，可用 `FORWARDED_ALLOW_IPS` 覆盖）；Caddy 的 `reverse_proxy` 本来就带 XFF。实测经局域网入口打登录，后端日志记的是 `::ffff:10.201.211.9` 而不是 `::1`。**容器化时代理来自 docker 网段，必须把那个网段加进 `FORWARDED_ALLOW_IPS`**，否则 XFF 会被当成不可信来源丢掉。
 - **注册永远只能建出 `user`**：`User(...)` 不读 body 的 role。唯一的 admin 由 `api/v1/admin.py:update_role` 的**护栏 0**固定——`body.role == "admin"` 直接 400，"能设管理员"在开放注册之后本身就是最大的越权面（第二个 admin 能看全站用户）。前端 `Admin.vue` 把"管理员"选项置 `disabled`（保留是为了让现有 admin 那行显示得出名字），但**真正的封死在接口层**。原有的护栏 1（不能改自己）与护栏 2（至少留一名 admin）没被取代。
 - **`max_registrations_per_day` 是全局 DB 判据**（按 `users.created_at` 落在近 24 小时计数，走 `database.db_now()`），`0 = 不限制`。为什么光有 §3.21/§3.20 的按账号配额不够：配额按账号算，脚本注册 50 个号就有 50 份额度，**兜住总消费的其实是注册上限**。本机 `.env` 设 60 而不是 10，是因为五套 e2e 各自都要注册账号，得留够跑回归的余量。
 - **`database.db_now(db)` 是所有"和 DB 时间列比时间"的单一入口**（配额窗口、注册上限都用它）。SQLite 回来的是字符串、Postgres 回来的是带 tz 的 datetime，这里统一成 naive UTC。新增这类判据时**不要再写第二个 `_db_now`**，也不要用应用侧 `datetime.now()`——§7.3 那条容器钟偏差的坑就是这么来的。
@@ -613,7 +617,7 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 ### 7.5 路线状态与未做
 
 - **路线 2026-11-16/17/19/20/21（见 SPEC §9.2）**：阶段 4（Postgres 基建，11-16）、阶段 5（PDF→PPT 大纲流水线，11-17 八切片；**11-21 被 ② 片1 忠实转换替换**）、任务 2（管理员 + 默认模型授权，11-17）、阶段 6（本地 embedding + pgvector 检索 + 条款注入，11-19 A1–A7）、MinerU 扫描件 OCR 兜底（11-20 A–E，见 §3.15 / SPEC §9.15）、① md 转换任务（11-20，零 LLM，见 §3.16 / SPEC §9.16）、**② PDF→PPT 忠实转换片1/片2/片3（11-21 全部完成：块驱动渲染器+B 重排/A 兜底 §3.17 / 坏块 VLM 修复 §3.18 / 版面批评循环 §3.19，详见 SPEC §9.17）** 均已完成。**阶段5 大纲流水线模块（ppt_graph / pptx_builder / ppt_outline / vlm_critique 及其单测）已于 11-21 按用户决定整体删除**（§3.11）、**注册默认配置（4 任务+通用参考文档，§3.20 / SPEC §9.18）已完成**。仍然没做：`interrupt` 人工确认分块方案（要先有 UI）、长文两段式摘要、引用点击回跳规范原文、`format_tier` 落库（改表要先问）。
-- **更大的未做清单**：真正的请求级限流（已做的是按天配额 + 登录锁定，见 §3.21/§3.22，滑动窗口按用户/IP 仍未做）、Alembic、Docker / 多 worker、表格提取（docx 表格和 PDF 表格都不进正文）、加密 PDF 解密、成本价格表（计量只存 token 不算钱）、问题清单写进交付 docx、本地 OCR 推理（云兜底已做，见 §3.15）、**回收的定时化**（§3.25 的脚本是手跑的，没上 cron / 计划任务，长跑部署要补）。**已做**：api_key 字段级加密（§3.24）、上传字节/PDF 页数闸与 SSRF（§3.21）、口令强度与登录锁定（§3.22）、磁盘产物 + 图状态回收（§3.25）。评测台的下一步：真实文档夹具、第二厂商当裁判、同夹具跑重复轮次（单轮会漂）、把 `format_tier` 落进 `llm_calls`（改表结构，做前先问）。
+- **更大的未做清单**：真正的请求级限流（已做的是按天配额 + 登录锁定，见 §3.21/§3.22，滑动窗口按用户/IP 仍未做）、Alembic、Docker / 多 worker、表格提取（docx 表格和 PDF 表格都不进正文）、加密 PDF 解密、成本价格表（计量只存 token 不算钱）、问题清单写进交付 docx、本地 OCR 推理（云兜底已做，见 §3.15）。**已做**：api_key 字段级加密（§3.24）、上传字节/PDF 页数闸与 SSRF（§3.21）、口令强度与登录锁定（§3.22）、磁盘产物 + 图状态回收（§3.25）并已挂成每日计划任务、访客真实 IP（§3.22）、`check_usage_daily.py` 用量体检、`delete_user_data.py` 删号后门。评测台的下一步：真实文档夹具、第二厂商当裁判、同夹具跑重复轮次（单轮会漂）、把 `format_tier` 落进 `llm_calls`（改表结构，做前先问）。
 
 ### 7.6 已落地功能的决策记录
 - **管理员 + 默认模型授权（已于 2026-11-17 实施，简单版）**：`users.role` / `users.can_use_default` / `model_providers.is_public` 三列 + `require_admin` + `/admin/*` 三端点 + 前端 Admin 页。不做 audit / 跨用户 provider 管理（用户拍板）。授权判据集中在 `services/llm.py:provider_usable_by`，改任何 provider 可见性逻辑先看 SPEC §9.11 的实施清单。**admin 路由是 §3.1 隔离铁律的声明式例外**——新加管理端点挂 `require_admin` 即可，不要"顺手"补 user_id 过滤把 admin 视图废掉。

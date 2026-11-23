@@ -77,7 +77,12 @@ class Settings(BaseSettings):
     max_upload_mb: int = 20
     # PDF 页数上限。0 = 不限制。按页计费的东西必须单独限：20 MB 里塞得下一份
     # 两千页的文件，字节没超但钱会超。
-    max_pdf_pages: int = 300
+    # 默认从 300 降到 50（2026-11-23）：局域网开放后算过最坏路径——
+    # 转换类任务**不需要管理员授权模型**就能走 MinerU（`resolve_provider` 管的是 LLM，
+    # MinerU 只看服务端 token），于是 300 页 × 每人 20 次/天 × 20 个新号/天 = 12 万页/天
+    # 的账单敞口。50 页挡住绝大多数正常文档（本机最大真实夹具 26 页），
+    # 真需要长文档的人由管理员临时上调。
+    max_pdf_pages: int = 50
 
     # ---------- 密钥加密 ----------
     # 给 provider.api_key 做字段级加密的 Fernet 密钥（urlsafe base64 的 32 字节）。

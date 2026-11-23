@@ -48,6 +48,9 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:8000',
         changeOrigin: true,
+        // 必须带 X-Forwarded-For，否则后端看到的客户端 IP 全是 ::1，
+        // 登录失败锁定就退化成"按 IP 全局锁定"（AGENTS §3.22 / §2.1）
+        xfwd: true,
       },
     },
   },
@@ -64,6 +67,9 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:8000',
         changeOrigin: true,
+        // 必须带 X-Forwarded-For，否则后端看到的客户端 IP 全是 ::1，
+        // 登录失败锁定就退化成"按 IP 全局锁定"（AGENTS §3.22 / §2.1）
+        xfwd: true,
       },
     },
   },

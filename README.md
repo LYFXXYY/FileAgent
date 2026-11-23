@@ -95,6 +95,8 @@ uv run python -m eval.runner --provider 5 --case clean   # 批改质量：⚠ �
 uv run python cleanup_storage.py           # 回收过期产物、孤儿上传文件与分块图状态（RETENTION_DAYS 控留存期）
 uv run python cleanup_storage.py --apply     # 确认清单后真删；加 --vacuum 让表空间可复用
 uv run python check_doc_refs.py            # 文档里的 `文件:符号` 引用有没有断链
+uv run python check_usage_daily.py           # 用量与成本体检（只读）：注册数、失败率、token、磁盘
+uv run python delete_user_data.py <用户名>      # 删账号及其全部数据（默认只列清单，加 --apply 才删）
 
 # 运行日志（落盘 + 轮转；LOG_FILE 留空则只打 stdout）
 #   server/logs/backend.log       业务日志 + uvicorn 访问日志（谁在打这个服务）
