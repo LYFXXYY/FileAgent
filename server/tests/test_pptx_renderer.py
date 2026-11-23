@@ -20,6 +20,20 @@ def _settings(**kw):
     return SimpleNamespace(**base)
 
 
+def _use_soffice(monkeypatch):
+    """
+    soffice 后端的公共前置。
+
+    除了设置，还必须把 `win_to_wsl_path` 换成假实现：真实实现只认盘符路径，而
+    `tempfile.mkdtemp()` 在 Linux / CI 上给的是 `/tmp/...`，于是代码在**碰到 subprocess
+    之前**就抛"不是盘符绝对路径"。这四个用例要测的是"wsl 命令找不到 / 超时 / rc!=0 /
+    命令怎么拼"，跟跑在什么系统上无关；真实主机才有的那条限制由
+    `test_soffice_rejects_non_drive_tempdir` 单独钉住。
+    """
+    monkeypatch.setattr(renderer, "get_settings", lambda: _settings(ppt_render_backend="soffice"))
+    monkeypatch.setattr(renderer, "win_to_wsl_path", lambda _p: "/mnt/c/fa_ppt_render")
+
+
 # ---------- stub 派发 ----------
 def test_stub_returns_placeholder_pngs(monkeypatch):
     monkeypatch.setattr(renderer, "get_settings", lambda: _settings())
@@ -54,7 +68,7 @@ def test_win_to_wsl_path_rejects_unc():
 
 # ---------- soffice 失败语义（mock subprocess） ----------
 def test_soffice_missing_wsl_binary_raises(monkeypatch):
-    monkeypatch.setattr(renderer, "get_settings", lambda: _settings(ppt_render_backend="soffice"))
+    _use_soffice(monkeypatch)
 
     def _fnf(*a, **k):
         raise FileNotFoundError("wsl")
@@ -65,7 +79,7 @@ def test_soffice_missing_wsl_binary_raises(monkeypatch):
 
 
 def test_soffice_timeout_raises(monkeypatch):
-    monkeypatch.setattr(renderer, "get_settings", lambda: _settings(ppt_render_backend="soffice"))
+    _use_soffice(monkeypatch)
 
     def _timeout(*a, **k):
         raise subprocess.TimeoutExpired(cmd="soffice", timeout=1)
@@ -77,7 +91,7 @@ def test_soffice_timeout_raises(monkeypatch):
 
 def test_soffice_nonzero_rc_raises(monkeypatch):
     """rc!=0 → RenderError 带尾部输出，绝不静默回 stub（静默降级=骗用户渲染好了）"""
-    monkeypatch.setattr(renderer, "get_settings", lambda: _settings(ppt_render_backend="soffice"))
+    _use_soffice(monkeypatch)
     calls = []
 
     def _fake_run(cmd, **k):
@@ -94,7 +108,7 @@ def test_soffice_nonzero_rc_raises(monkeypatch):
 
 def test_soffice_command_shape(monkeypatch):
     """命令必须带独立 UserInstallation profile——默认 profile 有单实例锁，并发会假成功"""
-    monkeypatch.setattr(renderer, "get_settings", lambda: _settings(ppt_render_backend="soffice"))
+    _use_soffice(monkeypatch)
     seen = {}
 
     def _fake_run(cmd, **k):
@@ -111,3 +125,17 @@ def test_soffice_command_shape(monkeypatch):
     assert "-env:UserInstallation=file:///tmp/lo_prof_" in c
     assert "--convert-to pdf" in c
     assert "/mnt/" in c  # 交换路径必须走 NTFS 挂载点，不是 UNC
+
+
+def test_soffice_rejects_non_drive_tempdir(monkeypatch):
+    """
+    真实行为（不 mock 路径转换）：临时目录不是盘符路径就直接报错
+
+    这条是给容器化说的——soffice 后端依赖 Windows + WSL2，Linux 里 `mkdtemp()` 给的是
+    `/tmp/...`，必须**响亮失败**而不是静默退回 stub（静默降级等于骗用户渲染好了）。
+    """
+    monkeypatch.setattr(renderer, "get_settings", lambda: _settings(ppt_render_backend="soffice"))
+    monkeypatch.setattr(renderer.tempfile, "mkdtemp", lambda **k: "/tmp/fa_ppt_render_fake")
+
+    with pytest.raises(RenderError, match="盘符"):
+        render_pptx_to_images(b"x", 1)

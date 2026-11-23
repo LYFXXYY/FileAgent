@@ -596,6 +596,7 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 ### 7.3 测试边界与其他基线事实
 
 - 单测**不连 Postgres 也不出网**：HTTP 走假 client（替 `services.llm.get_client`），provider 路由走内存 SQLite。所以 `pytest` 绿不代表能连上数据库，端到端才是那一层的验证。加测试请保持这个边界，也别引入 `pytest-asyncio`——现有测试直接 `asyncio.run()` 就够。
+- **单测不能依赖主机的路径形态**。踩过的坑（2026-11-23 首次 CI 就红在这里）：`test_pptx_renderer.py` 里 soffice 后端的四个用例只 mock 了 `subprocess.run`，但代码先调 `win_to_wsl_path(tempfile.mkdtemp())`——Windows 给的是 `C:\...` 能过，Linux/CI 给的是 `/tmp/...`，**在碰到 subprocess 之前**就抛"不是盘符绝对路径"，于是四个断言全部对不上。现在统一走 `_use_soffice(monkeypatch)`（顺手把路径转换也换成假的），真实的主机限制由 `test_soffice_rejects_non_drive_tempdir` 单独钉住。凡是碰 `tempfile` / `os.path` / 盘符的测试，都照这个写法。
 - `uploads/`、`outputs/`、`.env`、各类缓存已 ignore；`.env.example` 靠 `.gitignore` 里的 `!.env.example` 例外入库。
 - SPEC §11 示例写 `JWT_EXPIRE_HOURS=2`，本机 `.env` 实际是 24；`.env` 不入库，以本机为准。
 - **时间列只用 DB 时钟（2026-11-17 修）**：全站 13 张表的 timestamp 列都由 `func.now()` 生成，唯独 `operation_logs.processed_at` 曾用应用侧 `datetime.now(UTC)` 写入。容器钟比宿主机快 3–4s，于是出现 `processed_at < uploaded_at` 的倒挂、"处理耗时"相减得负数。现在两处写入（成功路径 + `_mark_failed`）都走 `func.now()`，且 commit 后必须 `db.refresh(log)` 才能把 SQL 表达式读成真实 datetime；启动期 reaper 把僵尸 processing 重置为 failed 时同样要写 `processed_at`（模型约定"每个状态变更都记录 processed_at"）。**新增时间列时不要再引入第二个时钟源**；`services/auth.py` 的 JWT `exp` 属于应用域时间，不走 DB，保持用 `datetime.now(UTC)`。诊断法：`SELECT (processed_at < uploaded_at), count(*) FROM operation_logs WHERE processed_at IS NOT NULL GROUP BY 1;`——修复前留下的 2 条历史行仍是倒挂，属正常。
