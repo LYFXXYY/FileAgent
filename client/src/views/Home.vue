@@ -330,7 +330,22 @@ async function refreshProcessingStatus() {
 
 // ---------- 步骤 1：选任务 ----------
 function onTaskChange() {
-  currentStep.value = 1
+  // 换任务时把上一次的上传结果丢掉，否则会拿着旧文件配新任务
+  uploadResult.value = null
+  homeStore.logId = null
+}
+
+/**
+ * 步骤前进只有一个入口
+ *
+ * 以前是"选中任务就自动跳到上传"，于是从上传点"上一步"回来后再选同一个任务，
+ * el-select 的 change 根本不会触发（值没变），人就卡在第一步出不去。
+ * 现在改成显式点"下一步"，并且每次跳转都 syncToStore —— 上一步/下一步后刷新
+ * 才不会掉回原来的步骤。
+ */
+function goToStep(step: number) {
+  currentStep.value = step
+  syncToStore()
 }
 
 // ---------- 步骤 2：选文件 + 上传 ----------
@@ -561,6 +576,9 @@ function reset() {
             未配置可用的模型提供商，处理会失败。请先去
             <router-link to="/providers">模型提供商</router-link> 添加
           </el-alert>
+          <div class="step-actions">
+            <el-button @click="goToStep(1)" :disabled="!selectedTaskId">下一步</el-button>
+          </div>
         </div>
       </template>
 
@@ -613,7 +631,7 @@ function reset() {
             <span class="file-size">（{{ (pickedFile.size / 1024).toFixed(1) }} KB）</span>
           </div>
           <div class="step-actions">
-            <el-button @click="currentStep = 0">上一步</el-button>
+            <el-button @click="goToStep(0)">上一步</el-button>
             <el-button
               type="primary"
               :disabled="!pickedFile"

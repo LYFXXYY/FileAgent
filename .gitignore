@@ -67,3 +67,7 @@ desktop.ini
 # 数据库导出/迁移前备份：可能含明文密钥，永不入库
 _backup*.sql
 server/_backup*.sql
+
+# SPEC.md 是本地设计文档（缺陷台账、DDL、各阶段交付细节），不对外发布；
+# 仓库里只保留 README.md 与 AGENTS.md。文件本身仍在磁盘上，AGENTS 里对它的引用按本机看
+SPEC.md

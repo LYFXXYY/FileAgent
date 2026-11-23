@@ -1,0 +1,101 @@
+# FileAgent 单机部署（后端 + Postgres + Caddy 伺服前端并反代 /api）
+#
+# ⚠ 这份文件**只生成、没执行过**（2026-11-23 用户要求：生成就好）。
+# 第一次上服务器请按这个顺序来，别直接 up：
+#   1. cp .env.example .env  并填 DB_PASSWORD / JWT_SECRET_KEY / API_KEY_ENC_KEY / SITE_ADDRESS
+#   2. docker compose --profile build run --rm build-frontend   # 产出 client/dist
+#   3. docker compose config -q                                 # 先只解析，不启动
+#   4. docker compose up -d                                     # 再起
+#   5. curl 127.0.0.1:8000/api/health 应为 {"status":"ok","database":"connected"}
+#
+# 密钥丢失的代价写在 AGENTS §3.24：API_KEY_ENC_KEY 丢了，库里所有模型密钥不可恢复。
+
+name: fileagent
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-fileagent}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD 必填，且与 DATABASE_URL 里的密码一致}
+      POSTGRES_DB: ${DB_NAME:-file_agent}
+    volumes:
+      - fileagent-db:/var/lib/postgresql/data
+    # 只绑环回：数据库端口暴露到公网是本项目最不该犯的错（AGENTS §13 上线前置第①条）
+    ports:
+      - "127.0.0.1:5434:5434"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-fileagent} -d ${DB_NAME:-file_agent}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  backend:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    environment:
+      # 主机名写 db（compose 内部网络），不是 localhost——这是容器化最容易漏的一处
+      DATABASE_URL: postgresql+psycopg2://${DB_USER:-fileagent}:${DB_PASSWORD}@db:5434/${DB_NAME:-file_agent}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY 必填}
+      API_KEY_ENC_KEY: ${API_KEY_ENC_KEY:?API_KEY_ENC_KEY 必填，否则模型密钥存不进去也解不开}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # 外呼相关：留空即功能关闭（MinerU 没 token 时扫描件/转换会明确拒收，不会半途失败）
+      MINERU_TOKEN: ${MINERU_TOKEN:-}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1024}
+      # 开放注册的护栏。ALLOW_PRIVATE_PROVIDER_URLS 故意**不透传**：
+      # 生产环境必须是 false，写进这里等于给远程攻击者开 SSRF 后门
+      MAX_PROCESSES_PER_DAY: ${MAX_PROCESSES_PER_DAY:-20}
+      MAX_REGISTRATIONS_PER_DAY: ${MAX_REGISTRATIONS_PER_DAY:-20}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-20}
+      MAX_PDF_PAGES: ${MAX_PDF_PAGES:-300}
+      RETENTION_DAYS: ${RETENTION_DAYS:-30}
+      JWT_EXPIRE_HOURS: ${JWT_EXPIRE_HOURS:-2}
+      # 前端同源走 Caddy，所以 CORS 用不上；只有前后端分源才需要设
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5241}
+    volumes:
+      # 上传原件与产物留在宿主机上，容器重建不会丢（备份口径见 AGENTS §2.2）
+      - ./server/uploads:/app/uploads
+      - ./server/outputs:/app/outputs
+      - ./server/logs:/app/logs
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    image: caddy:2
+    restart: unless-stopped
+    volumes:
+      - ./deploy/Caddyfile.server:/etc/caddy/Caddyfile:ro
+      - ./client/dist:/srv:ro
+      - caddy-data:/data
+      - caddy-config:/config
+      - ./deploy/logs:/var/log/caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - backend
+
+  # 一次性任务：把前端构建产物生成到宿主机 ./client/dist，供 web 只读挂载。
+  # 不进默认启动链，所以放 profiles 里：docker compose --profile build run --rm build-frontend
+  build-frontend:
+    image: node:22-alpine
+    profiles: ["build"]
+    working_dir: /app
+    volumes:
+      - ./client:/app
+      - client-node-modules:/app/node_modules
+    command: sh -c "npm ci && npm run build"
+
+volumes:
+  fileagent-db:
+  caddy-data:
+  caddy-config:
+  client-node-modules:

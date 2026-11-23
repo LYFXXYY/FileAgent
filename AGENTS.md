@@ -1,7 +1,7 @@
 # AGENTS.md — FileAgent
 
 本文件只记录**本项目特有、读代码不容易立刻发现**的约定与陷阱。
-设计背景、Java→Python 对照、完整 API 表、DDL、缺陷修复台账见 [SPEC.md](SPEC.md)（权威设计文档），此处不重复。
+设计背景、Java→Python 对照、完整 API 表、DDL、缺陷修复台账见 [SPEC.md](SPEC.md)（权威设计文档，**本机文件、不入库**，见 §9），此处不重复。
 
 **引用代码位置的写法**：用符号名（`api/v1/process.py:_run_processing`、`schemas/grading.py:_TYPE_ALIASES`），**不写行号**。实测全文 16 处 `file.py:NN` 引用里抽查 8 处已有 4 处指偏——行号随任何一次改动腐烂，符号名不会。
 
@@ -16,7 +16,7 @@
 |---|---|---|---|
 | 批改 / 编辑（`output_format=docx`） | 必需 | 仅 `task.is_grading` 时召回条款（转换类已由互斥排除）；长文**按块各查一次** | 仅扫描件 PDF：OCR 出的 markdown **剥成纯文本**当正文，交付物仍是 diff docx |
 | PDF→PPT（`pptx`） | 不用文本 LLM；VLM 仅两处旁路——坏块修复（`ppt_repair`）与版面批评循环（`ppt_critic`），都要"有坏块/开启循环 且 配了 vision 提供商"（§3.18/§3.19） | 不用 | **同 md，所有 PDF（含文字型）都走**；产物喂块驱动忠实转换渲染器（§3.17） |
-| md 转换（`md`） | **零 LLM 是硬不变式**（不解析 provider、不写 `llm_calls`） | 不用 | **所有 PDF（含文字型）都走**；`docx→md` 走本地 python-docx，零外呼 |
+| md 转换（`md`） | **零 LLM 是硬不变式**（不解析 provider、不写 `llm_calls`）；唯一例外是"Word 正文全在图片里"时的 vision 逐图转写，见 §3.16 | 不用 | **所有 PDF（含文字型）都走**；`docx→md` 走本地 python-docx，零外呼 |
 
 ⚠ 扫描件 PDF 一律进 MinerU，但**只有 md / pptx 任务把 MinerU 版面产物当交付原料**；批改任务拿的是 `markdown_to_plain_text()` 之后的纯文本（守 §3.8 与 docx 同构的不变式），那份 markdown 只作为 structured 三件套落盘留存。
 
@@ -139,6 +139,23 @@ caddy run --config deploy/Caddyfile --adapter caddyfile     # 访客地址 https
   因为 Element Plus 与 Vue 组件会注入内联样式，`connect-src ws:` 因为 Vite dev 的热更新走 websocket。
   实测加完整 CSP 后登录页样式正常、控制台零 violation（**没测过**去掉 style-src 会怎样，别把这条当实测结论）。
   ⚠ 这些头只在走 8443 时生效，直连 5241 没有——所以"给别人用"要发 https 地址。
+- **CI**（`.github/workflows/ci.yml`）：两个 job——后端 `uv sync --frozen` + `uv lock --check` +
+  ruff check/format + pytest；前端 `npm ci` + `npm run build`（就是 vue-tsc 类型门禁）+ `npm test`。
+  能这么精简是因为单测不连库不出网（§7.3）。**CI 里必须给 `DATABASE_URL` 与 `JWT_SECRET_KEY` 占位值**：
+  这两个字段在 `config.py` 里是无默认值的必填项，而 `.env` 不入库，缺了它们 pytest 在 import config
+  时就全线红——这是最容易误判成"代码坏了"的一种失败。
+  五套 e2e 与真实云端冒烟**刻意没进 CI**（需要后端进程 + 假端点 + Postgres + 会花钱），
+  别把 CI 绿当成"e2e 也过了"。
+- **compose**（`docker-compose.yml` + `deploy/Dockerfile` + `deploy/Caddyfile.server` + 根 `.env.example`）：
+  db（pgvector，只绑 `127.0.0.1:5434`）+ backend（走 `run_backend.py` 入口）+ web（Caddy 伺服
+  `client/dist` 并反代 `/api`）。前端产物由一次性服务生成：
+  `docker compose --profile build run --rm build-frontend`。
+  ⚠ **这三份文件只做过语法校验（`docker compose config -q` 与 `caddy validate` 均通过），
+  没有真跑起来验证过**（用户 2026-11-23 要求"生成就好，不用执行"）。第一次上线按
+  `docker-compose.yml` 顶部注释的五步走，别直接 up 就当成功。
+  两处最容易踩的：`DATABASE_URL` 的主机名必须是 `db` 而不是 localhost；
+  Caddy 反代要用 `handle /api/*` 而不是 `handle_path`——后端路由本身带 `/api` 前缀，剥掉就全 404。
+
 - `cors_origins` 默认值已从 `http://localhost:5173` 改成 `http://localhost:5241`：5173 落在
   本机 Windows 保留端口段（5141–5240）内永远绑不上，把它当默认值等于给新环境一个用不了的地址。
   正常部署其实走不到 CORS（前端同源代理 `/api`），只有前后端分源才需要动。
@@ -344,6 +361,15 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - **真实云 zip 命名与假端点不同**（2026-11-20 探测核实）：content_list 带 UUID 前缀（`{uuid}_content_list.json` / `{uuid}_content_list_v2.json`），md 是裸 `full.md`，图在 `images/{sha256}.jpg`。`_unzip_result` 改用**后缀匹配**而非精确 basename，**v2 优先**（带 bbox），v2 损坏回落 v1。`test_mineru_server.py` 的假 zip 已镜像这套命名，e2e 才真的测到后缀匹配逻辑。
 - **`NO_PROXY` 裸 `[::1]` 会让 httpx 抛 InvalidURL**：`config.py:normalize_no_proxy_env()` 剥掉它，`main.py` 启动与 `mineru._get_client` 都调。⚠ `httpx.InvalidURL` **不是** `httpx.HTTPError` 子类，except 要两个都接。⚠ Windows `os.environ` 大小写不敏感（NO_PROXY 与 no_proxy 同键），`test_no_proxy.py` 按 `sys.platform` 分支，小写键测试在 win32 skip。
 - **MinerU 对拉丁字符串可能插空格**（实测合成文字 PDF："P DF 转 M ar k d o w n"，中文段落干净）：这是云端版面识别对该类输入的产出特性，我方管道如实透传，**不是转换缺陷**，别在 docx_md / ocr 层"顺手修"。
+- **"零 LLM"有一条例外支路**（2026-11-23 加）：docx 的正文全在图片里时，本地提取出来是空的，
+  以前直接报"文档没有可转换的正文内容"——文档明明有内容，只是长在图片上。现在
+  `services/docx_image_md.py:needs_image_fallback` 判定成立（本地正文 < 40 字 **且** 文档里有
+  ≥8 KB 的位图）才走视觉模型逐图转写，计量 purpose 是 `md_image`、provider 走
+  `resolve_provider(user, None, "vision")`。**有正常文字的 Word 仍然一行外呼都不发**
+  （`test_docx_with_text_never_calls_the_model` 钉着），阈值就是为了放过"正文正常 + 夹几张插图"。
+  没有 vision 提供商时**不许静默跳过**（那等于交付一份空 md，用户以为文档本来没内容），
+  必须给可行动文案：添加 vision 模型 / 或把 Word 另存为 PDF 走 MinerU 版面识别。
+  ⚠ 别以为 docx 能直接送 MinerU：`parse_pdf_via_mineru` 只吃 PDF 字节，这条支路里 MinerU 不参与。
 
 ### 3.17 PDF→PPT 忠实转换（② 片1，2026-11-21，替换阶段5大纲路径）
 
@@ -501,6 +527,7 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 - 401 处理要排除 `/auth/login`（那是密码错误），用 `window.location.replace` 带 `redirect` 参数（拦截器层拿不到 router 实例）。
 - 自动重试**只针对无响应的 GET**，1 次 / 800ms；写操作绝不重试。
 - 处理结果**一律靠轮询 `status` 拿**，不要依赖 `POST /process` 的响应体（它只返回 processing）。`POLL_INTERVAL=5000`，等待上限是**墙钟**：`stores/home.ts:pollDeadlineAt`（`POLL_TIMEOUT_MS`=20 分钟，持久化，**切页与刷新都不重置**）。以前是 `MAX_POLL_COUNT=120` 计数，但 `startPolling()` 每次把计数清零而 `onActivated` 会重新调它——来回切页就永远到不了上限。超时**不是失败**：只 `stopPolling`，出口是"继续等待"（`resumeWaiting`，只重查状态）或去日志页；**绝不能在超时态把按钮挂回 `doProcess`**，那会重跑整条流水线再烧一次 MinerU 配额与 token。预算必须大于后端最坏路径（`mineru_max_wait=600s` + 修复与版面两段 VLM 外呼）。
+- **工作台的步骤跳转只有一个入口 `goToStep(n)`**（它同时 `syncToStore()`）。以前是「选中任务就自动跳到上传」，于是从上传点「上一步」回来后再选同一个任务，el-select 的 `@change` 根本不会触发（值没变），人就卡在第一步出不去——**别在 select 的 change 里做跳转**。另外凡是改 `currentStep` 的地方都要走 syncToStore，否则刷新会掉回原步骤（store 的持久化只认它自己的字段）。
 - `AppLayout.vue` 的 `<keep-alive>` 包住 router-view，工作台切页不销毁 → 必须成对处理 `onActivated`（恢复状态 + 重启轮询）/ `onDeactivated`（停轮询）。
 - **Pinia setup store 只用 `ref` + `watch`**，不要用对象字面量 getter/setter 代理闭包变量：Pinia 会把访问器转成普通数据属性，导致 `restore()` 后 UI 拿不到值、setter 不触发保存（`client/src/stores/home.ts` 文件头"持久化策略"注释已写明这条）。
 - 持久化用 `sessionStorage`（key `fileagent_home_state`），**不存 File 对象**，恢复时 `pickedFile` 置 null。
@@ -627,5 +654,5 @@ pydantic-settings 只把 `.env` 注入 Settings 对象，**不写 `os.environ`**
 ## 9. 提交
 
 SPEC §3.3 约定 conventional commits（`feat: ...` / `fix: ...`），现有历史是中文短语（"优化1"/"优化2"）；新提交按 SPEC 约定写。
-**文档分两处**：`AGENTS.md` / `SPEC.md` / `README.md` 在仓库根且入库；`docs/` 放设计参考（`UI-REFERENCE.md`——§4 引它当色彩与形态依据）与阶段交接记录（`HANDOFF-*.md`，本机快照）。这两类当前**未入库**：要长期给协作者看的只有 UI-REFERENCE，需要时 `git add docs/UI-REFERENCE.md`；HANDOFF 是会话产物，不必入库。`check_doc_refs.py` 的 `DOCS` 带着 `docs/UI-REFERENCE.md`，移动文档要同步改那里。
+**文档分三处**（2026-11-23 起）：**入库的只有 `README.md` 与 `AGENTS.md`**。`SPEC.md` 已加进 `.gitignore`（本地设计文档，含缺陷台账与 DDL 细节，不对外发布）——**文件仍在磁盘上，本文所有 `SPEC §x` 引用都按本机文件看**。`docs/` 放设计参考（`UI-REFERENCE.md`——§4 引它当色彩与形态依据）与阶段交接记录（`HANDOFF-*.md`，会话产物），同样不入库；真要长期给协作者看的只有 UI-REFERENCE，需要时 `git add docs/UI-REFERENCE.md`。`check_doc_refs.py` 的 `DOCS` 带着 `docs/UI-REFERENCE.md`，移动文档要同步改那里。
 **不要自动 push / 部署 / 发布**；删文件、删数据、清历史前先问。

@@ -21,7 +21,7 @@
 - **结构化批改**：问题清单只让模型逐字摘原文片段，位置由后端匹配；匹配不到就标「未定位」，绝不把批注指到错位置
 - **长文档分块批改**：批改类超过预算（默认 6000 字）时自动切块并行批改，再按原位置拼回一篇——偏移仍是整篇偏移，清单照旧可点。跑到一半失败重跑，**已成功的块不再重复计费**
 - **PDF → PPT 忠实转换**：MinerU 版面块驱动渲染——按阅读顺序重排为主、整页忠实兜底；表格解析成原生可编辑 PPT 表；解析坏块在配置视觉模型后以区域原图为底自动修复（产物标注"LLM 修复"），版面还有问题则由视觉批评循环调整布局（只调版面不改文字）
-- **文档 → Markdown**：零大模型——Word 本地免费转换；PDF 走 MinerU 版面识别，保留标题层级、表格与图片引用，带图时打包 zip 下载
+- **文档 → Markdown**：Word 本地免费转换、不调大模型；PDF 走 MinerU 版面识别，保留标题层级、表格与图片引用，带图时打包 zip 下载。Word 的正文若全在图片里，会用支持视觉的模型逐图转写（没有这类模型时给出可行动的替代建议，而不是只报不可处理）
 - **规范库与条款召回**：上传校对规范 / 格式要求（`.docx` / `.pdf`）→ 按**条款边界**切块入库 → 批改时按相关度召回 top-k 条款注入提示词。本地 embedding 端点 + pgvector 精确余弦扫描 + 字二元组词法召回，两路 RRF 融合
 - **调用计量**：每次外呼记 token / 耗时 / 重试次数 / 用途到 `llm_calls`，成本可追溯（embedding 与 MinerU 按页计费没有 token，不编数字入账，成本用字符数代理）
 - **操作日志**：分页 + 状态筛选 + 文件名搜索 + 批注条数，失败可重试，完成可重新下载
@@ -105,15 +105,20 @@ npm run build                 # vue-tsc 类型检查 + 构建（唯一的类型�
 npm test                      # 前端用例（vitest，只测纯逻辑）
 ```
 
+## 部署
+
+- **CI**：`.github/workflows/ci.yml`（push / PR 自动跑后端 ruff + pytest、前端构建 + vitest）
+- **容器编排**：`docker compose`（`docker-compose.yml` + `deploy/Dockerfile` + `deploy/Caddyfile.server`）。
+  先 `cp .env.example .env` 填 `DB_PASSWORD` / `JWT_SECRET_KEY` / `API_KEY_ENC_KEY` / `SITE_ADDRESS`，
+  再 `docker compose --profile build run --rm build-frontend` 生成前端产物，最后 `docker compose up -d`。
+  `docker-compose.yml` 顶部有首次上线的推荐顺序，照着走即可。
+- **局域网试用**（不依赖容器）：`deploy/start-fileagent.bat [https]` / `stop-fileagent.bat`
+
 ## 文档
 
-- [SPEC.md](SPEC.md) — 设计指南：Java→Python 对照、各阶段设计与交付、DDL、API 表、缺陷修复台账、§13 开放使用与部署加固
 - [AGENTS.md](AGENTS.md) — 编码智能体须知：项目约定、安全底线、已知陷阱与当前基线
-- `docs/` — 设计参考（`UI-REFERENCE.md`）与阶段交接记录（`HANDOFF-*.md`）；当前未入库，要长期共享就 `git add docs/UI-REFERENCE.md`
+- `docs/` — 设计参考（`UI-REFERENCE.md`）与阶段交接记录（`HANDOFF-*.md`），本机工作文档，不入库
 - `deploy/` — 局域网入口与启停：`start-fileagent.bat [https]` / `stop-fileagent.bat`、`Caddyfile`（8443 反代 + 安全响应头）
 
 想让别人连上（同 WiFi 试用）：`npm run dev` 或 `npm run preview` 都已绑 0.0.0.0，后端保持只绑环回即可（`/api` 由 Vite 在本机反代）。访客地址 `http://<本机IP>:5241`；要加密就再跑一层 Caddy：`caddy run --config deploy/Caddyfile --adapter caddyfile`，入口 `https://<本机IP>:8443`（本机 443 已被其他软件占用）。**还有一步是界面里的**：新注册的用户默认不能用任何模型，要在「用户管理」勾上「可使用官方默认模型」，否则他点处理只会得到一条失败。防火墙规则、端口保留段与根证书分发的实测坑见 AGENTS.md §2.1。
 
-## 还没做
-
-请求级滑动窗口限流（现有的是按天配额 + 登录失败锁定，属粗粒度替代）、Alembic 迁移、多 worker 部署、docx/PDF 表格提取进批改正文、加密 PDF 解密、把问题清单写进交付 docx、长文档分块路径的人工确认分块方案、把回收脚本挂上定时器（现在是手跑 `cleanup_storage.py`）。详见 AGENTS.md §7、SPEC.md §13。

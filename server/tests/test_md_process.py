@@ -13,12 +13,14 @@ import asyncio
 import io
 import json
 import os
+import random
 import zipfile
 
 import httpx
 import pytest
 from docx import Document
 from fastapi import HTTPException
+from PIL import Image
 from pydantic import ValidationError
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -31,6 +33,7 @@ from models.operation_log import LogStatus, OperationLog
 from models.task import Task
 from models.user import User
 from schemas.task import TaskCreate, TaskUpdate
+from services.errors import CODE_MODEL_UNAVAILABLE
 from services.mineru import MinerUError, MinerUResult
 from services.ocr import markdown_to_plain_text
 
@@ -396,3 +399,160 @@ def test_md_download_ignores_non_image_dirs(session, dirs):
     _, filename, _ = process._build_md_download(log, "报告")
     assert filename.endswith(".md")
     assert os.path.isdir(dest)  # 留存不受下载影响
+
+
+# ---------- 图片型 Word 的视觉兜底（md 转换唯一会外呼的支路） ----------
+class _VisionProvider:
+    id = 7
+    name = "vision-mock"
+
+
+def _png(seed: int, size=(96, 96)) -> bytes:
+    """
+    真随机噪声 PNG。
+
+    体积必须盖过 `MIN_IMAGE_BYTES`（8 KB），否则会被当成 logo/分隔线过滤掉，
+    测不到正路；渐变图压得动，所以这里用逐像素随机。seed 不同 → 内容不同，
+    否则 docx_image_md 按哈希去重成一张。
+    """
+    rng = random.Random(seed)
+    img = Image.new("RGB", size)
+    img.putdata(
+        [
+            (rng.randrange(256), rng.randrange(256), rng.randrange(256))
+            for _ in range(size[0] * size[1])
+        ]
+    )
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    assert len(buf.getvalue()) > 8 * 1024, "噪声图没达到体积门槛，测试会测到错分支"
+    return buf.getvalue()
+
+
+def _docx_images_only(count: int = 2, text: str = "") -> bytes:
+    """每张图内容都不同，否则 docx_image_md 按哈希去重成一张"""
+    doc = Document()
+    if text:
+        doc.add_paragraph(text)
+    for i in range(count):
+        doc.add_picture(io.BytesIO(_png(i)))
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def _stub_vision(monkeypatch, recorded, contents=None, raise_at=None, no_provider=False):
+    """把"解析 vision 提供商 / 外呼 / 计量"三个接缝换成假的：不出网、不碰真实 Postgres"""
+    from services import docx_image_md
+    from services.llm import LLMError, LLMResult
+
+    if no_provider:
+
+        def _raise(db, uid, pid, cap):
+            raise LLMError("当前账号没有可用的模型提供商", code=CODE_MODEL_UNAVAILABLE)
+
+        monkeypatch.setattr(process, "resolve_provider", _raise)
+        return
+
+    monkeypatch.setattr(process, "resolve_provider", lambda db, uid, pid, cap: _VisionProvider())
+    state = {"n": 0}
+
+    async def fake_chat(messages, provider, **kwargs):
+        i = state["n"]
+        state["n"] += 1
+        if raise_at is not None and i == raise_at:
+            raise RuntimeError("视觉端点挂了")
+        text = contents[i] if contents and i < len(contents) else "识别出的表格内容"
+        return LLMResult(
+            content=text,
+            prompt_tokens=10,
+            completion_tokens=5,
+            total_tokens=15,
+            latency_ms=20,
+            model_name="vision-mock",
+            finish_reason="stop",
+            attempts=1,
+        )
+
+    async def fake_meter(log, ref, *, purpose, result=None, error=None, attempts=1):
+        recorded.append((purpose, ref[1], error))
+
+    monkeypatch.setattr(docx_image_md, "chat", fake_chat)
+    monkeypatch.setattr(process, "_meter", fake_meter)
+
+
+def test_image_only_docx_without_vision_gives_actionable_failure(session, dirs, monkeypatch):
+    """没有 vision 模型时必须给"下一步该干什么"，不能只说不可处理"""
+    upload, _ = dirs
+    u = _user(session)
+    t = _task(session, u)
+    _write(upload, "scan.docx", _docx_images_only(2))
+    log = _log(session, u, t, "scan.docx")
+    _stub_vision(monkeypatch, [], no_provider=True)
+
+    asyncio.run(process._run_md_conversion(session, log))
+
+    assert log.status == LogStatus.FAILED
+    assert "vision" in log.error_message
+    assert "另存为 PDF" in log.error_message
+    assert CODE_MODEL_UNAVAILABLE in log.error_message
+    assert session.query(LlmCall).count() == 0
+
+
+def test_image_only_docx_transcribed_into_markdown(session, dirs, monkeypatch):
+    upload, _ = dirs
+    u = _user(session)
+    t = _task(session, u)
+    _write(upload, "scan.docx", _docx_images_only(2))
+    log = _log(session, u, t, "scan.docx")
+    recorded: list = []
+    _stub_vision(monkeypatch, recorded, contents=["# 图一标题", "| 项目 | 数值 |"])
+
+    asyncio.run(process._run_md_conversion(session, log))
+
+    assert log.status == LogStatus.DONE
+    assert "## 图片 1" in log.processed_content
+    assert "| 项目 | 数值 |" in log.processed_content
+    assert log.provider_name == "vision-mock"  # 真外呼过就要写模型名（同 PPT 支路）
+    assert [r[0] for r in recorded] == ["md_image", "md_image"]
+
+
+def test_one_image_failing_still_delivers_the_rest(session, dirs, monkeypatch):
+    """单图失败不整体判死：结果里留一句说明，其余照常交付"""
+    upload, _ = dirs
+    u = _user(session)
+    t = _task(session, u)
+    _write(upload, "scan.docx", _docx_images_only(2))
+    log = _log(session, u, t, "scan.docx")
+    recorded: list = []
+    _stub_vision(monkeypatch, recorded, contents=["第一张的内容", "第二张的内容"], raise_at=0)
+
+    asyncio.run(process._run_md_conversion(session, log))
+
+    assert log.status == LogStatus.DONE
+    assert "第 1 张图片识别失败" in log.processed_content
+    assert "第二张的内容" in log.processed_content
+    assert "第一张的内容" not in log.processed_content
+    assert len(recorded) == 2  # 失败那次也要记账，否则看不出烧过钱
+
+
+def test_docx_with_text_never_calls_the_model(session, dirs, monkeypatch):
+    """不变式：正文正常（哪怕夹着图片）就一行外呼都不发"""
+    upload, _ = dirs
+    u = _user(session)
+    t = _task(session, u)
+    body = (
+        "这是一段足够长的正文内容，用来验证本地转换路径不会为了文档里夹着的插图"
+        "去调用视觉模型——零 LLM 这条不变式对正常 Word 文档必须继续成立。"
+    )
+    _write(upload, "mix.docx", _docx_images_only(1, text=body))
+    log = _log(session, u, t, "mix.docx")
+    recorded: list = []
+    _stub_vision(monkeypatch, recorded)
+
+    asyncio.run(process._run_md_conversion(session, log))
+
+    assert log.status == LogStatus.DONE
+    assert body in log.processed_content
+    assert recorded == []
+    assert log.provider_name is None

@@ -1,0 +1,77 @@
+name: CI
+
+# 每次 push 与 PR 都跑一遍本地那套门禁：后端 ruff + pytest，前端 vue-tsc 构建 + vitest。
+# 为什么 CI 能只靠这两步：`uv run pytest` 这套单测**不连 Postgres、不出网**
+# （HTTP 走假 client、DB 走内存 SQLite，AGENTS §7.3），所以不需要起服务容器。
+# e2e 五套需要后端 + 假端点 + Postgres 三者，本工作流刻意不跑（见文末说明）。
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    env:
+      # config.py 的 Settings 把这两项声明成**无默认值的必填字段**，而仓库里没有 .env
+      # （.env 已 gitignore）。单测不连库、不签 token，所以这里给占位值就够；
+      # 缺了它们，pytest 在 import config 时就会 ValidationError 全线红。
+      DATABASE_URL: postgresql+psycopg2://ci:ci@localhost:5434/ci_placeholder
+      JWT_SECRET_KEY: ci-only-placeholder-secret-not-used-by-unit-tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-caching: true
+
+      - name: 安装依赖（含 dev 组：pytest / ruff）
+        run: uv sync --frozen
+
+      - name: 依赖锁一致性
+        run: uv lock --check
+
+      - name: ruff lint
+        run: uv run ruff check .
+
+      - name: ruff 格式检查
+        run: uv run ruff format --check .
+
+      - name: 单元测试
+        run: uv run pytest -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: 安装依赖
+        run: npm ci
+
+      # 这一步就是本项目的类型门禁：vue-tsc -b && vite build，没有单独的 tsc 步骤
+      - name: 类型检查 + 构建
+        run: npm run build
+
+      - name: 前端单测（vitest，只测 SFC 之外的纯逻辑）
+        run: npm test
+
+  # 刻意没跑的东西，别误以为 CI 覆盖了：
+  # - 五套 e2e（test_e2e*.py）：需要后端进程 + 假 LLM/VLM/MinerU 端点 + 真实 Postgres，
+  #   而且它们会注册临时账号、写 uploads/，在 CI 里跑要先解决服务容器与清理策略；
+  # - 真实云端冒烟（MinerU / 真模型）：会花钱，且绝不能把用户文档送进第三方云；
+  # - 文档引用体检 check_doc_refs.py：本地一条命令，暂未纳入 CI。

@@ -39,6 +39,12 @@ from models.task import Task
 from models.user import User
 from schemas.grading import GRADING_JSON_SCHEMA, GradingIssue, GradingResult
 from schemas.process import ChunkProgressResponse, ProcessResponse, UploadResponse
+from services.docx_image_md import (
+    compose_markdown,
+    list_images,
+    needs_image_fallback,
+    transcribe_images,
+)
 from services.docx_md import docx_to_markdown
 from services.errors import (
     CODE_DOC_EMPTY,
@@ -46,6 +52,7 @@ from services.errors import (
     CODE_FILE_MISSING,
     CODE_FILE_READ,
     CODE_INTERNAL,
+    CODE_LLM_FAILED,
     CODE_MINERU_FAILED,
     CODE_MINERU_UNREACHABLE,
     CODE_OCR_EMPTY,
@@ -509,13 +516,74 @@ def _mark_done(db: Session, log: OperationLog, **fields: object) -> None:
     db.refresh(log)
 
 
+async def _md_docx_via_vision(
+    db: Session,
+    log: OperationLog,
+    local_text: str,
+    images: list[tuple[str, bytes]],
+    vector_count: int,
+) -> str | None:
+    """
+    图片型 Word 的视觉兜底：返回拼好的 markdown；返回 None 表示已把日志标成 failed
+
+    没有 vision 提供商时**不能静默跳过**——跳过就等于交付一份空 md，用户会以为文档
+    本来就没内容（§3.8"扫描件绝不回空文本"同一条理由）。所以这里给的是可行动文案 +
+    两条替代路径（用户 2026-11-23 拍板：只有 MinerU 用不上且模型没有视觉能力，
+    才允许返回"不可处理"）。
+    """
+    try:
+        provider = resolve_provider(db, log.user_id, None, "vision")
+    except LLMError as e:
+        _mark_failed(
+            db,
+            log,
+            "这份 Word 的正文都在图片里，本地转换提取不到文字，"
+            "而当前账号还没有支持视觉（vision）的模型，无法识别图片内容。"
+            "建议：① 在「模型提供商」添加一个能力含 vision 的模型后重试；"
+            "② 或在 Word 里「另存为 PDF」后重新上传——PDF 会走 MinerU 版面识别，"
+            "图片里的文字也能取出来。",
+            code=e.code,
+        )
+        return None
+
+    provider_ref = (provider.id, provider.name)
+
+    async def _on_result(result, error, attempts):
+        await _meter(
+            log, provider_ref, purpose="md_image", result=result, error=error, attempts=attempts
+        )
+
+    chunks, notes = await transcribe_images(images, provider, on_result=_on_result)
+    if not chunks:
+        detail = f" 失败详情：{notes[0]}" if notes else ""
+        _mark_failed(
+            db,
+            log,
+            f"图片识别没有拿到任何内容（这份文档里有 {len(images)} 张可识别图片）。"
+            "建议换一份图片更清晰的文档，或把 Word 另存为 PDF 后重转。" + detail,
+            code=CODE_LLM_FAILED,
+        )
+        return None
+
+    # 真发生过外呼就写上模型名，界面与计量口径一致（同 PPT 支路的做法）
+    log.provider_name = provider.name
+    if notes:
+        logger.warning("md 图片兜底部分失败 log_id=%s：%s", log.id, "；".join(notes))
+    markdown = compose_markdown(local_text, chunks, vector_count)
+    if notes:
+        markdown += "\n" + "\n".join(f"> {n}" for n in notes) + "\n"
+    return markdown
+
+
 async def _run_md_conversion(db: Session, log: OperationLog) -> None:
     """
     md 转换任务的后台处理：docx 走本地转换（免费），PDF 一律走 MinerU。
 
-    零 LLM：不选 provider、不写 llm_calls（同 MinerU/embedding 的成本边界）。
-    processed_content 存 markdown 原文（含表格与图片引用）；PDF 路径同时把
-    归一化纯文本写回 original_content，前端预览与批改路径同源。
+    零 LLM 对**有文字的文档**成立：不选 provider、不写 llm_calls。唯一例外是
+    "Word 的正文都在图片里"这一条支路（`_md_docx_via_vision`），它会用 vision 模型
+    逐图转写并记 `md_image` 计量——不这么做的话用户拿到的是一条"没有可转换的正文"，
+    而文档明明有内容。processed_content 存 markdown 原文（含表格与图片引用）；
+    PDF 路径同时把归一化纯文本写回 original_content，前端预览与批改路径同源。
     """
     if not log.stored_filename:
         _mark_failed(db, log, "文件落盘记录缺失，请重新上传", code=CODE_FILE_MISSING)
@@ -535,7 +603,13 @@ async def _run_md_conversion(db: Session, log: OperationLog) -> None:
         except Exception as e:
             _mark_failed(db, log, f"Word 转 Markdown 失败：{e}", code=CODE_DOCX_MD)
             return
-        if not markdown.strip():
+        images, vector_count = await run_in_threadpool(list_images, file_bytes)
+        if needs_image_fallback(markdown, images):
+            # 正文都在图片里：这是 md 转换**唯一**会外呼的支路，见 services/docx_image_md.py
+            markdown = await _md_docx_via_vision(db, log, markdown, images, vector_count)
+            if markdown is None:
+                return
+        elif not markdown.strip():
             _mark_failed(db, log, "文档没有可转换的正文内容", code=CODE_DOC_EMPTY)
             return
         log.processed_content = markdown

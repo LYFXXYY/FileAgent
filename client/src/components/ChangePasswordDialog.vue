@@ -76,11 +76,6 @@ async function submit() {
 
 <template>
   <el-dialog v-model="visible" title="修改密码" width="460px" class="pwd-dialog">
-    <p class="dialog-note">
-      改成功后当前会话会被退出，请用新密码重新登录。已登录的其他设备要等它的
-      token 自然过期（默认 2 小时）——本项目没有服务端会话表，做不到即时全端失效。
-    </p>
-
     <el-form ref="formRef" :model="form" :rules="rules" label-position="top" @submit.prevent="submit">
       <el-form-item label="原密码" prop="old_password">
         <el-input
@@ -122,13 +117,6 @@ async function submit() {
 </template>
 
 <style scoped>
-.dialog-note {
-  margin: 0 0 18px;
-  font-size: var(--fa-text-xs);
-  line-height: 1.75;
-  color: var(--el-text-color-secondary);
-}
-
 .field-tip {
   width: 100%;
   margin: 6px 0 0;

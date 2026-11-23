@@ -1,0 +1,43 @@
+# 生产/服务器用的 Caddy 配置（docker-compose 的 web 服务挂载这份）
+# 与局域网那份（deploy/Caddyfile）的差别：这份伺服的是**构建产物** client/dist，
+# 并把 /api 转给 backend 容器；那份是把 8443 转发给本机 dev/preview。
+#
+# ⚠ 同样**没执行过**。要真证书需要：
+#   - 有域名：SITE_ADDRESS 填域名，Caddy 自动签 Let's Encrypt（需要 80/443 公网可达）
+#   - 没域名：SITE_ADDRESS 填 IP 时改成 `tls internal`，浏览器会有一次警告
+
+{$SITE_ADDRESS:localhost} {
+	encode zstd gzip
+
+	# 与 deploy/Caddyfile 同一套响应头。刻意不加 HSTS：
+	# 自签/内网地址上加了，将来换端口或临时回退 http 调试会被浏览器硬拒
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+		Permissions-Policy "geolocation=(), microphone=(), camera=()"
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss: blob:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'"
+	}
+
+	# API 走后端容器。注意用 handle 而不是 handle_path：
+	# 后端的路由本身就带 /api 前缀（/api/v1/...、/api/health），剥掉前缀会全部 404
+	handle /api/* {
+		reverse_proxy backend:8000
+	}
+
+	# 其余交给静态文件；找不到的一律回落 index.html，这样 Vue Router 的
+	# history 模式刷新 /tasks 也不会 404
+	handle {
+		root * /srv
+		try_files {path} {path} /index.html
+		file_server
+	}
+
+	log {
+		output file /var/log/caddy/access.log {
+			roll_size 5MiB
+			roll_keep 5
+		}
+		format console
+	}
+}
