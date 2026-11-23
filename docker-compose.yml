@@ -2,7 +2,7 @@
 #
 # ⚠ 这份文件**只生成、没执行过**（2026-11-23 用户要求：生成就好）。
 # 第一次上服务器请按这个顺序来，别直接 up：
-#   1. cp .env.example .env  并填 DB_PASSWORD / JWT_SECRET_KEY / API_KEY_ENC_KEY / SITE_ADDRESS
+#   1. cp .env.compose.example .env  并填 DB_PASSWORD / JWT_SECRET_KEY / API_KEY_ENC_KEY / SITE_ADDRESS
 #   2. docker compose --profile build run --rm build-frontend   # 产出 client/dist
 #   3. docker compose config -q                                 # 先只解析，不启动
 #   4. docker compose up -d                                     # 再起

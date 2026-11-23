@@ -12,8 +12,17 @@ venv/
 # 环境变量（含密码，绝对不能提交）
 .env
 .env.*
-# 例外：配置模板要入库（只有占位值，无真实密钥）
+# 例外：两份配置模板要入库（只有占位值，无真实密钥）
+#   server/.env.example = 后端应用读的
+#   .env.compose.example = docker compose 读的（放根目录才生效，所以名字要区分开）
 !.env.example
+!.env.compose.example
+
+# 项目内部文档：约定、陷阱、缺陷台账、DDL 与阶段交付记录，都不对外发布。
+# 文件仍在磁盘上，README 里不引用它们，AGENTS 内部互引按本机文件看
+AGENTS.md
+SPEC.md
+docs/
 
 # IDE
 .vscode/
@@ -68,6 +77,3 @@ desktop.ini
 _backup*.sql
 server/_backup*.sql
 
-# SPEC.md 是本地设计文档（缺陷台账、DDL、各阶段交付细节），不对外发布；
-# 仓库里只保留 README.md 与 AGENTS.md。文件本身仍在磁盘上，AGENTS 里对它的引用按本机看
-SPEC.md
